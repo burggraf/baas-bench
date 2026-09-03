@@ -21,6 +21,7 @@ pocketbase
 trailbase'
 actual=$($BAAS list) || fail "list command failed"
 [ "$actual" = "$expected" ] || fail "unexpected service list"
+grep -q '^NHOST_TRAEFIK_IMAGE=traefik:v3\.6\.1@sha256:' "$ROOT/versions.env" || fail "Nhost Traefik compatibility image is not pinned"
 
 if "$BAAS" setup unknown >/dev/null 2>&1; then
   fail "unknown service was accepted"
@@ -37,6 +38,31 @@ cat > "$TMP/bin/curl" <<'EOF'
 #!/bin/sh
 echo "curl $*" >> "$BAAS_TEST_LOG"
 case "$*" in *"${BAAS_TEST_FAIL_URL:-never-match}"*) exit 22;; esac
+output=
+url=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) output=$2; shift 2 ;;
+    http*) url=$1; shift ;;
+    *) shift ;;
+  esac
+done
+if [ -n "$output" ]; then
+  case "$url" in
+    */docker-compose.yml) printf '%s\n' 'services: {}' > "$output" ;;
+    */.env) cat > "$output" <<'ENV'
+_APP_OPENSSL_KEY_V1=your-secret-key
+_APP_EXECUTOR_SECRET=your-secret-key
+_APP_DB_PASS=password
+_APP_DB_ROOT_PASS=rootsecretpassword
+ENV
+      ;;
+    */mongo-entrypoint.sh) printf '%s\n' '#!/bin/sh' > "$output" ;;
+    */mongo-init.js) printf '%s\n' '// init' > "$output" ;;
+    *) exit 22 ;;
+  esac
+  exit 0
+fi
 printf '%s\n' '{"status":"ok"}'
 EOF
 chmod +x "$TMP/bin/docker" "$TMP/bin/curl"
@@ -52,6 +78,10 @@ up_line=$(grep -n ' up -d' "$BAAS_TEST_LOG" | head -1 | cut -d: -f1)
 grep -q "docker compose .*--env-file $BAAS_RUNTIME_DIR/directus/.env .*services/directus/compose.yml" "$BAAS_TEST_LOG" || fail "Directus runtime environment missing"
 grep -q 'curl .*localhost:8055/server/health' "$BAAS_TEST_LOG" || fail "Directus smoke call missing"
 [ "$(ls -l "$BAAS_RUNTIME_DIR/directus/.env" | cut -c5-10)" = '------' ] || fail "Directus secrets are not private"
+
+"$BAAS" setup appwrite >/dev/null
+[ -f "$BAAS_RUNTIME_DIR/appwrite/mongo-entrypoint.sh" ] || fail "Appwrite Mongo entrypoint was not downloaded"
+[ -f "$BAAS_RUNTIME_DIR/appwrite/mongo-init.js" ] || fail "Appwrite Mongo init script was not downloaded"
 
 mkdir -p "$BAAS_RUNTIME_DIR/supabase/docker"
 printf '%s\n' 'SUPABASE_PUBLISHABLE_KEY=test-key' > "$BAAS_RUNTIME_DIR/supabase/docker/.env"

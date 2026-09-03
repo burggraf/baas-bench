@@ -124,9 +124,16 @@ setup_appwrite() {
     set_env "$dir/.env" _APP_EXECUTOR_SECRET "$(random_hex 32)"
     printf '%s\n' "$APPWRITE_REF" > "$dir/.baas-ref"
   fi
+  for path in mongo-entrypoint.sh mongo-init.js; do
+    if [ ! -f "$dir/$path" ]; then
+      rm -rf "$dir/$path"
+      download_at_ref appwrite/appwrite "$APPWRITE_REF" "$path" "$dir/$path"
+    fi
+  done
   grep -q '^_APP_DB_PASS=password$' "$dir/.env" && set_env "$dir/.env" _APP_DB_PASS "$(random_hex 24)"
   grep -q '^_APP_DB_ROOT_PASS=rootsecretpassword$' "$dir/.env" && set_env "$dir/.env" _APP_DB_ROOT_PASS "$(random_hex 24)"
-  chmod 600 "$dir/.env"
+  chmod 600 "$dir/.env" "$dir/mongo-init.js"
+  chmod 700 "$dir/mongo-entrypoint.sh"
 }
 
 setup_nhost() {
@@ -139,9 +146,12 @@ setup_nhost() {
     set_env "$dir/.env" JWT_SECRET "{\"type\":\"HS256\",\"key\":\"$(random_hex 32)\"}"
     set_env "$dir/.env" STORAGE_ACCESS_KEY "$(random_hex 16)"
     set_env "$dir/.env" STORAGE_SECRET_KEY "$(random_hex 32)"
-    sed -i.baas 's|Label(`com.docker.compose.project`,`docker-compose`)|Label(`com.docker.compose.project`,`baas-nhost`)|' "$dir/docker-compose.yaml"
-    rm -f "$dir/docker-compose.yaml.baas"
   fi
+  sed -i.baas \
+    -e 's|Label(`com.docker.compose.project`,`docker-compose`)|Label(`com.docker.compose.project`,`baas-nhost`)|' \
+    -e "s|image: traefik:v3.1$|image: $NHOST_TRAEFIK_IMAGE|" \
+    "$dir/docker-compose.yaml"
+  rm -f "$dir/docker-compose.yaml.baas"
   chmod 600 "$dir/.env"
 }
 
