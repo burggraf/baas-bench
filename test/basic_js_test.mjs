@@ -18,6 +18,8 @@ import { runFromArguments } from '../benchmark-sets/basic-js-v1/shared/lib/run.m
 import { createSupabaseAdapter } from '../benchmark-sets/basic-js-v1/shared/lib/adapters/supabase.mjs';
 import { createSupabaseAdmin } from '../benchmark-sets/basic-js-v1/shared/lib/admin/supabase.mjs';
 import { createNhostAdapter } from '../benchmark-sets/basic-js-v1/shared/lib/adapters/nhost.mjs';
+import { createConvexAdapter } from '../benchmark-sets/basic-js-v1/shared/lib/adapters/convex.mjs';
+import { deployArgs as convexDeployArgs, inspectionExportPath } from '../benchmark-sets/basic-js-v1/shared/lib/admin/convex.mjs';
 
 const setRoot = new URL('../benchmark-sets/basic-js-v1/', import.meta.url);
 const benchmarkIds = [
@@ -427,6 +429,60 @@ test('Nhost adapter rejects GraphQL errors and invalid shapes', async () => {
   assert.equal(adapter.validate(null, { operation: 'item', trial: 1, vu: 1, sequence: 0 }), false);
   assert.equal(adapter.validate([{ id: 'only-one' }], { operation: 'list' }), false);
   assert.equal(adapter.validate({ id: '' }, { operation: 'write' }), false);
+});
+
+test('Convex functions implement the shared public contract', () => {
+  const schema = read('shared/convex/schema.ts');
+  const functions = read('shared/convex/guestbook.ts');
+  assert.match(schema, /index\("by_created_at", \["created_at"\]\)/);
+  assert.match(schema, /index\("by_fixture_key", \["fixture_key"\]\)/);
+  assert.match(functions, /order\("desc"\)\.take\(20\)/);
+  assert.match(functions, /ctx\.db\.get\(id\)/);
+  assert.match(functions, /author\.length < 1 \|\| author\.length > 32/);
+  assert.match(functions, /message\.length < 1 \|\| message\.length > 256/);
+  assert.match(functions, /created_at: Date\.now\(\), fixture_key: null/);
+});
+
+test('Convex CLI arguments match pinned deployment behavior', () => {
+  assert.deepEqual(convexDeployArgs, ['deploy', '--typecheck', 'disable']);
+  assert.equal(inspectionExportPath('/tmp/inspect'), '/tmp/inspect.zip');
+});
+
+test('Convex adapter uses public generated references without queue overrides', async () => {
+  const calls = [];
+  class FakeClient {
+    constructor(url) { calls.push(['client', url]); }
+    async query(reference, args) {
+      calls.push(['query', reference, args]);
+      if (reference === 'list-ref') return Array.from({ length: 20 }, (_, index) => ({ id: `id-${index}`, author: 'a', message: 'm', created_at: '2025-01-01T00:00:01.000Z' }));
+      return { id: 'id-2', author: 'user-0002', message: 'Guestbook message 00002 from basic-js-v1', created_at: '2025-01-01T00:00:02.000Z' };
+    }
+    async mutation(reference, args) { calls.push(['mutation', reference, args]); return 'new-id'; }
+  }
+  const adapter = createConvexAdapter({
+    ConvexHttpClient: FakeClient,
+    api: { guestbook: { list: 'list-ref', get: 'get-ref', create: 'create-ref' } },
+    ids: ['id-1', 'id-2'],
+    selectFixtureIndex: () => 1,
+  });
+  const first = await adapter.createClient({ vu: 1 });
+  const second = await adapter.createClient({ vu: 2 });
+  assert.notEqual(first, second);
+  const list = await adapter.operation(first, { operation: 'list' });
+  const itemContext = { operation: 'item', trial: 1, vu: 1, sequence: 0 };
+  const item = await adapter.operation(first, itemContext);
+  const writeContext = { operation: 'write', trial: 2, load: 10, vu: 3, sequence: 4 };
+  const created = await adapter.operation(second, writeContext);
+  assert.equal(adapter.validate(list, { operation: 'list' }), true);
+  assert.equal(adapter.validate(item, itemContext), true);
+  assert.equal(adapter.validate(created, writeContext), true);
+  assert.deepEqual(calls, [
+    ['client', 'http://127.0.0.1:3210'],
+    ['client', 'http://127.0.0.1:3210'],
+    ['query', 'list-ref', {}],
+    ['query', 'get-ref', { id: 'id-2' }],
+    ['mutation', 'create-ref', { author: 'bench-vu-3', message: 'basic-js-v1 trial-2 load-10 vu-3 operation-4' }],
+  ]);
 });
 
 test('fixture data is deterministic and bounded', () => {

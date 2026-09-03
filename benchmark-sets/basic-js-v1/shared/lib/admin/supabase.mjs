@@ -1,28 +1,10 @@
-import { spawn } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { fixture, fixtures, writeRecord } from '../fixtures.mjs';
+import { runCommand } from '../command.mjs';
 
 const table = 'public.bb_basic_js_v1_guestbook';
-
-export function runCommand(command, args, { input = '' } = {}) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'] });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.setEncoding('utf8');
-    child.stderr.setEncoding('utf8');
-    child.stdout.on('data', (chunk) => { stdout += chunk; });
-    child.stderr.on('data', (chunk) => { stderr += chunk; });
-    child.on('error', reject);
-    child.on('close', (code) => {
-      if (code === 0) resolve({ stdout, stderr });
-      else reject(new Error(`command failed (${code}): ${stderr.trim().slice(0, 500)}`));
-    });
-    child.stdin.end(input);
-  });
-}
 
 function parseJsonOutput(stdout, label) {
   try {

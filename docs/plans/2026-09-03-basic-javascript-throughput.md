@@ -516,7 +516,7 @@ Use `guestbook` fields `author`, `message`, numeric `created_at`, and nullable `
 
 **Step 3: Implement deployment and fixture lifecycle**
 
-Generate an admin key through `bin/baas compose convex exec -T backend ./generate_admin_key.sh`; write it and self-host URL only to a mode-600 runtime env file. Deploy once with `npx convex deploy --env-file ...` from the runtime package.
+Generate an admin key through `bin/baas compose convex exec -T backend ./generate_admin_key.sh`; write it and self-host URL only to a mode-600 runtime env file. Write those values to the runtime env file for restricted persistence, then pass them as subprocess environment variables to `npx convex deploy`; pinned `convex@1.45.0` has no `--env-file` option.
 
 Import deterministic JSONL with `npx convex import --replace --yes --table guestbook`; export a baseline ZIP and ordered ID map. Reset by importing the baseline ZIP so native IDs remain stable. Teardown empties the table and deploys a cleanup definition or otherwise removes only case-owned functions/schema using a verified pinned CLI path.
 
