@@ -59,7 +59,7 @@ Generated deployments and secrets are stored in `.runtime/` and are not committe
 | Convex | `http://localhost:3210/version` |
 | Appwrite | `http://localhost:8080/v1/health/version` |
 | Nhost | `http://local.graphql.local.nhost.run/v1/version` |
-| Directus | `http://localhost:8055/server/health` |
+| Directus | `http://localhost:8055/server/ping` |
 | PocketBase | `http://localhost:8090/api/health` |
 | TrailBase | `http://localhost:4000/api/healthcheck` |
 

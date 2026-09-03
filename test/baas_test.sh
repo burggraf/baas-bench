@@ -77,7 +77,7 @@ stop_line=$(grep -n ' stop' "$BAAS_TEST_LOG" | head -1 | cut -d: -f1)
 up_line=$(grep -n ' up -d' "$BAAS_TEST_LOG" | head -1 | cut -d: -f1)
 [ -n "$stop_line" ] && [ -n "$up_line" ] && [ "$stop_line" -lt "$up_line" ] || fail "start did not stop stacks first"
 grep -q "docker compose .*--env-file $BAAS_RUNTIME_DIR/directus/.env .*services/directus/compose.yml" "$BAAS_TEST_LOG" || fail "Directus runtime environment missing"
-grep -q 'curl .*localhost:8055/server/health' "$BAAS_TEST_LOG" || fail "Directus smoke call missing"
+grep -q 'curl .*localhost:8055/server/ping' "$BAAS_TEST_LOG" || fail "Directus smoke call missing"
 [ "$(ls -l "$BAAS_RUNTIME_DIR/directus/.env" | cut -c5-10)" = '------' ] || fail "Directus secrets are not private"
 
 "$BAAS" setup appwrite >/dev/null

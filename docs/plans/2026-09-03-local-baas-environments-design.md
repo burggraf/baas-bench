@@ -30,7 +30,7 @@ Large upstream deployments are sparse-checked-out or downloaded at immutable rev
 | Convex | Official self-host Compose | `GET /version` | Uses the upstream default SQLite persistence. Backend and dashboard images are pinned by OCI digest because the upstream file uses `latest`. |
 | Appwrite | Official release Compose and environment | `GET /v1/health/version` | Full default stack is intentionally retained and is the heaviest environment. |
 | Nhost | Official reference Compose example | Hasura GraphQL query | Nhost labels this a demonstration/reference stack and community-supported unless a support agreement exists. |
-| Directus | Official documented Postgres + Redis + Directus topology | `GET /server/health` | Local credentials are generated during setup. |
+| Directus | Official documented Postgres + Redis + Directus topology | `GET /server/ping` | Local credentials are generated during setup. Directus 12 restricts the detailed health endpoint to authenticated users. |
 | PocketBase | Image built from the official release archive, following the official Dockerfile example | `GET /api/health` | PocketBase does not publish an official image. The build selects the Linux architecture automatically. |
 | TrailBase | Official versioned Docker image | `GET /api/healthcheck` | Uses its native SQLite-backed single-container deployment. |
 

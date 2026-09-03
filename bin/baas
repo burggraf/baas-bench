@@ -253,7 +253,7 @@ smoke_one() {
     convex) curl -fsS http://localhost:3210/version >/dev/null ;;
     appwrite) curl -fsS http://localhost:8080/v1/health/version >/dev/null ;;
     nhost) curl -fsS --resolve local.graphql.local.nhost.run:80:127.0.0.1 http://local.graphql.local.nhost.run/v1/version >/dev/null ;;
-    directus) curl -fsS http://localhost:8055/server/health >/dev/null ;;
+    directus) curl -fsS http://localhost:8055/server/ping >/dev/null ;;
     pocketbase) curl -fsS http://localhost:8090/api/health >/dev/null ;;
     trailbase) curl -fsS http://localhost:4000/api/healthcheck >/dev/null ;;
   esac
