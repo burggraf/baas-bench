@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -20,6 +20,8 @@ import { createSupabaseAdmin } from '../benchmark-sets/basic-js-v1/shared/lib/ad
 import { createNhostAdapter } from '../benchmark-sets/basic-js-v1/shared/lib/adapters/nhost.mjs';
 import { createConvexAdapter } from '../benchmark-sets/basic-js-v1/shared/lib/adapters/convex.mjs';
 import { deployArgs as convexDeployArgs, inspectionExportPath } from '../benchmark-sets/basic-js-v1/shared/lib/admin/convex.mjs';
+import { createAppwriteAdapter } from '../benchmark-sets/basic-js-v1/shared/lib/adapters/appwrite.mjs';
+import { createAppwriteAdmin } from '../benchmark-sets/basic-js-v1/shared/lib/admin/appwrite.mjs';
 
 const setRoot = new URL('../benchmark-sets/basic-js-v1/', import.meta.url);
 const benchmarkIds = [
@@ -483,6 +485,167 @@ test('Convex adapter uses public generated references without queue overrides', 
     ['query', 'get-ref', { id: 'id-2' }],
     ['mutation', 'create-ref', { author: 'bench-vu-3', message: 'basic-js-v1 trial-2 load-10 vu-3 operation-4' }],
   ]);
+});
+
+test('Appwrite adapter uses TablesDB row APIs and client-timed IDs', async () => {
+  const calls = [];
+  let uniqueCalls = 0;
+  class Client {
+    setEndpoint(value) { calls.push(['endpoint', value]); return this; }
+    setProject(value) { calls.push(['project', value]); return this; }
+  }
+  class TablesDB {
+    async listRows(args) { calls.push(['listRows', args]); return { rows: Array.from({ length: 20 }, (_, index) => ({ $id: `id-${index}`, $createdAt: '2025-01-01T00:00:01.000Z', author: 'a', message: 'm' })) }; }
+    async getRow(args) { calls.push(['getRow', args]); return { $id: args.rowId, $createdAt: '2025-01-01T00:00:02.000Z', author: 'user-0002', message: 'Guestbook message 00002 from basic-js-v1' }; }
+    async createRow(args) { calls.push(['createRow', args]); return { $id: args.rowId, $createdAt: '2025-01-01T00:00:03.000Z', ...args.data }; }
+  }
+  const Query = {
+    select: (fields) => `select:${fields.join(',')}`,
+    orderDesc: (field) => `desc:${field}`,
+    limit: (count) => `limit:${count}`,
+  };
+  const ID = { unique() { uniqueCalls += 1; return 'unique-id'; } };
+  const adapter = createAppwriteAdapter({ Client, TablesDB, Query, ID, projectId: 'project', databaseId: 'database', tableId: 'table', ids: ['id-1', 'id-2'], selectFixtureIndex: () => 1 });
+  const client = await adapter.createClient({ vu: 1 });
+  const list = await adapter.operation(client, { operation: 'list' });
+  const itemContext = { operation: 'item', trial: 1, vu: 1, sequence: 0 };
+  const item = await adapter.operation(client, itemContext);
+  const writeContext = { operation: 'write', trial: 2, load: 10, vu: 3, sequence: 4 };
+  const created = await adapter.operation(client, writeContext);
+  assert.equal(uniqueCalls, 1);
+  assert.deepEqual(calls, [
+    ['endpoint', 'http://127.0.0.1:8080/v1'],
+    ['project', 'project'],
+    ['listRows', { databaseId: 'database', tableId: 'table', queries: ['select:$id,author,message,$createdAt', 'desc:$createdAt', 'desc:$id', 'limit:20'], total: false }],
+    ['getRow', { databaseId: 'database', tableId: 'table', rowId: 'id-2', queries: ['select:$id,author,message,$createdAt'] }],
+    ['createRow', { databaseId: 'database', tableId: 'table', rowId: 'unique-id', data: { author: 'bench-vu-3', message: 'basic-js-v1 trial-2 load-10 vu-3 operation-4' } }],
+  ]);
+  assert.equal(adapter.validate(list, { operation: 'list' }), true);
+  assert.equal(adapter.validate(item, itemContext), true);
+  assert.equal(adapter.validate(created, writeContext), true);
+});
+
+test('Appwrite adapter rejects malformed SDK responses', async () => {
+  let uniqueCalls = 0;
+  const adapter = createAppwriteAdapter({
+    Client: class { setEndpoint() { return this; } setProject() { return this; } },
+    TablesDB: class {},
+    Query: { select: () => 'select' },
+    ID: { unique() { uniqueCalls += 1; return `id-${uniqueCalls}`; } },
+    projectId: 'project',
+    databaseId: 'database',
+    tableId: 'table',
+    ids: ['fixture-id'],
+    selectFixtureIndex: () => 0,
+  });
+  assert.equal(adapter.validate([{ id: 'only-one' }], { operation: 'list' }), false);
+  assert.equal(adapter.validate({ id: 'fixture-id', author: fixture(1).author, message: fixture(1).message, created_at: '' }, { operation: 'item', trial: 1, vu: 1, sequence: 0 }), false);
+  assert.equal(adapter.validate({ id: '' }, { operation: 'write' }), false);
+  await assert.rejects(adapter.operation({}, { operation: 'item', trial: 1, vu: 1, sequence: 0 }), /tables\.getRow is not a function/);
+  await assert.rejects(createAppwriteAdapter({ Client: class {}, TablesDB: class {}, Query: {}, ID: {}, projectId: '', databaseId: '', tableId: '', ids: [], selectFixtureIndex: () => 2 }).operation({}, { operation: 'item', trial: 1, vu: 1, sequence: 0 }), /missing Appwrite fixture ID/);
+  assert.equal(uniqueCalls, 0);
+});
+
+test('Appwrite administration bootstraps supported Console resources and protects credentials', async () => {
+  const runtime = mkdtempSync(join(tmpdir(), 'basic-js-appwrite-'));
+  const stateDir = join(runtime, 'state');
+  mkdirSync(stateDir);
+  for (const file of ['appwrite-console.json', 'appwrite-admin.json']) {
+    writeFileSync(join(stateDir, file), file.includes('console') ? JSON.stringify({ password: 'Bb-existing-password!' }) : '{}');
+    chmodSync(join(stateDir, file), 0o644);
+  }
+  const consoleCalls = [];
+  const sdkCalls = [];
+  const rows = [];
+  const response = (status, body = {}) => ({
+    ok: status >= 200 && status < 300,
+    status,
+    headers: { getSetCookie: () => status === 201 ? ['a_session_console=value; Path=/'] : [] },
+    text: async () => JSON.stringify(body),
+  });
+  const fetchImpl = async (url, options) => {
+    const path = new URL(url).pathname.replace('/v1', '');
+    consoleCalls.push([options.method, path, options.body && JSON.parse(options.body)]);
+    if (path === '/account' && options.method === 'POST') return response(409, { message: 'exists' });
+    if (path === '/account/sessions/email') return response(201, { $id: 'session' });
+    if (path.endsWith('/keys') && options.method === 'POST') return response(201, { secret: 'project-secret' });
+    if (options.method === 'DELETE') return response(204);
+    return response(201, { $id: 'resource' });
+  };
+  class Client {
+    setEndpoint(value) { sdkCalls.push(['endpoint', value]); return this; }
+    setProject(value) { sdkCalls.push(['project', value]); return this; }
+    setKey(value) { sdkCalls.push(['key', value]); return this; }
+  }
+  class TablesDB {
+    async create(args) { sdkCalls.push(['create', args]); }
+    async createTable(args) { sdkCalls.push(['createTable', args]); }
+    async createStringColumn(args) { sdkCalls.push(['string', args]); }
+    async createIntegerColumn(args) { sdkCalls.push(['integer', args]); }
+    async getColumn(args) { return { ...args, status: 'available' }; }
+    async createIndex(args) { sdkCalls.push(['index', args]); }
+    async getIndex(args) { return { ...args, status: 'available' }; }
+    async createRows(args) {
+      sdkCalls.push(['rows', args.rows.length]);
+      for (const row of args.rows) rows.push({ ...row, $createdAt: fixture(row.fixture_key).created_at });
+    }
+    async listRows(args) {
+      const cursor = args.queries.find((value) => value.startsWith('cursor:'))?.slice(7);
+      const selected = rows.filter((row) => !cursor || row.$id > cursor).sort((a, b) => a.$id.localeCompare(b.$id)).slice(0, 1000);
+      return { rows: selected };
+    }
+    async delete() { sdkCalls.push(['delete']); }
+  }
+  let generated = 0;
+  const sdk = {
+    Client,
+    TablesDB,
+    Query: {
+      orderAsc: (field) => `asc:${field}`,
+      limit: (count) => `limit:${count}`,
+      cursorAfter: (id) => `cursor:${id}`,
+      isNull: (field) => `null:${field}`,
+    },
+    ID: { unique: () => `row-${String(++generated).padStart(5, '0')}` },
+    Permission: { read: (role) => `read:${role}`, create: (role) => `create:${role}` },
+    Role: { any: () => 'any' },
+    TablesDBIndexType: { Unique: 'unique' },
+    OrderBy: { Asc: 'asc' },
+  };
+  const admin = createAppwriteAdmin({ sdk, fetchImpl, runtime, sleep: async () => {} });
+  try {
+    await admin.setup();
+    assert.equal(rows.length, 10_000);
+    assert.equal(statSync(join(stateDir, 'appwrite-console.json')).mode & 0o777, 0o600);
+    assert.equal(statSync(join(stateDir, 'appwrite-admin.json')).mode & 0o777, 0o600);
+    assert.deepEqual(JSON.parse(readFileSync(join(stateDir, 'appwrite.json'))), { projectId: 'bb-basic-js-v1-project', databaseId: 'bb-basic-js-v1', tableId: 'guestbook' });
+    assert.ok(consoleCalls.some(([method, path]) => method === 'POST' && path === '/account/sessions/email'));
+    assert.ok(consoleCalls.some(([method, path]) => method === 'POST' && path === '/projects'));
+    const table = sdkCalls.find(([name]) => name === 'createTable')[1];
+    assert.equal(table.rowSecurity, false);
+    assert.deepEqual(table.permissions, ['read:any', 'create:any']);
+    assert.ok(sdkCalls.some(([name, args]) => name === 'index' && args.type === 'unique'));
+    const batchSizes = sdkCalls.filter(([name]) => name === 'rows').map(([, size]) => size);
+    assert.deepEqual(batchSizes.slice(-20), Array(20).fill(1));
+    await admin.teardown();
+    assert.equal(existsSync(join(stateDir, 'appwrite-console.json')), false);
+    assert.ok(consoleCalls.some(([method, path]) => method === 'DELETE' && path === '/account'));
+  } finally {
+    rmSync(runtime, { recursive: true, force: true });
+  }
+});
+
+test('Appwrite case hooks delegate to the set-level dispatcher', () => {
+  const operations = { 'read-list-throughput': 'list', 'read-item-throughput': 'item', 'write-throughput': 'write' };
+  for (const [benchmark, operation] of Object.entries(operations)) {
+    const config = parseConf(read(`benchmarks/${benchmark}/cases/appwrite/javascript-sdk/case.conf`));
+    assert.equal(config.client, 'appwrite@26.2.0');
+    assert.equal(config.access_path, 'tablesdb');
+    for (const hook of ['setup', 'verify', 'reset', 'run', 'teardown']) {
+      const contents = read(`benchmarks/${benchmark}/cases/appwrite/javascript-sdk/${hook}.sh`);
+      assert.match(contents, new RegExp(`shared/case\\.sh" ${hook} appwrite ${operation}`));
+    }
+  }
 });
 
 test('fixture data is deterministic and bounded', () => {
