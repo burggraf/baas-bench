@@ -88,10 +88,16 @@ grep -q 'curl .*localhost:8055/server/ping' "$BAAS_TEST_LOG" || fail "Directus s
 grep -q 'docker compose .* restart traefik' "$BAAS_TEST_LOG" || fail "Appwrite proxy was not refreshed after start"
 
 mkdir -p "$BAAS_RUNTIME_DIR/supabase/docker"
+printf '%s\n' 'services: {}' > "$BAAS_RUNTIME_DIR/supabase/docker/docker-compose.yml"
 printf '%s\n' 'SUPABASE_PUBLISHABLE_KEY=test-key' > "$BAAS_RUNTIME_DIR/supabase/docker/.env"
 : > "$BAAS_TEST_LOG"
 "$BAAS" smoke supabase >/dev/null
 grep -q 'curl .* -H apikey: test-key .*localhost:8000/auth/v1/health' "$BAAS_TEST_LOG" || fail "Supabase smoke call missing API key"
+
+: > "$BAAS_TEST_LOG"
+"$BAAS" compose supabase exec -T db psql -Atqc 'select 1' >/dev/null
+if "$BAAS" compose unknown ps >/dev/null 2>&1; then fail "compose accepted an unknown service"; fi
+grep -q 'docker compose .* exec -T db psql -Atqc select 1' "$BAAS_TEST_LOG" || fail "compose passthrough call missing"
 
 : > "$BAAS_TEST_LOG"
 export BAAS_TEST_FAIL_URL=localhost:3210

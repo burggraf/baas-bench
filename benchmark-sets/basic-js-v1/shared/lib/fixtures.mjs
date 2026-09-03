@@ -17,6 +17,13 @@ export function fixtures() {
   return Array.from({ length: FIXTURE_COUNT }, (_, index) => fixture(index + 1));
 }
 
+export function writeRecord({ trial, load, vu, sequence }) {
+  return {
+    author: `bench-vu-${vu}`,
+    message: `basic-js-v1 trial-${trial} load-${load} vu-${vu} operation-${sequence}`,
+  };
+}
+
 export function fixtureIndex(trial, vu, sequence) {
   let value = (
     0x9e3779b9 ^

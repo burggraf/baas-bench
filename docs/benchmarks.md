@@ -14,6 +14,8 @@ bin/bench run <set> <benchmark> <platform> <variant> [--allow-dirty] [--keep]
 bin/bench publish .results/<run-id>
 ```
 
+Benchmark administrators that need a container-native tool may use `bin/baas compose <service> <compose-args...>`. This validated passthrough reuses the prepared service's project directory, Compose files, and restricted environment without duplicating deployment knowledge in a case. It rejects Compose `up` and `down`; platform lifecycle remains owned by `bin/bench run`.
+
 ## Directory model
 
 ```text

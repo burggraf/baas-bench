@@ -15,6 +15,8 @@ import {
 import { summarize } from '../benchmark-sets/basic-js-v1/shared/lib/summary.mjs';
 import { runAdmin } from '../benchmark-sets/basic-js-v1/shared/lib/admin.mjs';
 import { runFromArguments } from '../benchmark-sets/basic-js-v1/shared/lib/run.mjs';
+import { createSupabaseAdapter } from '../benchmark-sets/basic-js-v1/shared/lib/adapters/supabase.mjs';
+import { createSupabaseAdmin } from '../benchmark-sets/basic-js-v1/shared/lib/admin/supabase.mjs';
 
 const setRoot = new URL('../benchmark-sets/basic-js-v1/', import.meta.url);
 const benchmarkIds = [
@@ -249,6 +251,136 @@ test('warm-up run writes raw stages without a summary', async () => {
   } finally {
     rmSync(outputDir, { recursive: true, force: true });
   }
+});
+
+test('Supabase case hooks delegate to the set-level dispatcher', () => {
+  for (const benchmark of benchmarkIds) {
+    for (const hook of ['setup', 'verify', 'reset', 'run', 'teardown']) {
+      const contents = read(`benchmarks/${benchmark}/cases/supabase/javascript-sdk/${hook}.sh`);
+      assert.match(contents, new RegExp(`shared/case\\.sh" ${hook} supabase `));
+      assert.match(contents, /\.\.\/\.\.\/\.\.\/\.\.\/\.\.\/shared\/case\.sh/);
+    }
+  }
+});
+
+test('Supabase adapter uses the expected fluent SDK operations', async () => {
+  const calls = [];
+  const responses = [
+    { data: Array.from({ length: 20 }, (_, index) => ({ id: `id-${index}`, author: 'user-0001', message: 'message', created_at: '2025-01-01T00:00:01.000Z' })), error: null },
+    { data: { id: 'id-2', author: 'user-0002', message: 'Guestbook message 00002 from basic-js-v1', created_at: '2025-01-01T00:00:02+00:00' }, error: null },
+    { data: { id: 'new-id' }, error: null },
+  ];
+  const client = {
+    from(table) {
+      calls.push(['from', table]);
+      const response = responses.shift();
+      return {
+        select(fields) { calls.push(['select', fields]); return this; },
+        order(field, options) { calls.push(['order', field, options]); return this; },
+        limit(limit) { calls.push(['limit', limit]); return this; },
+        eq(field, value) { calls.push(['eq', field, value]); return this; },
+        single() { calls.push(['single']); return this; },
+        insert(value) { calls.push(['insert', value]); return this; },
+        then(resolve, reject) { return Promise.resolve(response).then(resolve, reject); },
+      };
+    },
+  };
+  const sdkCalls = [];
+  const adapter = createSupabaseAdapter({
+    sdkCreateClient(url, key, options) { sdkCalls.push({ url, key, options }); return client; },
+    url: 'http://127.0.0.1:8000',
+    key: 'public-key',
+    ids: ['id-1', 'id-2'],
+    selectFixtureIndex: () => 1,
+  });
+  const sdkClient = await adapter.createClient({ vu: 1 });
+  assert.equal(sdkClient, client);
+  assert.equal(sdkCalls.length, 1);
+  assert.deepEqual(sdkCalls[0].options.auth, { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false });
+
+  const list = await adapter.operation(client, { operation: 'list' });
+  assert.equal(list.length, 20);
+  const item = await adapter.operation(client, { operation: 'item', trial: 1, vu: 1, sequence: 0 });
+  assert.equal(item.id, 'id-2');
+  const created = await adapter.operation(client, { operation: 'write', trial: 2, load: 10, vu: 3, sequence: 4 });
+  assert.deepEqual(created, { id: 'new-id' });
+  assert.deepEqual(calls, [
+    ['from', 'bb_basic_js_v1_guestbook'],
+    ['select', 'id,author,message,created_at'],
+    ['order', 'created_at', { ascending: false }],
+    ['limit', 20],
+    ['from', 'bb_basic_js_v1_guestbook'],
+    ['select', 'id,author,message,created_at'],
+    ['eq', 'id', 'id-2'],
+    ['single'],
+    ['from', 'bb_basic_js_v1_guestbook'],
+    ['insert', { author: 'bench-vu-3', message: 'basic-js-v1 trial-2 load-10 vu-3 operation-4' }],
+    ['select', 'id'],
+    ['single'],
+  ]);
+  assert.equal(adapter.validate(list, { operation: 'list' }), true);
+  assert.equal(adapter.validate(item, { operation: 'item', trial: 1, vu: 1, sequence: 0 }), true);
+  assert.equal(adapter.validate(created, { operation: 'write' }), true);
+});
+
+test('Supabase adapter rejects SDK errors', async () => {
+  const adapter = createSupabaseAdapter({
+    sdkCreateClient: () => ({
+      from: () => ({
+        select() { return this; },
+        order() { return this; },
+        limit() { return Promise.resolve({ data: null, error: { message: 'denied' } }); },
+      }),
+    }),
+    url: 'http://127.0.0.1:8000',
+    key: 'public-key',
+    ids: [],
+  });
+  const client = await adapter.createClient({ vu: 1 });
+  await assert.rejects(adapter.operation(client, { operation: 'list' }), /denied/);
+});
+
+test('Supabase administration uses compose psql and preserves setup failure', async () => {
+  const calls = [];
+  const run = async (command, args, options) => {
+    calls.push({ command, args, input: options.input });
+    if (calls.length === 1) throw new Error('setup failed');
+    throw new Error('cleanup failed');
+  };
+  const admin = createSupabaseAdmin({ run, root: '/repo', runtime: '/runtime' });
+  await assert.rejects(
+    admin.setup({ operation: 'list' }),
+    (error) => error.message === 'setup failed' && error.cleanupError === 'cleanup failed',
+  );
+  assert.equal(calls.length, 2);
+  for (const call of calls) {
+    assert.equal(call.command, '/repo/bin/baas');
+    assert.deepEqual(call.args.slice(0, 6), ['compose', 'supabase', 'exec', '-T', 'db', 'psql']);
+    assert.equal(call.args.join(' ').includes('password'), false);
+  }
+
+  const lifecycleCalls = [];
+  const lifecycle = createSupabaseAdmin({
+    run: async (command, args, options) => {
+      lifecycleCalls.push({ command, args, input: options.input });
+      const stdout = options.input.includes("'count', count(*)") ? '{"count":10000,"min":1,"max":10000,"bad":0}' : '';
+      return { stdout };
+    },
+    root: '/repo',
+    runtime: '/runtime',
+  });
+  await lifecycle.reset({ operation: 'write' });
+  await lifecycle.verifyReadiness({
+    operation: 'list',
+    result: Array.from({ length: 20 }, (_, offset) => ({
+      ...fixture(10_000 - offset),
+      id: `id-${offset}`,
+      created_at: fixture(10_000 - offset).created_at.replace('.000Z', '+00:00'),
+    })),
+  });
+  await lifecycle.teardown({ operation: 'write' });
+  assert.match(lifecycleCalls[0].input, /fixture_key IS NULL/);
+  assert.match(lifecycleCalls[2].input, /DROP TABLE/);
 });
 
 test('fixture data is deterministic and bounded', () => {

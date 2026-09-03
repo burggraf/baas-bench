@@ -8,7 +8,7 @@ SERVICES='supabase neon convex appwrite nhost directus pocketbase trailbase'
 . "$ROOT/versions.env"
 
 usage() {
-  echo "usage: bin/baas {list|setup|start|smoke|stop|status} [service|all]" >&2
+  echo "usage: bin/baas {list|setup|start|smoke|stop|status|compose} [service|all] [compose-args...]" >&2
   exit 2
 }
 
@@ -338,6 +338,15 @@ case "$command" in
   status)
     require_tools
     status_all
+    ;;
+  compose)
+    [ "$#" -ge 3 ] || usage
+    valid_service "$target" || { echo "unknown service: $target" >&2; exit 2; }
+    is_setup "$target" || { echo "$target is not set up" >&2; exit 1; }
+    case "$3" in up|down) echo "compose lifecycle commands are not available through this passthrough" >&2; exit 2 ;; esac
+    require_tools
+    shift 2
+    run_compose "$target" "$@"
     ;;
   *) usage ;;
 esac

@@ -57,7 +57,7 @@ export async function executeRun(context, dependencies) {
     try {
       const client = await adapter.createClient({ ...stageContext, vu: 0, readiness: true });
       readinessResult = await adapter.operation(client, { ...stageContext, vu: 0, sequence: 0, readiness: true });
-      if (!adapter.validate(readinessResult, { ...stageContext, vu: 0, sequence: 0, readiness: true })) {
+      if (!(await adapter.validate(readinessResult, { ...stageContext, vu: 0, sequence: 0, readiness: true }))) {
         throw new Error('readiness operation returned an invalid response');
       }
       await admin.verifyReadiness({ ...stageContext, result: readinessResult });
