@@ -1,0 +1,91 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+SETS=${BENCH_SETS_DIR:-$ROOT/benchmark-sets}
+LOCAL_RESULTS=${BENCH_LOCAL_RESULTS_DIR:-$ROOT/.results}
+PUBLISHED_RESULTS=${BENCH_RESULTS_DIR:-$ROOT/results}
+BAAS=${BENCH_BAAS_BIN:-$ROOT/bin/baas}
+TEMPLATES=$ROOT/templates
+
+usage() {
+  echo "usage: bin/bench new {set ID|benchmark SET ID|case SET BENCHMARK PLATFORM VARIANT}" >&2
+  exit 2
+}
+
+valid_id() {
+  printf '%s\n' "$1" | grep -Eq '^[a-z0-9][a-z0-9-]*$'
+}
+
+valid_platform() {
+  "$BAAS" list | grep -qx "$1"
+}
+
+replace() {
+  file=$1 token=$2 value=$3
+  sed "s|{{$token}}|$value|g" "$file" > "$file.tmp"
+  mv "$file.tmp" "$file"
+}
+
+new_set() {
+  [ "$#" -eq 1 ] || usage
+  id=$1
+  valid_id "$id" || { echo "invalid set id: $id" >&2; exit 2; }
+  dest=$SETS/$id
+  [ ! -e "$dest" ] || { echo "already exists: $dest" >&2; exit 1; }
+  mkdir -p "$dest"
+  cp -R "$TEMPLATES/benchmark-set/." "$dest/"
+  mkdir -p "$dest/benchmarks"
+  replace "$dest/set.conf" SET_ID "$id"
+  replace "$dest/README.md" SET_ID "$id"
+  echo "$dest"
+}
+
+new_benchmark() {
+  [ "$#" -eq 2 ] || usage
+  set_id=$1 benchmark_id=$2
+  valid_id "$set_id" && valid_id "$benchmark_id" || { echo "invalid set or benchmark id" >&2; exit 2; }
+  parent=$SETS/$set_id
+  [ -f "$parent/set.conf" ] || { echo "unknown set: $set_id" >&2; exit 1; }
+  dest=$parent/benchmarks/$benchmark_id
+  [ ! -e "$dest" ] || { echo "already exists: $dest" >&2; exit 1; }
+  mkdir -p "$dest"
+  cp -R "$TEMPLATES/benchmark/." "$dest/"
+  mkdir -p "$dest/fixtures" "$dest/cases"
+  replace "$dest/benchmark.conf" BENCHMARK_ID "$benchmark_id"
+  replace "$dest/METHODOLOGY.md" BENCHMARK_ID "$benchmark_id"
+  echo "$dest"
+}
+
+new_case() {
+  [ "$#" -eq 4 ] || usage
+  set_id=$1 benchmark_id=$2 platform=$3 variant=$4
+  valid_id "$set_id" && valid_id "$benchmark_id" && valid_id "$platform" && valid_id "$variant" || {
+    echo "invalid case path" >&2
+    exit 2
+  }
+  valid_platform "$platform" || { echo "unknown platform: $platform" >&2; exit 2; }
+  parent=$SETS/$set_id/benchmarks/$benchmark_id
+  [ -f "$parent/benchmark.conf" ] || { echo "unknown benchmark: $set_id/$benchmark_id" >&2; exit 1; }
+  dest=$parent/cases/$platform/$variant
+  [ ! -e "$dest" ] || { echo "already exists: $dest" >&2; exit 1; }
+  mkdir -p "$dest"
+  cp -R "$TEMPLATES/case/." "$dest/"
+  for file in "$dest/case.conf" "$dest/README.md"; do
+    replace "$file" PLATFORM "$platform"
+    replace "$file" VARIANT "$variant"
+  done
+  chmod +x "$dest"/*.sh
+  echo "$dest"
+}
+
+command=${1:-}
+subcommand=${2:-}
+[ "$command" = new ] || usage
+shift 2 || usage
+case "$subcommand" in
+  set) new_set "$@" ;;
+  benchmark) new_benchmark "$@" ;;
+  case) new_case "$@" ;;
+  *) usage ;;
+esac
