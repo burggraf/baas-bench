@@ -53,6 +53,12 @@ grep -q "docker compose .*--env-file $BAAS_RUNTIME_DIR/directus/.env .*services/
 grep -q 'curl .*localhost:8055/server/health' "$BAAS_TEST_LOG" || fail "Directus smoke call missing"
 [ "$(ls -l "$BAAS_RUNTIME_DIR/directus/.env" | cut -c5-10)" = '------' ] || fail "Directus secrets are not private"
 
+mkdir -p "$BAAS_RUNTIME_DIR/supabase/docker"
+printf '%s\n' 'SUPABASE_PUBLISHABLE_KEY=test-key' > "$BAAS_RUNTIME_DIR/supabase/docker/.env"
+: > "$BAAS_TEST_LOG"
+"$BAAS" smoke supabase >/dev/null
+grep -q 'curl .* -H apikey: test-key .*localhost:8000/auth/v1/health' "$BAAS_TEST_LOG" || fail "Supabase smoke call missing API key"
+
 : > "$BAAS_TEST_LOG"
 export BAAS_TEST_FAIL_URL=localhost:3210
 if "$BAAS" smoke all >/dev/null 2>&1; then

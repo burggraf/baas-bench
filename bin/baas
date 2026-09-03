@@ -235,7 +235,10 @@ stop_target() {
 
 smoke_one() {
   case "$1" in
-    supabase) curl -fsS http://localhost:8000/auth/v1/health >/dev/null ;;
+    supabase)
+      key=$(grep '^SUPABASE_PUBLISHABLE_KEY=' "$RUNTIME/supabase/docker/.env" | cut -d= -f2-)
+      curl -fsS -H "apikey: $key" http://localhost:8000/auth/v1/health >/dev/null
+      ;;
     neon) compose neon exec -T compute1 psql postgresql://cloud_admin:cloud_admin@localhost:55433/postgres -Atqc 'select 1' | grep -qx 1 ;;
     convex) curl -fsS http://localhost:3210/version >/dev/null ;;
     appwrite) curl -fsS http://localhost:8080/v1/health/version >/dev/null ;;
