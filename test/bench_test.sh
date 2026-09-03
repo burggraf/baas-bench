@@ -105,6 +105,7 @@ expected="$BENCH_RESULTS_DIR/core-v1/read-throughput/supabase/rest-api/$(basenam
 [ -f "$expected/run.json" ] || fail "published run manifest missing"
 [ -f "$expected/trials/001/summary.json" ] || fail "published summary missing"
 [ ! -d "$expected/trials/001/raw" ] || fail "raw output was committed"
+if "$BENCH" publish "$TMP" >/dev/null 2>&1; then fail "outside bundle was published"; fi
 grep -qx '.results/' "$ROOT/.gitignore" || fail "local benchmark results are not ignored"
 [ -d "$ROOT/results" ] || fail "published results directory missing"
 
