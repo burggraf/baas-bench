@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import {
   fixture,
@@ -11,6 +13,8 @@ import {
   runStage,
 } from '../benchmark-sets/basic-js-v1/shared/lib/runner.mjs';
 import { summarize } from '../benchmark-sets/basic-js-v1/shared/lib/summary.mjs';
+import { runAdmin } from '../benchmark-sets/basic-js-v1/shared/lib/admin.mjs';
+import { runFromArguments } from '../benchmark-sets/basic-js-v1/shared/lib/run.mjs';
 
 const setRoot = new URL('../benchmark-sets/basic-js-v1/', import.meta.url);
 const benchmarkIds = [
@@ -118,6 +122,132 @@ test('workload dependencies and Node version are pinned', () => {
   assert.deepEqual(packageLock.packages[''].dependencies, expected);
   for (const [name, version] of Object.entries(expected)) {
     assert.equal(packageLock.packages[`node_modules/${name}`].version, version);
+  }
+});
+
+test('dispatch rejects invalid input before loading platform modules', async () => {
+  let loads = 0;
+  const loadModule = async () => {
+    loads += 1;
+    return {};
+  };
+  const invalidAdminArguments = [
+    ['unknown', 'supabase', 'list', 'setup', '0', '/tmp/output'],
+    ['setup', 'unknown', 'list', 'setup', '0', '/tmp/output'],
+    ['setup', 'supabase', 'unknown', 'setup', '0', '/tmp/output'],
+    ['setup', 'supabase', 'list', 'unknown', '0', '/tmp/output'],
+    ['setup', 'supabase', 'list', 'setup', 'x', '/tmp/output'],
+    ['setup', 'supabase', 'list', 'setup', '0', 'relative'],
+  ];
+  for (const args of invalidAdminArguments) {
+    await assert.rejects(runAdmin(args, { loadModule }), /invalid|absolute/);
+  }
+
+  const invalidRunArguments = [
+    ['unknown', 'list', 'measure', '1', '/tmp/output'],
+    ['supabase', 'unknown', 'measure', '1', '/tmp/output'],
+    ['supabase', 'list', 'unknown', '1', '/tmp/output'],
+    ['supabase', 'list', 'measure', 'x', '/tmp/output'],
+    ['supabase', 'list', 'measure', '1', 'relative'],
+  ];
+  for (const args of invalidRunArguments) {
+    await assert.rejects(runFromArguments(args, { loadAdmin: loadModule, loadAdapter: loadModule }), /invalid|absolute/);
+  }
+  assert.equal(loads, 0);
+});
+
+test('measured run resets, checks, records, and summarizes every load', async () => {
+  const outputDir = mkdtempSync(join(tmpdir(), 'basic-js-measure-'));
+  const events = [];
+  const admin = {
+    async reset({ load }) { events.push(`reset:${load}`); },
+    async verifyReadiness({ load }) { events.push(`ready:${load}`); },
+    async cleanupReadiness({ load }) { events.push(`cleanup:${load}`); },
+    async verifyStage({ load }) { events.push(`verify:${load}`); },
+  };
+  const adapter = {
+    async createClient({ vu, load }) {
+      events.push(`client:${load}:${vu}`);
+      return { vu };
+    },
+    async operation(_client, { load, readiness }) {
+      events.push(`operation:${load}:${readiness === true ? 'ready' : 'timed'}`);
+      return { id: 'created-id' };
+    },
+    validate(result) { return result.id === 'created-id'; },
+  };
+  const runStageFn = async ({ concurrency, durationMs }) => {
+    events.push(`stage:${concurrency}:${durationMs}`);
+    return {
+      concurrency,
+      duration_ms: 1000,
+      attempted: 10,
+      completed: 10,
+      failed: 0,
+      latencies_ms: [1],
+      error_kinds: {},
+      error_samples: [],
+    };
+  };
+
+  try {
+    await runFromArguments(['supabase', 'write', 'measure', '2', outputDir], {
+      loadAdmin: async () => admin,
+      loadAdapter: async () => adapter,
+      runStage: runStageFn,
+    });
+    for (const load of [1, 10, 100, 1000]) {
+      const prefix = [
+        `reset:${load}`,
+        `client:${load}:0`,
+        `operation:${load}:ready`,
+        `ready:${load}`,
+        `cleanup:${load}`,
+        `stage:${load}:15000`,
+        `verify:${load}`,
+      ];
+      assert.deepEqual(events.splice(0, prefix.length), prefix);
+      assert.ok(existsSync(join(outputDir, 'raw', `vu-${load}.json`)));
+    }
+    assert.ok(existsSync(join(outputDir, 'summary.json')));
+    assert.equal(JSON.parse(readFileSync(join(outputDir, 'summary.json'))).completed_operations, 40);
+  } finally {
+    rmSync(outputDir, { recursive: true, force: true });
+  }
+});
+
+test('warm-up run writes raw stages without a summary', async () => {
+  const outputDir = mkdtempSync(join(tmpdir(), 'basic-js-warmup-'));
+  const admin = {
+    async reset() {},
+    async verifyReadiness() {},
+    async cleanupReadiness() { assert.fail('read readiness must not be cleaned up'); },
+    async verifyStage() {},
+  };
+  const adapter = {
+    async createClient() { return {}; },
+    async operation() { return { ok: true }; },
+    validate(result) { return result.ok; },
+  };
+  try {
+    await runFromArguments(['supabase', 'list', 'warmup', '1', outputDir], {
+      loadAdmin: async () => admin,
+      loadAdapter: async () => adapter,
+      runStage: async ({ concurrency, durationMs }) => ({
+        concurrency,
+        duration_ms: durationMs,
+        attempted: 1,
+        completed: 1,
+        failed: 0,
+        latencies_ms: [1],
+        error_kinds: {},
+        error_samples: [],
+      }),
+    });
+    assert.ok(existsSync(join(outputDir, 'raw', 'vu-1000.json')));
+    assert.equal(existsSync(join(outputDir, 'summary.json')), false);
+  } finally {
+    rmSync(outputDir, { recursive: true, force: true });
   }
 });
 

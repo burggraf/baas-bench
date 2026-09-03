@@ -45,7 +45,7 @@ export async function runStage({
       const operationStartedAt = performance.now();
       try {
         const value = await operation(client, { trial, vu, sequence });
-        if (!validate(value)) {
+        if (!validate(value, { trial, vu, sequence })) {
           failed += 1;
           errorKinds.invalid_response = (errorKinds.invalid_response ?? 0) + 1;
         } else {
