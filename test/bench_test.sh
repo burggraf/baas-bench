@@ -41,4 +41,21 @@ if "$BENCH" new case core-v1 read-throughput unknown rest-api >/dev/null 2>&1; t
   fail "unknown platform was accepted"
 fi
 
+if "$BENCH" validate core-v1/read-throughput/supabase/rest-api >/dev/null 2>&1; then
+  fail "unfinished template passed validation"
+fi
+for file in "$SET/set.conf" "$BENCHMARK/benchmark.conf" "$CASE/case.conf" "$BENCHMARK/METHODOLOGY.md" "$CASE/README.md" "$CASE"/*.sh; do
+  sed -i.bench_test -e 's/^title=TODO/title=Core benchmarks/' -e 's/^description=TODO/description=Description/' -e 's/^primary_metric=TODO/primary_metric=operations_per_second/' -e 's/^primary_unit=TODO/primary_unit=ops\/s/' -e 's/^primary_direction=TODO/primary_direction=higher/' -e 's/^required_metrics=TODO/required_metrics=operations_per_second/' -e 's/^warmup_trials=TODO/warmup_trials=0/' -e 's/^measured_trials=TODO/measured_trials=1/' -e 's/=TODO/=documented/g' -e 's/^TODO$/documented/' -e 's/TODO: implement.*/implemented/' "$file"
+  rm -f "$file.bench_test"
+done
+for hook in setup verify reset run teardown; do printf '#!/bin/sh\nset -eu\n:\n' > "$CASE/$hook.sh"; chmod +x "$CASE/$hook.sh"; done
+"$BENCH" validate core-v1/read-throughput/supabase/rest-api >/dev/null || fail "valid case failed validation"
+"$BENCH" validate all >/dev/null || fail "valid tree failed validation"
+printf 'password=do-not-store-this\n' >> "$CASE/case.conf"
+if "$BENCH" validate core-v1/read-throughput/supabase/rest-api >/dev/null 2>&1; then fail "sensitive key accepted"; fi
+sed -i.bench_test '/^password=/d' "$CASE/case.conf"
+rm -f "$CASE/case.conf.bench_test"
+printf 'platform=duplicate\n' >> "$CASE/case.conf"
+if "$BENCH" validate core-v1/read-throughput/supabase/rest-api >/dev/null 2>&1; then fail "duplicate key accepted"; fi
+
 printf '%s\n' PASS

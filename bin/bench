@@ -1,91 +1,32 @@
 #!/bin/sh
 set -eu
-
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 SETS=${BENCH_SETS_DIR:-$ROOT/benchmark-sets}
 LOCAL_RESULTS=${BENCH_LOCAL_RESULTS_DIR:-$ROOT/.results}
 PUBLISHED_RESULTS=${BENCH_RESULTS_DIR:-$ROOT/results}
 BAAS=${BENCH_BAAS_BIN:-$ROOT/bin/baas}
 TEMPLATES=$ROOT/templates
-
-usage() {
-  echo "usage: bin/bench new {set ID|benchmark SET ID|case SET BENCHMARK PLATFORM VARIANT}" >&2
-  exit 2
+usage() { echo "usage: bin/bench {new|validate|run|publish} ..." >&2; exit 2; }
+valid_id() { printf '%s\n' "$1" | grep -Eq '^[a-z0-9][a-z0-9-]*$'; }
+valid_metric() { printf '%s\n' "$1" | grep -Eq '^[a-z][a-z0-9_]*$'; }
+valid_platform() { "$BAAS" list | grep -qx "$1"; }
+replace() { file=$1 token=$2 value=$3; sed "s|{{$token}}|$value|g" "$file" > "$file.tmp"; mv "$file.tmp" "$file"; }
+new_set() { [ "$#" -eq 1 ] || usage; id=$1; valid_id "$id" || { echo "invalid set id" >&2; exit 2; }; dest=$SETS/$id; [ ! -e "$dest" ] || { echo "already exists: $dest" >&2; exit 1; }; mkdir -p "$dest"; cp -R "$TEMPLATES/benchmark-set/." "$dest/"; mkdir -p "$dest/benchmarks"; replace "$dest/set.conf" SET_ID "$id"; replace "$dest/README.md" SET_ID "$id"; echo "$dest"; }
+new_benchmark() { [ "$#" -eq 2 ] || usage; set_id=$1; id=$2; valid_id "$set_id" && valid_id "$id" || { echo "invalid id" >&2; exit 2; }; parent=$SETS/$set_id; [ -f "$parent/set.conf" ] || { echo "unknown set" >&2; exit 1; }; dest=$parent/benchmarks/$id; [ ! -e "$dest" ] || { echo "already exists" >&2; exit 1; }; mkdir -p "$dest"; cp -R "$TEMPLATES/benchmark/." "$dest/"; mkdir -p "$dest/fixtures" "$dest/cases"; replace "$dest/benchmark.conf" BENCHMARK_ID "$id"; replace "$dest/METHODOLOGY.md" BENCHMARK_ID "$id"; echo "$dest"; }
+new_case() { [ "$#" -eq 4 ] || usage; set_id=$1; benchmark_id=$2; platform=$3; variant=$4; valid_id "$set_id" && valid_id "$benchmark_id" && valid_id "$platform" && valid_id "$variant" || { echo "invalid case path" >&2; exit 2; }; valid_platform "$platform" || { echo "unknown platform" >&2; exit 2; }; parent=$SETS/$set_id/benchmarks/$benchmark_id; [ -f "$parent/benchmark.conf" ] || { echo "unknown benchmark" >&2; exit 1; }; dest=$parent/cases/$platform/$variant; [ ! -e "$dest" ] || { echo "already exists" >&2; exit 1; }; mkdir -p "$dest"; cp -R "$TEMPLATES/case/." "$dest/"; replace "$dest/case.conf" PLATFORM "$platform"; replace "$dest/case.conf" VARIANT "$variant"; replace "$dest/README.md" PLATFORM "$platform"; replace "$dest/README.md" VARIANT "$variant"; chmod +x "$dest"/*.sh; echo "$dest"; }
+conf_value() { awk -F= -v wanted="$2" '$1 == wanted { sub(/^[^=]*=/, ""); print; found++ } END { exit found == 1 ? 0 : 1 }' "$1"; }
+check_conf() {
+ file=$1; shift
+ awk -F= 'BEGIN{bad=0} /^[[:space:]]*$/ {bad=1} !/^[a-z][a-z0-9_]*=[^[:cntrl:]]*$/ {bad=1} {if (++seen[$1]>1) bad=1; if ($1 ~ /password|secret|token|credential|api_key|connection_string/) bad=1} END{exit bad}' "$file" || { echo "invalid metadata: $file" >&2; return 1; }
+ for key in "$@"; do value=$(conf_value "$file" "$key") || { echo "missing or duplicate $key: $file" >&2; return 1; }; [ -n "$value" ] || { echo "blank $key: $file" >&2; return 1; }; done
 }
-
-valid_id() {
-  printf '%s\n' "$1" | grep -Eq '^[a-z0-9][a-z0-9-]*$'
-}
-
-valid_platform() {
-  "$BAAS" list | grep -qx "$1"
-}
-
-replace() {
-  file=$1 token=$2 value=$3
-  sed "s|{{$token}}|$value|g" "$file" > "$file.tmp"
-  mv "$file.tmp" "$file"
-}
-
-new_set() {
-  [ "$#" -eq 1 ] || usage
-  id=$1
-  valid_id "$id" || { echo "invalid set id: $id" >&2; exit 2; }
-  dest=$SETS/$id
-  [ ! -e "$dest" ] || { echo "already exists: $dest" >&2; exit 1; }
-  mkdir -p "$dest"
-  cp -R "$TEMPLATES/benchmark-set/." "$dest/"
-  mkdir -p "$dest/benchmarks"
-  replace "$dest/set.conf" SET_ID "$id"
-  replace "$dest/README.md" SET_ID "$id"
-  echo "$dest"
-}
-
-new_benchmark() {
-  [ "$#" -eq 2 ] || usage
-  set_id=$1 benchmark_id=$2
-  valid_id "$set_id" && valid_id "$benchmark_id" || { echo "invalid set or benchmark id" >&2; exit 2; }
-  parent=$SETS/$set_id
-  [ -f "$parent/set.conf" ] || { echo "unknown set: $set_id" >&2; exit 1; }
-  dest=$parent/benchmarks/$benchmark_id
-  [ ! -e "$dest" ] || { echo "already exists: $dest" >&2; exit 1; }
-  mkdir -p "$dest"
-  cp -R "$TEMPLATES/benchmark/." "$dest/"
-  mkdir -p "$dest/fixtures" "$dest/cases"
-  replace "$dest/benchmark.conf" BENCHMARK_ID "$benchmark_id"
-  replace "$dest/METHODOLOGY.md" BENCHMARK_ID "$benchmark_id"
-  echo "$dest"
-}
-
-new_case() {
-  [ "$#" -eq 4 ] || usage
-  set_id=$1 benchmark_id=$2 platform=$3 variant=$4
-  valid_id "$set_id" && valid_id "$benchmark_id" && valid_id "$platform" && valid_id "$variant" || {
-    echo "invalid case path" >&2
-    exit 2
-  }
-  valid_platform "$platform" || { echo "unknown platform: $platform" >&2; exit 2; }
-  parent=$SETS/$set_id/benchmarks/$benchmark_id
-  [ -f "$parent/benchmark.conf" ] || { echo "unknown benchmark: $set_id/$benchmark_id" >&2; exit 1; }
-  dest=$parent/cases/$platform/$variant
-  [ ! -e "$dest" ] || { echo "already exists: $dest" >&2; exit 1; }
-  mkdir -p "$dest"
-  cp -R "$TEMPLATES/case/." "$dest/"
-  for file in "$dest/case.conf" "$dest/README.md"; do
-    replace "$file" PLATFORM "$platform"
-    replace "$file" VARIANT "$variant"
-  done
-  chmod +x "$dest"/*.sh
-  echo "$dest"
-}
-
-command=${1:-}
-subcommand=${2:-}
-[ "$command" = new ] || usage
-shift 2 || usage
-case "$subcommand" in
-  set) new_set "$@" ;;
-  benchmark) new_benchmark "$@" ;;
-  case) new_case "$@" ;;
-  *) usage ;;
-esac
+no_todo() { ! grep -R -n 'TODO' "$1" >/dev/null 2>&1 || { echo "unresolved TODO: $1" >&2; return 1; }; }
+validate_set() { dir=$1; id=$2; check_conf "$dir/set.conf" schema_version id title description; [ "$(conf_value "$dir/set.conf" schema_version)" = 1 ] || return 1; [ "$(conf_value "$dir/set.conf" id)" = "$id" ] || return 1; valid_id "$id"; no_todo "$dir/set.conf"; }
+validate_benchmark() { dir=$1; set_id=$2; id=$3; check_conf "$dir/benchmark.conf" schema_version id title description primary_metric primary_unit primary_direction required_metrics warmup_trials measured_trials; [ "$(conf_value "$dir/benchmark.conf" schema_version)" = 1 ] || return 1; [ "$(conf_value "$dir/benchmark.conf" id)" = "$id" ] || return 1; metric=$(conf_value "$dir/benchmark.conf" primary_metric); valid_metric "$metric" || return 1; direction=$(conf_value "$dir/benchmark.conf" primary_direction); [ "$direction" = higher ] || [ "$direction" = lower ] || return 1; required=$(conf_value "$dir/benchmark.conf" required_metrics); oldifs=$IFS; IFS=,; for metric in $required; do valid_metric "$metric" || { IFS=$oldifs; return 1; }; done; IFS=$oldifs; warm=$(conf_value "$dir/benchmark.conf" warmup_trials); measured=$(conf_value "$dir/benchmark.conf" measured_trials); printf '%s\n%s\n' "$warm" "$measured" | grep -Eq '^[0-9]+$' || return 1; [ "$measured" -gt 0 ] || return 1; no_todo "$dir/benchmark.conf"; no_todo "$dir/METHODOLOGY.md"; }
+validate_case() { set_id=$1; benchmark_id=$2; platform=$3; variant=$4; casedir=$SETS/$set_id/benchmarks/$benchmark_id/cases/$platform/$variant; validate_set "$SETS/$set_id" "$set_id" || return 1; validate_benchmark "$SETS/$set_id/benchmarks/$benchmark_id" "$set_id" "$benchmark_id" || return 1; dir=$casedir; check_conf "$dir/case.conf" platform variant access_path connection client implementation; [ "$(conf_value "$dir/case.conf" platform)" = "$platform" ] && [ "$(conf_value "$dir/case.conf" variant)" = "$variant" ] || return 1; valid_platform "$platform" || return 1; no_todo "$dir/case.conf"; no_todo "$dir/README.md"; for hook in setup verify reset run teardown; do [ -x "$dir/$hook.sh" ] && sh -n "$dir/$hook.sh" || { echo "invalid hook: $dir/$hook.sh" >&2; return 1; }; no_todo "$dir/$hook.sh" || return 1; done; }
+validate_all() { found=0; for setdir in "$SETS"/*; do [ -d "$setdir" ] || continue; set_id=${setdir##*/}; validate_set "$setdir" "$set_id" || return 1; for bdir in "$setdir"/benchmarks/*; do [ -d "$bdir" ] || continue; bid=${bdir##*/}; validate_benchmark "$bdir" "$set_id" "$bid" || return 1; for cfile in "$bdir"/cases/*/*/case.conf; do [ -f "$cfile" ] || continue; rel=${cfile#"$SETS/"}; s=${rel%%/*}; rest=${rel#*/}; rest=${rest#benchmarks/}; b=${rest%%/*}; rest=${rest#*/}; rest=${rest#cases/}; platform=${rest%%/*}; variant=${rest#*/}; variant=${variant%/case.conf}
+ validate_case "$s" "$b" "$platform" "$variant" || return 1; found=1; done; done; done; [ "$found" -eq 0 ] || :; }
+command=${1:-}; subcommand=${2:-}; [ "$command" = new ] && { shift 2; case "$subcommand" in set) new_set "$@";; benchmark) new_benchmark "$@";; case) new_case "$@";; *) usage;; esac; exit; }; [ "$command" = validate ] || usage; target=${2:-all}; [ "$target" = all ] && validate_all || { IFS=/ read -r s b p v <<EOF
+$target
+EOF
+ [ -n "${v:-}" ] || usage; validate_case "$s" "$b" "$p" "$v"; }; echo PASS
