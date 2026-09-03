@@ -11,6 +11,10 @@ fail() {
   exit 1
 }
 
+test_sha256() {
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'; else sha256sum "$1" | awk '{print $1}'; fi
+}
+
 export BENCH_SETS_DIR="$TMP/benchmark-sets"
 export BENCH_LOCAL_RESULTS_DIR="$TMP/.results"
 export BENCH_RESULTS_DIR="$TMP/results"
@@ -213,6 +217,12 @@ if BENCH_LOCAL_RESULTS_DIR="$cleanup_results" BENCH_TEST_FAIL_TEARDOWN=1 "$BENCH
 fi
 cleanup_bundle=$(find "$cleanup_results" -mindepth 1 -maxdepth 1 -type d ! -name '.lock' ! -name '.tmp-*' | head -1)
 jq -e '.status == "failed" and .lifecycle.teardown == "failed"' "$cleanup_bundle/run.json" >/dev/null || fail "teardown failure was not recorded"
+invalid_cleanup_results="$TMP/invalid-cleanup-results"
+if BENCH_LOCAL_RESULTS_DIR="$invalid_cleanup_results" BENCH_TEST_OMIT_METRIC=1 BENCH_TEST_FAIL_TEARDOWN=1 "$BENCH" run core-v1 read-throughput supabase rest-api >/dev/null 2>&1; then
+  fail "invalid run with teardown failure reported success"
+fi
+invalid_cleanup_bundle=$(find "$invalid_cleanup_results" -mindepth 1 -maxdepth 1 -type d ! -name '.lock' ! -name '.tmp-*' | head -1)
+jq -e '.status == "invalid" and .lifecycle.teardown == "failed"' "$invalid_cleanup_bundle/run.json" >/dev/null || fail "cleanup failure hid the primary invalid result"
 
 # Debug keep mode deliberately skips cleanup and is never publishable.
 : > "$TMP/log"
@@ -255,8 +265,8 @@ printf '%s\n' '# tampered' >> "$bad_definitions/definitions/benchmark-sets/core-
 if "$BENCH" publish "$bad_definitions" >/dev/null 2>&1; then fail "tampered definitions were published"; fi
 forged_definitions=$(copy_bundle forged-definitions)
 printf '%s\n' '# forged but internally checksummed' >> "$forged_definitions/definitions/benchmark-sets/core-v1/benchmarks/read-throughput/METHODOLOGY.md"
-(cd "$forged_definitions/definitions" && find . -type f -print | LC_ALL=C sort | while IFS= read -r file; do printf '%s  %s\n' "$(shasum -a 256 "$file" | awk '{print $1}')" "$file"; done) > "$forged_definitions/definitions.sha256"
-forged_checksum=$(shasum -a 256 "$forged_definitions/definitions.sha256" | awk '{print $1}')
+(cd "$forged_definitions/definitions" && find . -type f -print | LC_ALL=C sort | while IFS= read -r file; do printf '%s  %s\n' "$(test_sha256 "$file")" "$file"; done) > "$forged_definitions/definitions.sha256"
+forged_checksum=$(test_sha256 "$forged_definitions/definitions.sha256")
 jq --arg checksum "$forged_checksum" '.definitions_sha256 = $checksum' "$forged_definitions/run.json" > "$forged_definitions/run.json.tmp"
 mv "$forged_definitions/run.json.tmp" "$forged_definitions/run.json"
 if "$BENCH" publish "$forged_definitions" >/dev/null 2>&1; then fail "definitions differing from the recorded commit were published"; fi
@@ -267,6 +277,14 @@ bad_commit=$(copy_bundle bad-commit)
 jq '.commit = "0000000000000000000000000000000000000000"' "$bad_commit/run.json" > "$bad_commit/run.json.tmp"
 mv "$bad_commit/run.json.tmp" "$bad_commit/run.json"
 if "$BENCH" publish "$bad_commit" >/dev/null 2>&1; then fail "run from a different commit was published"; fi
+bad_environment=$(copy_bundle bad-environment)
+jq '.git_commit = "0000000000000000000000000000000000000000"' "$bad_environment/environment.json" > "$bad_environment/environment.json.tmp"
+mv "$bad_environment/environment.json.tmp" "$bad_environment/environment.json"
+if "$BENCH" publish "$bad_environment" >/dev/null 2>&1; then fail "inconsistent environment provenance was published"; fi
+bad_lifecycle=$(copy_bundle bad-lifecycle)
+jq '.lifecycle.stop = "failed"' "$bad_lifecycle/run.json" > "$bad_lifecycle/run.json.tmp"
+mv "$bad_lifecycle/run.json.tmp" "$bad_lifecycle/run.json"
+if "$BENCH" publish "$bad_lifecycle" >/dev/null 2>&1; then fail "run with incomplete lifecycle was published"; fi
 current_dirty=$(copy_bundle current-dirty)
 printf '%s\n' 'changed' >> "$CASE/README.md"
 if "$BENCH" publish "$current_dirty" >/dev/null 2>&1; then fail "run with dirty current definitions was published"; fi

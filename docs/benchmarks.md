@@ -20,11 +20,11 @@ To author an example, run `new set example-v1`, then create benchmark `read-thro
 
 ## Metadata
 
-`set.conf` requires schema version, id, title, and description. `benchmark.conf` additionally requires primary metric/unit/direction, required metrics, and non-negative warmups plus positive measured trials. `case.conf` requires platform, variant, access path, connection, client, and implementation. IDs use lowercase hyphenated names; metric keys use lowercase underscore names. Metadata is data, never shell source, and must not contain secrets.
+`set.conf` requires schema version, id, title, and description. `benchmark.conf` additionally requires primary metric/unit/direction, required metrics, and non-negative warmups plus positive measured trials. `case.conf` requires platform, variant, access path, connection, client, and implementation. IDs use lowercase hyphenated names; metric keys use lowercase underscore names. Metadata is data, never shell source, and must not contain secrets. Use one `key=value` entry per line; blank lines, comments, duplicate keys, and control characters are rejected.
 
 ## Hooks
 
-Hooks are executable POSIX shell scripts. `setup.sh` creates case-owned resources; `verify.sh` checks fixtures and correctness; `reset.sh` restores the baseline before every trial; `run.sh` executes one trial; `teardown.sh` removes case-owned resources. Each receives `BENCH_PHASE`, one-based `BENCH_TRIAL`, and absolute `BENCH_OUTPUT_DIR`.
+Hooks are executable POSIX shell scripts. `setup.sh` creates case-owned resources; `verify.sh` checks fixtures and correctness; `reset.sh` restores the baseline before every trial; `run.sh` executes one trial; `teardown.sh` removes case-owned resources. Each receives `BENCH_PHASE`, `BENCH_TRIAL`, and absolute `BENCH_OUTPUT_DIR`. Setup, initial verification, and teardown use phases `setup`, `verify`, and `teardown` with trial `0`; per-trial reset, run, and verification use phase `warmup` or `measure` with a one-based trial number.
 
 Measured runs must write `summary.json` containing numeric non-negative `duration_seconds`, `completed_operations`, `failed_operations`, `error_rate` (0–1), schema version 1, and declared numeric metrics. Native output belongs in a trial's local `raw/` directory.
 
@@ -36,4 +36,8 @@ Review objective and non-goals, correctness equivalence, measured boundary, data
 
 Local bundles live under ignored `.results/<run-id>/` with manifests, copied definitions, logs, warm-ups, and measured trials. Publishing writes `results/<set>/<benchmark>/<platform>/<variant>/<run-id>/` containing manifests, checksums, definitions, and measured summaries—not raw output or warm-ups.
 
-Failures and interrupted runs are finalized as failed or invalid and retain diagnostic logs. `--keep` is for debugging only, leaves resources running, and is not publishable. Runs must be clean and tied to the recorded Git commit for publication. Teardown and platform shutdown are attempted automatically unless resources are deliberately kept.
+Failures and interrupted runs are finalized as failed or invalid and retain diagnostic logs. `--keep` is for debugging only, leaves resources running, and is not publishable. `--allow-dirty` permits diagnostic execution but records a dirty run that also cannot be published. Teardown and platform shutdown are attempted automatically unless resources are deliberately kept.
+
+Only one run may own `.results/.lock`; its `owner` file identifies the process and host. Normal exits and handled signals remove the lock. After an uncatchable process kill, confirm no benchmark is active before removing a stale lock manually.
+
+Publication requires a clean selected definition tree at the recorded Git commit. It revalidates manifests, lifecycle completion, case definitions, measured summaries, service-version provenance, and checksums before atomically creating the committed result directory.
