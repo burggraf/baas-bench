@@ -81,3 +81,11 @@ See [`docs/plans/2026-09-03-local-baas-environments-design.md`](docs/plans/2026-
 `bin/baas start NAME` calls `docker compose stop` on all prepared benchmark projects before starting `NAME`. Containers and volumes are retained, but inactive systems consume no CPU or RAM. Docker itself and unrelated local containers are not managed by this repository.
 
 Before collecting benchmark results, also disable unrelated containers and keep Docker's CPU/memory allocation fixed between runs.
+
+## Verified host and compatibility notes
+
+All eight environments were start/smoke/stop verified on an Apple M1 MacBook Air with 16 GB RAM, OrbStack, and Docker Engine 29.4.0 (`linux/arm64`).
+
+- Nhost's pinned reference uses Traefik 3.1, whose old Docker API client is rejected by Docker 29. The setup wrapper substitutes digest-pinned Traefik 3.6.1.
+- Appwrite requires `mongo-entrypoint.sh` and `mongo-init.js` alongside its Compose file; setup fetches both. Its proxy is refreshed after simultaneous stack restarts so Docker labels are rediscovered.
+- Directus 12 restricts `/server/health`; the unauthenticated smoke check therefore uses the documented `/server/ping` liveness endpoint after PostgreSQL and Redis pass their Compose health checks.
