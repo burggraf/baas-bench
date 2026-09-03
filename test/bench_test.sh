@@ -99,5 +99,13 @@ jq -e '.status == "complete" and .debug == false' "$run_dir/run.json" >/dev/null
 [ -f "$run_dir/trials/001/summary.json" ] || fail "trial summary missing"
 grep -q '^start supabase$' "$TMP/log" || fail "platform did not start"
 grep -q '^stop supabase$' "$TMP/log" || fail "platform did not stop"
+published=$($BENCH publish "$run_dir")
+expected="$BENCH_RESULTS_DIR/core-v1/read-throughput/supabase/rest-api/$(basename "$run_dir")"
+[ "$published" = "$expected" ] || fail "unexpected publish destination"
+[ -f "$expected/run.json" ] || fail "published run manifest missing"
+[ -f "$expected/trials/001/summary.json" ] || fail "published summary missing"
+[ ! -d "$expected/trials/001/raw" ] || fail "raw output was committed"
+grep -qx '.results/' "$ROOT/.gitignore" || fail "local benchmark results are not ignored"
+[ -d "$ROOT/results" ] || fail "published results directory missing"
 
 printf '%s\n' PASS

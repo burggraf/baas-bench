@@ -51,7 +51,26 @@ run_case() {
  trial=1; while [ "$trial" -le "$measured" ]; do dir=$tmp/trials/$(printf '%03d' "$trial"); mkdir -p "$dir"; BENCH_PHASE=measure BENCH_TRIAL=$trial BENCH_OUTPUT_DIR=$dir "$case_dir/reset.sh"; BENCH_PHASE=measure BENCH_TRIAL=$trial BENCH_OUTPUT_DIR=$dir "$case_dir/run.sh"; jq -e '.schema_version == 1 and (.duration_seconds|numbers) >= 0 and (.completed_operations|numbers) >= 0 and (.failed_operations|numbers) >= 0 and (.error_rate|numbers) >= 0 and .error_rate <= 1 and (.metrics|type == "object")' "$dir/summary.json" >/dev/null; "$case_dir/verify.sh" >>"$tmp/logs/hooks.log" 2>&1; trial=$((trial+1)); done
  status=complete; [ "$KEEP" -eq 1 ] && status=debug; printf '%s\n' "$final"
 }
+publish_run() {
+ source=$1; [ "$#" -eq 1 ] || usage
+ source=$(CDPATH= cd -- "$source" 2>/dev/null && pwd -P) || { echo "invalid source" >&2; return 1; }
+ localroot=$(CDPATH= cd -- "$LOCAL_RESULTS" 2>/dev/null && pwd -P) || return 1
+ case "$source" in "$localroot"/*) ;; *) echo "source outside local results" >&2; return 1;; esac
+ [ "$(dirname "$source")" = "$localroot" ] || { echo "source must be a run bundle" >&2; return 1; }
+ [ -f "$source/run.json" ] || return 1
+ status=$(jq -r '.status' "$source/run.json")
+ debug=$(jq -r '.debug' "$source/run.json")
+ [ "$status" = complete ] && [ "$debug" = false ] || { echo "run is not publishable" >&2; return 1; }
+ set_id=$(jq -r '.set' "$source/run.json"); benchmark_id=$(jq -r '.benchmark' "$source/run.json"); platform=$(jq -r '.platform' "$source/run.json"); variant=$(jq -r '.variant' "$source/run.json"); run_id=$(jq -r '.run_id' "$source/run.json")
+ [ -n "$set_id" ] && [ "$set_id" != null ] || return 1
+ dest=$PUBLISHED_RESULTS/$set_id/$benchmark_id/$platform/$variant/$run_id; [ ! -e "$dest" ] || { echo "destination exists" >&2; return 1; }
+ mkdir -p "$dest" "$dest/definitions" "$dest/trials"
+ cp "$source/run.json" "$source/environment.json" "$source/definitions.sha256" "$dest/" 2>/dev/null || :
+ cp -R "$source/definitions/." "$dest/definitions/"
+ for summary in "$source"/trials/*/summary.json; do [ -f "$summary" ] || continue; trial=$(basename "$(dirname "$summary")"); mkdir -p "$dest/trials/$trial"; cp "$summary" "$dest/trials/$trial/"; done
+ echo "$dest"
+}
 command=${1:-}; subcommand=${2:-}; [ "$command" = new ] && { shift 2; case "$subcommand" in set) new_set "$@";; benchmark) new_benchmark "$@";; case) new_case "$@";; *) usage;; esac; exit; }; [ "$command" = validate ] && { target=${2:-all}; [ "$target" = all ] && validate_all || { IFS=/ read -r s b p v <<EOF
 $target
 EOF
- [ -n "${v:-}" ] || usage; validate_case "$s" "$b" "$p" "$v"; }; echo PASS; exit; }; [ "$command" = run ] || usage; [ "$#" -ge 5 ] || usage; shift; run_case "$@"
+ [ -n "${v:-}" ] || usage; validate_case "$s" "$b" "$p" "$v"; }; echo PASS; exit; }; [ "$command" = publish ] && { [ "$#" -eq 2 ] || usage; publish_run "$2"; exit; }; [ "$command" = run ] || usage; [ "$#" -ge 5 ] || usage; shift; run_case "$@"
