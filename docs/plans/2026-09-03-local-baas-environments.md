@@ -74,4 +74,4 @@
 2. Record any Apple Silicon or upstream limitations in the README.
 3. Run `sh test/baas_test.sh` and `bin/baas setup all` again.
 4. Confirm `bin/baas status` reports no running benchmark stacks.
-5. Commit and push the repository to `burggraf/bench-backends-k6`.
+5. Commit and push the repository to `burggraf/baas-bench`.

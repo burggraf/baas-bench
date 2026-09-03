@@ -1,4 +1,4 @@
-# bench-backends-k6
+# baas-bench
 
 Reproducible local Docker environments for comparing self-hosted backend-as-a-service systems:
 
