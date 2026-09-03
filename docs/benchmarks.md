@@ -22,6 +22,7 @@ Benchmark administrators that need a container-native tool may use `bin/baas com
 benchmark-sets/<set>/
   set.conf
   README.md
+  shared/                 # optional set-level files captured with each run
   benchmarks/<benchmark>/
     benchmark.conf
     METHODOLOGY.md
@@ -37,6 +38,8 @@ benchmark-sets/<set>/
 ```
 
 A set groups a versioned body of work. A benchmark owns the fairness-sensitive contract. A case is one implementation of that contract. Put REST, GraphQL, database-function, direct database, pooled database, ORM, and extension implementations in separate cases even when they target the same platform.
+
+A set may contain an optional `shared/` directory for workload code or other definitions shared by its cases. When present, `bin/bench run` snapshots it under `definitions/benchmark-sets/<set>/shared/`; it is included in definition checksums and publication consistency checks. Sets without `shared/` do not receive an empty directory.
 
 ## Authoring walkthrough
 

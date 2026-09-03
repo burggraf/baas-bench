@@ -11,7 +11,7 @@ Reproducible local Docker environments for comparing self-hosted backend-as-a-se
 - PocketBase
 - TrailBase
 
-The repository has two layers: `bin/baas` provisions and isolates the systems under test, while `bin/bench` scaffolds, validates, runs, and publishes benchmark cases. The framework is ready, but no benchmark definitions or results are committed yet.
+The repository has two layers: `bin/baas` provisions and isolates the systems under test, while `bin/bench` scaffolds, validates, runs, and publishes benchmark cases. The framework is ready, and the `basic-js-v1` JavaScript SDK benchmark definitions are committed. No benchmark results are committed yet.
 
 A benchmark defines one shared methodology; each platform and access-path combination is a separate case. For example, REST API, database function, direct PostgreSQL, pooled ORM, and WASM-extension implementations belong in distinct cases under the same benchmark.
 
@@ -22,9 +22,10 @@ A benchmark defines one shared methodology; each platform and access-path combin
 - Git, curl, and OpenSSL
 - `jq` 1.6+ for benchmark execution and publication
 - `shasum` or `sha256sum`
+- Node.js 22 or newer and npm (npm is bundled with the Node.js distribution) for `basic-js-v1`
 - At least 16 GB RAM recommended for the largest stacks
 
-The current versions target `linux/arm64` as well as `linux/amd64`. Workload-specific runtimes such as k6, xk6, Node.js, or Rust are required only by cases that invoke them.
+The current versions target `linux/arm64` as well as `linux/amd64`. Workload-specific runtimes such as k6, xk6, Node.js, or Rust are required only by cases that invoke them. The JavaScript benchmark installs its pinned npm dependencies under `.runtime/benchmarks/basic-js-v1`; this generated runtime directory is not committed.
 
 ## BaaS lifecycle
 
@@ -55,6 +56,19 @@ supabase neon convex appwrite nhost directus pocketbase trailbase
 Generated deployments and secrets are stored in `.runtime/` and are not committed. Product versions and immutable upstream revisions are in [`versions.env`](versions.env).
 
 ## Benchmark workflow
+
+For the committed basic JavaScript SDK workload, validate the definitions and run one case at a time:
+
+```sh
+bin/bench validate all
+bin/bench run basic-js-v1 read-list-throughput supabase javascript-sdk
+bin/bench run basic-js-v1 read-item-throughput pocketbase javascript-sdk
+bin/bench run basic-js-v1 write-throughput trailbase javascript-sdk
+```
+
+Each case uses anonymous access, one long-lived client per virtual user, and sequential requests within each virtual user. The four loads (1, 10, 100, and 1,000 VUs) take 4 × (5 seconds warm-up + 3 × 15 seconds measured) = 200 seconds of timed load, or about 3.5 minutes per case including setup and other overhead. These are workload definitions only: no results or rankings are committed or published yet. Neon is excluded because its prepared self-hosted deployment exposes PostgreSQL protocol access but no reproducible official JavaScript-driver proxy.
+
+## Scaffold workflow
 
 ```sh
 # Create the hierarchy; generated TODOs deliberately fail validation.
