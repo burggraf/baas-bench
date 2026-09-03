@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import {
   fixture,
   fixtureIndex,
+  writeRecord,
 } from '../benchmark-sets/basic-js-v1/shared/lib/fixtures.mjs';
 import {
   percentile,
@@ -22,6 +23,8 @@ import { createConvexAdapter } from '../benchmark-sets/basic-js-v1/shared/lib/ad
 import { deployArgs as convexDeployArgs, inspectionExportPath } from '../benchmark-sets/basic-js-v1/shared/lib/admin/convex.mjs';
 import { createAppwriteAdapter } from '../benchmark-sets/basic-js-v1/shared/lib/adapters/appwrite.mjs';
 import { createAppwriteAdmin } from '../benchmark-sets/basic-js-v1/shared/lib/admin/appwrite.mjs';
+import { createDirectusAdapter } from '../benchmark-sets/basic-js-v1/shared/lib/adapters/directus.mjs';
+import { createDirectusAdmin } from '../benchmark-sets/basic-js-v1/shared/lib/admin/directus.mjs';
 
 const setRoot = new URL('../benchmark-sets/basic-js-v1/', import.meta.url);
 const benchmarkIds = [
@@ -763,4 +766,343 @@ test('summarize emits numeric metrics for every load', () => {
   assert.equal(summary.metrics.error_rate_vu_1000, 1);
   assert.equal(Object.keys(summary.metrics).length, 32);
   assert.ok(Object.values(summary.metrics).every(Number.isFinite));
+});
+
+test('Directus adapter uses anonymous SDK commands and native integer IDs', async () => {
+  const calls = [];
+  const authCalls = [];
+  const commands = {
+    readItems: (name, options) => ({ type: 'list', name, options }),
+    readItem: (name, id, options) => ({ type: 'item', name, id, options }),
+    createItem: (name, data, options) => ({ type: 'write', name, data, options }),
+  };
+  const sdk = {
+    createDirectus(endpoint) {
+      calls.push(['create', endpoint]);
+      return { with(plugin) { calls.push(['with', plugin]); return this; }, request: async (command) => {
+        calls.push(['request', command]);
+        if (command.type === 'list') return [{ id: 7, author: 'user-0001', message: 'Guestbook message 00007 from basic-js-v1', created_at: '2025-01-01T00:00:07.000Z' }];
+        if (command.type === 'item') return { id: 42, author: 'user-0001', message: 'Guestbook message 00007 from basic-js-v1', created_at: '2025-01-01T00:00:07.000Z' };
+        return { id: 99 };
+      }, login() { authCalls.push('login'); } };
+    },
+    rest: () => 'rest',
+  };
+  const adapter = createDirectusAdapter({ ...sdk, readItems: commands.readItems, readItem: commands.readItem, createItem: commands.createItem, ids: [42], selectFixtureIndex: () => 0 });
+  const client = await adapter.createClient({ vu: 1 });
+  assert.deepEqual(calls.slice(0, 2), [['create', 'http://127.0.0.1:8055'], ['with', 'rest']]);
+  assert.equal(authCalls.length, 0);
+  const list = await adapter.operation(client, { operation: 'list' });
+  assert.deepEqual(list[0], { id: 7, author: 'user-0001', message: 'Guestbook message 00007 from basic-js-v1', created_at: '2025-01-01T00:00:07.000Z' });
+  const item = await adapter.operation(client, { operation: 'item', trial: 1, vu: 1, sequence: 0 });
+  assert.equal(item.id, 42);
+  const write = await adapter.operation(client, { operation: 'write', trial: 1, load: 1, vu: 1, sequence: 0 });
+  assert.deepEqual(write, { id: 99 });
+  assert.equal(calls.find((entry) => entry[0] === 'request' && entry[1].type === 'list')[1].options.limit, 20);
+  assert.equal(calls.find((entry) => entry[0] === 'request' && entry[1].type === 'item')[1].id, 42);
+  const missingMap = createDirectusAdapter({ ...sdk, readItems: commands.readItems, readItem: commands.readItem, createItem: commands.createItem, ids: [] });
+  await assert.rejects(() => missingMap.operation(client, { operation: 'item', trial: 1, vu: 1, sequence: 0 }), /missing Directus fixture ID/);
+});
+
+test('Directus adapter rejects missing rows and IDs', async () => {
+  const command = (type) => ({ type });
+  const client = { request: async ({ type }) => type === 'item' ? null : {} };
+  const adapter = createDirectusAdapter({ createDirectus: () => client, rest: () => ({}), readItems: () => command('list'), readItem: () => command('item'), createItem: () => command('write'), ids: [] });
+  await assert.rejects(() => adapter.operation(client, { operation: 'item', trial: 1, vu: 1, sequence: 0 }), /missing Directus fixture ID/);
+  await assert.rejects(() => adapter.operation(client, { operation: 'write', trial: 1, load: 1, vu: 1, sequence: 0 }), /no ID/);
+});
+
+test('Directus admin verifies exact baseline, readiness, stage count, and cleans state', async () => {
+  const runtime = mkdtempSync(join(tmpdir(), 'basic-js-directus-admin-'));
+  mkdirSync(join(runtime, 'state'), { recursive: true });
+  writeFileSync(join(runtime, 'state/directus-permissions.json'), '[1,2]\n');
+  const baseline = Array.from({ length: 10000 }, (_, i) => ({ ...fixture(i + 1), id: i + 1 }));
+  const calls = [];
+  const commandCalls = [];
+  const sdk = {};
+  for (const name of ['readItem', 'readCollections', 'deleteCollection', 'createCollection', 'customEndpoint', 'readItems', 'readFieldsByCollection', 'createPermissions', 'readPermissions', 'createItems', 'deleteItems', 'deletePermission', 'deleteItem']) sdk[name] = (...args) => ({ name, args });
+  sdk.rest = () => 'rest';
+  sdk.authentication = () => 'auth';
+  sdk.createDirectus = () => ({ with() { return this; }, async login() {}, stopRefreshing() { calls.push({ name: 'stopRefreshing' }); }, async request(command) {
+    calls.push(command);
+    if (command.name === 'customEndpoint' && command.args[0].path === '/access') return [{ policy: 'policy-1' }];
+    if (command.name === 'readItems' && command.args[0] === 'bb_basic_js_v1_guestbook') return command.args[1]?.limit === 20 ? baseline.slice(-20).reverse() : baseline;
+    if (command.name === 'readFieldsByCollection') return [
+      { field: 'created_at', schema: { is_indexed: true } },
+      { field: 'fixture_key', schema: { is_unique: true, is_indexed: true } },
+    ];
+    if (command.name === 'createPermissions') return [{ id: 1 }, { id: 2 }];
+    if (command.name === 'readPermissions') return [{ id: 1, action: 'read', fields: ['*'], permissions: null, validation: null, presets: null }, { id: 2, action: 'create', fields: ['*'], permissions: null, validation: null, presets: null }];
+    if (command.name === 'readItem') return { id: 10001, fixture_key: null, ...writeRecord({ trial: 1, load: 1, vu: 1, sequence: 0 }), created_at: new Date().toISOString() };
+    return [];
+  } });
+  const admin = createDirectusAdmin({
+    sdk,
+    runtime,
+    root: '/repo',
+    password: 'secret',
+    run: async (command, args, options) => { commandCalls.push({ command, args, input: options.input }); return { stdout: '' }; },
+  });
+  await admin.setup();
+  const definition = calls.find((command) => command.name === 'createCollection').args[0];
+  assert.deepEqual(definition.schema, {});
+  assert.deepEqual(definition.fields.map((field) => field.field), ['id', 'author', 'message', 'created_at', 'fixture_key']);
+  const permissions = calls.find((command) => command.name === 'createPermissions').args[0];
+  assert.deepEqual(permissions.map(({ action, fields, permissions: rule, validation, presets }) => ({ action, fields, permissions: rule, validation, presets })), [
+    { action: 'read', fields: ['*'], permissions: null, validation: null, presets: null },
+    { action: 'create', fields: ['*'], permissions: null, validation: null, presets: null },
+  ]);
+  await admin.verifyReadiness({ operation: 'list', result: baseline.slice(-20).reverse().map(({ fixture_key, ...row }) => row) });
+  await admin.verifyReadiness({ operation: 'write', trial: 1, load: 1, vu: 1, sequence: 0, result: { id: 10001 } });
+  await admin.verifyStage({ operation: 'list', stage: { completed: 0 } });
+  assert.ok(calls.some((command) => command.name === 'readFieldsByCollection'));
+  assert.ok(calls.some((command) => command.name === 'stopRefreshing'));
+  assert.ok(calls.some((command) => command.name === 'customEndpoint' && command.args[0].path === '/access'));
+  assert.equal(commandCalls.length, 1);
+  assert.equal(commandCalls[0].command, '/repo/bin/baas');
+  assert.deepEqual(commandCalls[0].args.slice(0, 6), ['compose', 'directus', 'exec', '-T', 'database', 'psql']);
+  assert.equal(commandCalls[0].input.trim().split('\n').length, 10_000);
+  rmSync(runtime, { recursive: true, force: true });
+});
+
+test('Directus collection lookup scans the unfiltered system list and propagates server errors', async () => {
+  const runtime = mkdtempSync(join(tmpdir(), 'basic-js-directus-status-'));
+  mkdirSync(join(runtime, 'state'), { recursive: true });
+  const command = (name) => ({ name });
+  const makeSdk = (response) => ({
+    readCollections: () => command('readCollections'), deleteCollection: () => command('deleteCollection'),
+    deletePermission: () => command('deletePermission'), rest: () => ({}), authentication: () => ({}),
+    createDirectus: () => ({ with() { return this; }, async login() {}, stopRefreshing() {}, async request({ name }) {
+      if (name === 'readCollections') {
+        if (response instanceof Error) throw response;
+        return response;
+      }
+      return [];
+    } }),
+  });
+  writeFileSync(join(runtime, 'state/directus-permissions.json'), '[]\n');
+  await createDirectusAdmin({ sdk: makeSdk([]), runtime, password: 'secret' }).teardown();
+  writeFileSync(join(runtime, 'state/directus-permissions.json'), '[]\n');
+  await createDirectusAdmin({ sdk: makeSdk([{ collection: 'other' }, { collection: 'bb_basic_js_v1_guestbook' }]), runtime, password: 'secret' }).teardown();
+  for (const error of [Object.assign(new Error('failure'), { status: 401 }), Object.assign(new Error('failure'), { status: 500 })]) {
+    writeFileSync(join(runtime, 'state/directus-permissions.json'), '[]\n');
+    await assert.rejects(() => createDirectusAdmin({ sdk: makeSdk(error), runtime, password: 'secret' }).teardown(), (wrapped) => wrapped.status === error.status && wrapped.cause?.status === error.status);
+  }
+  rmSync(runtime, { recursive: true, force: true });
+});
+
+test('PocketBase adapter uses one anonymous SDK client per VU and exact record APIs', async () => {
+  const { createPocketBaseAdapter } = await import('../benchmark-sets/basic-js-v1/shared/lib/adapters/pocketbase.mjs');
+  const calls = [];
+  class PocketBase {
+    constructor(endpoint) { calls.push(['client', endpoint]); }
+    autoCancellation(value) { calls.push(['autoCancellation', value]); return this; }
+    collection(name) {
+      assert.equal(name, 'bb_basic_js_v1_guestbook');
+      return {
+        async getList(page, perPage, options) {
+          calls.push(['getList', page, perPage, options]);
+          return { items: Array.from({ length: 20 }, (_, index) => ({ id: `id-${index}`, author: 'author', message: 'message', created_at: '2025-01-01T00:00:01.000Z', fixture_key: 1 })) };
+        },
+        async getOne(id, options) {
+          calls.push(['getOne', id, options]);
+          return { id, author: 'user-0002', message: 'Guestbook message 00002 from basic-js-v1', created_at: '2025-01-01T00:00:02.000Z', fixture_key: 2 };
+        },
+        async create(data, options) {
+          calls.push(['create', data, options]);
+          return { id: 'new-id', created_at: 'ignored' };
+        },
+      };
+    }
+  }
+  const adapter = createPocketBaseAdapter({ PocketBase, ids: ['id-1', 'id-2'], selectFixtureIndex: () => 1 });
+  const first = await adapter.createClient({ vu: 1 });
+  const second = await adapter.createClient({ vu: 2 });
+  assert.notEqual(first, second);
+  const list = await adapter.operation(first, { operation: 'list' });
+  const itemContext = { operation: 'item', trial: 1, vu: 1, sequence: 0 };
+  const item = await adapter.operation(first, itemContext);
+  const writeContext = { operation: 'write', trial: 2, load: 10, vu: 3, sequence: 4 };
+  const created = await adapter.operation(second, writeContext);
+  assert.deepEqual(list[0], { id: 'id-0', author: 'author', message: 'message', created_at: '2025-01-01T00:00:01.000Z' });
+  assert.deepEqual(item, { id: 'id-2', author: 'user-0002', message: 'Guestbook message 00002 from basic-js-v1', created_at: '2025-01-01T00:00:02.000Z' });
+  assert.deepEqual(created, { id: 'new-id' });
+  assert.equal(adapter.validate(list, { operation: 'list' }), true);
+  assert.equal(adapter.validate(item, itemContext), true);
+  assert.equal(adapter.validate(created, writeContext), true);
+  assert.deepEqual(calls, [
+    ['client', 'http://127.0.0.1:8090'],
+    ['client', 'http://127.0.0.1:8090'],
+    ['getList', 1, 20, { sort: '-created_at', fields: 'id,author,message,created_at', skipTotal: true }],
+    ['getOne', 'id-2', { fields: 'id,author,message,created_at' }],
+    ['create', { author: 'bench-vu-3', message: 'basic-js-v1 trial-2 load-10 vu-3 operation-4' }, { fields: 'id' }],
+  ]);
+});
+
+test('PocketBase adapter rejects missing IDs and malformed records', async () => {
+  const { createPocketBaseAdapter } = await import('../benchmark-sets/basic-js-v1/shared/lib/adapters/pocketbase.mjs');
+  const client = {
+    collection() {
+      return {
+        async getList() { return { items: [] }; },
+        async getOne() { return null; },
+        async create() { return {}; },
+      };
+    },
+  };
+  const adapter = createPocketBaseAdapter({ PocketBase: class {}, ids: [], selectFixtureIndex: () => 0 });
+  await assert.rejects(() => adapter.operation(client, { operation: 'item', trial: 1, vu: 1, sequence: 0 }), /missing PocketBase fixture ID/);
+  await assert.rejects(() => adapter.operation(client, { operation: 'write', trial: 1, load: 1, vu: 1, sequence: 0 }), /no ID/);
+  assert.equal(adapter.validate(await adapter.operation(client, { operation: 'list' }), { operation: 'list' }), false);
+});
+
+test('PocketBase admin provisions current fields, chunked SQL, exact state, and safe cleanup', async () => {
+  const { createPocketBaseAdmin } = await import('../benchmark-sets/basic-js-v1/shared/lib/admin/pocketbase.mjs');
+  const runtime = mkdtempSync(join(tmpdir(), 'basic-js-pocketbase-admin-'));
+  const commands = [];
+  const sql = [];
+  const collectionCalls = [];
+  let definition;
+  let collectionExists = false;
+  const credentials = { email: 'basic-js-v1@localhost.invalid', password: 'not-logged-secret' };
+  const baselinePage = (offset) => Array.from({ length: 1000 }, (_, index) => {
+    const expected = fixture(offset + index + 1);
+    return [String(expected.fixture_key), `id-${expected.fixture_key}`, expected.author, expected.message, expected.created_at];
+  });
+  class PocketBase {
+    constructor(endpoint) {
+      assert.equal(endpoint, 'http://127.0.0.1:8090');
+      this.collections = {
+        getOne: async (name) => {
+          collectionCalls.push(['getOne', name]);
+          if (!collectionExists) throw Object.assign(new Error('not found'), { status: 404 });
+          return definition;
+        },
+        create: async (value) => {
+          definition = value;
+          collectionExists = true;
+          collectionCalls.push(['create', value]);
+          return value;
+        },
+        delete: async (name) => {
+          collectionCalls.push(['deleteCollection', name]);
+          collectionExists = false;
+        },
+      };
+      this.sql = {
+        run: async (query) => {
+          sql.push(query);
+          if (/SELECT fixture_key, id, author, message, created_at/.test(query)) {
+            const offset = Number(query.match(/OFFSET (\d+)/)?.[1] ?? 0);
+            return { rows: baselinePage(offset) };
+          }
+          if (/SELECT author, message, created_at, fixture_key/.test(query)) {
+            const expected = writeRecord({ trial: 1, load: 1, vu: 0, sequence: 0 });
+            return { rows: [[expected.author, expected.message, new Date().toISOString(), null]] };
+          }
+          if (/SELECT count\(\*\),/.test(query)) return { rows: [['10000', '10000', '0']] };
+          return { rows: [] };
+        },
+      };
+    }
+    collection(name) {
+      if (name === '_superusers') return { authWithPassword: async (email, password) => collectionCalls.push(['auth', email, password]) };
+      assert.equal(name, 'bb_basic_js_v1_guestbook');
+      return { delete: async (id) => collectionCalls.push(['deleteRecord', id]) };
+    }
+  }
+  const run = async (command, args) => {
+    commands.push([command, args]);
+    return { stdout: '', stderr: '' };
+  };
+  try {
+    const admin = createPocketBaseAdmin({ PocketBase, run, root: '/repo', runtime, credentials });
+    await admin.setup();
+    assert.deepEqual(commands[0], ['/repo/bin/baas', ['compose', 'pocketbase', 'exec', '-T', 'pocketbase', '/pb/pocketbase', '--dir=/pb/pb_data', 'superuser', 'upsert', credentials.email, credentials.password]]);
+    assert.equal(statSync(join(runtime, 'state/pocketbase-superuser.json')).mode & 0o777, 0o600);
+    assert.equal(statSync(join(runtime, 'state/pocketbase-ids.json')).mode & 0o777, 0o600);
+    assert.deepEqual(definition.fields.map((field) => [field.name, field.type]), [
+      ['author', 'text'], ['message', 'text'], ['created_at', 'autodate'], ['fixture_key', 'json'],
+    ]);
+    assert.equal(definition.listRule, '');
+    assert.equal(definition.viewRule, '');
+    assert.match(definition.createRule, /fixture_key:isset = false/);
+    assert.equal(definition.updateRule, null);
+    assert.equal(definition.deleteRule, null);
+    assert.ok(sql.filter((query) => query.startsWith('INSERT INTO')).length > 1);
+    assert.ok(sql.every((query) => Buffer.byteLength(query, 'utf8') < 5000));
+    assert.equal(sql.filter((query) => /SELECT fixture_key, id, author, message, created_at/.test(query)).length, 10);
+    await admin.verifyReadiness({ operation: 'list', result: Array.from({ length: 20 }, (_, index) => {
+      const expected = fixture(10000 - index);
+      return { id: `id-${expected.fixture_key}`, author: expected.author, message: expected.message, created_at: expected.created_at };
+    }) });
+    await admin.verifyReadiness({ operation: 'write', result: { id: 'created-id' }, trial: 1, load: 1, vu: 0, sequence: 0 });
+    await admin.cleanupReadiness({ result: { id: 'created-id' } });
+    await admin.verifyStage({ operation: 'list', stage: { completed: 3 } });
+    await admin.reset();
+    await admin.teardown();
+    assert.ok(collectionCalls.some((call) => call[0] === 'deleteRecord' && call[1] === 'created-id'));
+    assert.equal(existsSync(join(runtime, 'state/pocketbase-superuser.json')), false);
+    assert.equal(existsSync(join(runtime, 'state/pocketbase-ids.json')), false);
+    assert.equal(commands.length, 1);
+    assert.ok(sql.some((query) => query === `DELETE FROM "_superusers" WHERE email = '${credentials.email}'`));
+  } finally {
+    rmSync(runtime, { recursive: true, force: true });
+  }
+});
+
+test('PocketBase cases are complete thin JavaScript SDK delegations', () => {
+  const operations = { 'read-list-throughput': 'list', 'read-item-throughput': 'item', 'write-throughput': 'write' };
+  for (const [benchmark, operation] of Object.entries(operations)) {
+    const config = parseConf(read(`benchmarks/${benchmark}/cases/pocketbase/javascript-sdk/case.conf`));
+    assert.deepEqual(config, {
+      schema_version: '1',
+      platform: 'pocketbase',
+      variant: 'javascript-sdk',
+      access_path: 'records-rest',
+      connection: 'http',
+      client: 'pocketbase@0.28.0',
+      implementation: 'javascript-node-22',
+    });
+    const readme = read(`benchmarks/${benchmark}/cases/pocketbase/javascript-sdk/README.md`).toLowerCase();
+    assert.match(readme, /nullable json/);
+    assert.match(readme, /one .*client per virtual user/);
+    assert.match(readme, /unauthenticated/);
+    for (const hook of ['setup', 'verify', 'reset', 'run', 'teardown']) {
+      const contents = read(`benchmarks/${benchmark}/cases/pocketbase/javascript-sdk/${hook}.sh`);
+      assert.match(contents, new RegExp(`shared/case\\.sh" ${hook} pocketbase ${operation}`));
+    }
+  }
+});
+
+test('PocketBase setup preserves its original failure when cleanup also fails', async () => {
+  const { createPocketBaseAdmin } = await import('../benchmark-sets/basic-js-v1/shared/lib/admin/pocketbase.mjs');
+  const runtime = mkdtempSync(join(tmpdir(), 'basic-js-pocketbase-failure-'));
+  const original = new Error('collection creation failed');
+  class PocketBase {
+    constructor() {
+      this.collections = {
+        async getOne() { throw Object.assign(new Error('not found'), { status: 404 }); },
+        async create() { throw original; },
+      };
+      this.sql = { async run() { throw new Error('superuser cleanup failed'); } };
+    }
+    collection() { return { async authWithPassword() {} }; }
+  }
+  const run = async (_command, args) => {
+    if (args.includes('delete')) throw new Error('superuser cleanup failed');
+    return { stdout: '', stderr: '' };
+  };
+  try {
+    const admin = createPocketBaseAdmin({
+      PocketBase,
+      run,
+      root: '/repo',
+      runtime,
+      credentials: { email: 'basic-js-v1@localhost.invalid', password: 'not-logged-secret' },
+    });
+    await assert.rejects(() => admin.setup(), (error) => error === original && error.cleanupError === 'superuser cleanup failed' && !error.message.includes('not-logged-secret'));
+  } finally {
+    rmSync(runtime, { recursive: true, force: true });
+  }
 });

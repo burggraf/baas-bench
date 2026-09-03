@@ -38,7 +38,7 @@ The workload is explicitly unauthenticated. Public or anonymous policy permits s
 
 Every trial visits loads 1, 10, 100, and 1,000 in ascending order. Each load receives a 5-second warm-up in the one warm-up trial, followed later by three measured trials with a 15-second stage per load. The benchmark does not flush OS, database, SDK, or platform caches between stages, so measured trials represent a warmed local service.
 
-No application cache is added. Directus retains the prepared deployment's enabled Redis response cache and automatic invalidation defaults; this material platform default is disclosed rather than disabled.
+No application cache is added. Directus retains the prepared deployment's enabled Redis API cache (CACHE_ENABLED=true, CACHE_STORE=redis) and automatic purge (CACHE_AUTO_PURGE=true); warm-up intentionally reaches that prepared steady state. This material platform default is disclosed rather than disabled.
 
 ## Workload, concurrency, duration, and pacing
 

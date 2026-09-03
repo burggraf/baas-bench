@@ -32,7 +32,7 @@ This workload is deliberately unauthenticated. Public/anonymous clients may read
 
 The load order is 1, 10, 100, and 1,000. One 5-second warm-up stage per load precedes three 15-second measured trials per load. OS, database, platform, HTTP, and SDK caches are not flushed between stages; the result describes a warmed service.
 
-No application cache is introduced. Directus retains the prepared stack's enabled Redis API cache and automatic invalidation behavior, which is disclosed as a platform default.
+No application cache is introduced. Directus retains the prepared stack's enabled Redis API cache (CACHE_ENABLED=true, CACHE_STORE=redis) and automatic purge (CACHE_AUTO_PURGE=true); warm-up intentionally reaches that prepared steady state. This is disclosed as a platform default.
 
 ## Workload, concurrency, duration, and pacing
 

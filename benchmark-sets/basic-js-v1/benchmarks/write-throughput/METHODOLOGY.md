@@ -34,7 +34,7 @@ Writes are explicitly unauthenticated. Public/anonymous policy allows guestbook 
 
 Loads execute as 1, 10, 100, and 1,000 virtual users. One 5-second warm-up at every load precedes three 15-second measured trials. Every stage is reset to the 10,000-row baseline, so warm-up writes do not change measured cardinality. Caches are not explicitly flushed.
 
-No application cache exists. Directus keeps the prepared environment's Redis response cache and automatic invalidation defaults, though writes still traverse the normal SDK/API create path.
+No application cache exists. Directus keeps the prepared environment's Redis API cache (CACHE_ENABLED=true, CACHE_STORE=redis) and automatic purge (CACHE_AUTO_PURGE=true); warm-up intentionally reaches that prepared steady state. Writes still traverse the normal SDK/API create path.
 
 ## Workload, concurrency, duration, and pacing
 
