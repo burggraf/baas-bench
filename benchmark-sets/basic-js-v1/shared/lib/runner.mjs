@@ -10,9 +10,8 @@ function errorKind(error) {
   return error instanceof Error ? error.constructor.name : 'unknown_error';
 }
 
-function errorMessage(error) {
-  const message = error instanceof Error ? error.message : String(error);
-  return message.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 200);
+function errorMessage() {
+  return 'operation failed';
 }
 
 export async function runStage({
@@ -22,9 +21,11 @@ export async function runStage({
   createClient,
   operation,
   validate,
+  settleGraceMs = 60_000,
 }) {
   if (!Number.isInteger(concurrency) || concurrency < 1) throw new RangeError('invalid concurrency');
   if (!Number.isFinite(durationMs) || durationMs <= 0) throw new RangeError('invalid duration');
+  if (!Number.isFinite(settleGraceMs) || settleGraceMs < 0) throw new RangeError('invalid settle grace');
 
   const clients = [];
   for (let vu = 1; vu <= concurrency; vu += 1) clients.push(await createClient(vu));
@@ -37,6 +38,7 @@ export async function runStage({
   const errorSamples = [];
   const startedAt = performance.now();
   const deadline = startedAt + durationMs;
+  let acceptingResults = true;
 
   async function worker(client, vu) {
     let sequence = 0;
@@ -45,7 +47,10 @@ export async function runStage({
       const operationStartedAt = performance.now();
       try {
         const value = await operation(client, { trial, vu, sequence });
-        if (!(await validate(value, { trial, vu, sequence }))) {
+        if (!acceptingResults) return;
+        const valid = await validate(value, { trial, vu, sequence });
+        if (!acceptingResults) return;
+        if (!valid) {
           failed += 1;
           errorKinds.invalid_response = (errorKinds.invalid_response ?? 0) + 1;
         } else {
@@ -53,6 +58,7 @@ export async function runStage({
           latencies.push(performance.now() - operationStartedAt);
         }
       } catch (error) {
+        if (!acceptingResults) return;
         failed += 1;
         const kind = errorKind(error);
         errorKinds[kind] = (errorKinds[kind] ?? 0) + 1;
@@ -64,7 +70,10 @@ export async function runStage({
 
   let guard;
   const hardLimit = new Promise((_, reject) => {
-    guard = setTimeout(() => reject(new Error('stage did not settle within 60 seconds')), durationMs + 60_000);
+    guard = setTimeout(() => {
+      acceptingResults = false;
+      reject(new Error('stage did not settle within 60 seconds'));
+    }, durationMs + settleGraceMs);
   });
   try {
     await Promise.race([

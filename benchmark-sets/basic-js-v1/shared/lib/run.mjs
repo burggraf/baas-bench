@@ -100,6 +100,6 @@ export async function runFromArguments(args, dependencies = {}) {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   runFromArguments(process.argv.slice(2)).catch((error) => {
     console.error(error instanceof Error ? error.message : String(error));
-    process.exitCode = 1;
+    process.exit(1);
   });
 }

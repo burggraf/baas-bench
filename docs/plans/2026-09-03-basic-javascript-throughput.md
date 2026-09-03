@@ -637,14 +637,14 @@ Run focused tests, collection/SQL integration diagnostic, validations, and shell
 **Files:**
 - Create: `benchmark-sets/basic-js-v1/shared/lib/adapters/trailbase.mjs`
 - Create: `benchmark-sets/basic-js-v1/shared/lib/admin/trailbase.mjs`
-- Create: `benchmark-sets/basic-js-v1/shared/trailbase/U1700000000__create_bb_basic_js_v1_guestbook.sql`
+- Create: `benchmark-sets/basic-js-v1/shared/trailbase/U1785764700__create_bb_basic_js_v1_guestbook.sql`
 - Create: `benchmark-sets/basic-js-v1/shared/trailbase/record-api.textproto`
 - Create: `benchmark-sets/basic-js-v1/benchmarks/read-list-throughput/cases/trailbase/javascript-sdk/` (`case.conf`, `README.md`, and five hooks)
 - Create: `benchmark-sets/basic-js-v1/benchmarks/read-item-throughput/cases/trailbase/javascript-sdk/` (same seven files)
 - Create: `benchmark-sets/basic-js-v1/benchmarks/write-throughput/cases/trailbase/javascript-sdk/` (same seven files)
 - Modify: `test/basic_js_test.mjs`
 
-Use a fixed committed migration version, not wall-clock generation during runs.
+Use a fixed committed migration version, not wall-clock generation during runs. Execution diagnostic: the pinned image already contains `U1785764695__unverified_email.sql`, so the originally proposed `U1700000000` version would be skipped; `U1785764700` is the first compatible fixed version.
 
 **Step 1: Add failing client contract tests**
 
@@ -656,9 +656,9 @@ Create a STRICT SQLite table with integer primary key, bounded author/message ch
 
 **Step 3: Implement administration carefully**
 
-First run a diagnostic proving a second container CLI invocation can add/promote a runtime-only admin while the server owns the depot. If it cannot, stop and implement the smallest secure fallback based on pinned startup/admin behavior; do not scrape credentials into logs.
+First run a diagnostic proving a second container CLI invocation can add/promote a runtime-only admin while the server owns the depot. If it cannot, stop and implement the smallest secure fallback based on pinned startup/admin behavior; do not print or duplicate credentials in diagnostics. Execution diagnostic: the pinned CLI failed against the initialized depot, so setup securely captures the server's already logged first-boot administrator once into ignored mode-600 environment state and refreshes that cache after an authentication failure.
 
-Copy the fixed migration/config fragment into the mounted depot without replacing unrelated configuration, send SIGHUP, and verify migration then config reload. Authenticate the runtime admin and use `/api/_admin/query` for chunked fixtures, counts, ID map, and reset. Teardown through the admin table-delete route so its generated down migration and Record API cleanup remain consistent, then remove the runtime admin.
+Copy the fixed migration/config fragment into the mounted depot without replacing unrelated configuration, send SIGHUP, and verify migration then config reload. An applied migration must remain byte-identical in the depot, so fail on a conflicting file and retain the immutable create migration after teardown. Authenticate the administrator and use `/api/_admin/query` for chunked fixtures, counts, ID map, and reset. Teardown through the admin table-delete route so its generated down migration and Record API cleanup remain consistent, then remove the case's runtime credential copy.
 
 **Step 4: Verify and commit**
 

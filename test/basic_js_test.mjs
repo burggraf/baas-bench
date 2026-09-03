@@ -732,7 +732,7 @@ test('runStage counts rejection and invalid responses without retrying them', as
     async operation(client) {
       calls += 1;
       await new Promise((resolve) => setTimeout(resolve, 10));
-      if (client.vu === 1) throw new Error('network failed');
+      if (client.vu === 1) throw new Error('request failed: Authorization Bearer secret-token https://example.test/?token=secret');
       return { ok: false };
     },
     validate(value) {
@@ -745,7 +745,31 @@ test('runStage counts rejection and invalid responses without retrying them', as
   assert.equal(result.completed, 0);
   assert.equal(result.failed, 2);
   assert.deepEqual(result.error_kinds, { invalid_response: 1, Error: 1 });
+  assert.deepEqual(result.error_samples, [{ kind: 'Error', message: 'operation failed' }]);
   assert.equal(result.latencies_ms.length, 0);
+});
+
+test('runStage hard guard stops worker bookkeeping after rejection', async () => {
+  let validations = 0;
+  const stage = runStage({
+    concurrency: 1,
+    durationMs: 1,
+    settleGraceMs: 5,
+    trial: 1,
+    createClient() { return {}; },
+    async operation() {
+      return { ok: true };
+    },
+    async validate() {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      validations += 1;
+      return true;
+    },
+  });
+  await assert.rejects(stage, /stage did not settle/);
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(validations, 1);
+  assert.match(read('shared/lib/runner.mjs'), /const valid = await validate[\s\S]*?if \(!acceptingResults\) return;[\s\S]*?if \(!valid\)/);
 });
 
 test('summarize emits numeric metrics for every load', () => {
