@@ -26,7 +26,32 @@ validate_benchmark() { dir=$1; set_id=$2; id=$3; check_conf "$dir/benchmark.conf
 validate_case() { set_id=$1; benchmark_id=$2; platform=$3; variant=$4; casedir=$SETS/$set_id/benchmarks/$benchmark_id/cases/$platform/$variant; validate_set "$SETS/$set_id" "$set_id" || return 1; validate_benchmark "$SETS/$set_id/benchmarks/$benchmark_id" "$set_id" "$benchmark_id" || return 1; dir=$casedir; check_conf "$dir/case.conf" platform variant access_path connection client implementation; [ "$(conf_value "$dir/case.conf" platform)" = "$platform" ] && [ "$(conf_value "$dir/case.conf" variant)" = "$variant" ] || return 1; valid_platform "$platform" || return 1; no_todo "$dir/case.conf"; no_todo "$dir/README.md"; for hook in setup verify reset run teardown; do [ -x "$dir/$hook.sh" ] && sh -n "$dir/$hook.sh" || { echo "invalid hook: $dir/$hook.sh" >&2; return 1; }; no_todo "$dir/$hook.sh" || return 1; done; }
 validate_all() { found=0; for setdir in "$SETS"/*; do [ -d "$setdir" ] || continue; set_id=${setdir##*/}; validate_set "$setdir" "$set_id" || return 1; for bdir in "$setdir"/benchmarks/*; do [ -d "$bdir" ] || continue; bid=${bdir##*/}; validate_benchmark "$bdir" "$set_id" "$bid" || return 1; for cfile in "$bdir"/cases/*/*/case.conf; do [ -f "$cfile" ] || continue; rel=${cfile#"$SETS/"}; s=${rel%%/*}; rest=${rel#*/}; rest=${rest#benchmarks/}; b=${rest%%/*}; rest=${rest#*/}; rest=${rest#cases/}; platform=${rest%%/*}; variant=${rest#*/}; variant=${variant%/case.conf}
  validate_case "$s" "$b" "$platform" "$variant" || return 1; found=1; done; done; done; [ "$found" -eq 0 ] || :; }
-command=${1:-}; subcommand=${2:-}; [ "$command" = new ] && { shift 2; case "$subcommand" in set) new_set "$@";; benchmark) new_benchmark "$@";; case) new_case "$@";; *) usage;; esac; exit; }; [ "$command" = validate ] || usage; target=${2:-all}; [ "$target" = all ] && validate_all || { IFS=/ read -r s b p v <<EOF
+sha256() { if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'; else sha256sum "$1" | awk '{print $1}'; fi; }
+run_case() {
+ set_id=$1; benchmark_id=$2; platform=$3; variant=$4; KEEP=0
+ shift 4
+ while [ "$#" -gt 0 ]; do case "$1" in --allow-dirty) ALLOW=1;; --keep) KEEP=1;; *) usage;; esac; shift; done
+ ALLOW=${ALLOW:-${BENCH_ALLOW_DIRTY:-0}}
+ validate_case "$set_id" "$benchmark_id" "$platform" "$variant" || return 1
+ mkdir -p "$LOCAL_RESULTS"
+ mkdir "$LOCAL_RESULTS/.lock" 2>/dev/null || { echo "benchmark lock is held" >&2; return 1; }
+ lock=$LOCAL_RESULTS/.lock; run_id=$(date -u '+%Y%m%dT%H%M%SZ')-$set_id-$benchmark_id-$platform-$variant-$$
+ tmp=$LOCAL_RESULTS/.tmp-$run_id; final=$LOCAL_RESULTS/$run_id; mkdir -p "$tmp/definitions" "$tmp/logs" "$tmp/warmups" "$tmp/trials"
+ status=failed
+ cleanup() { rc=$?; trap - EXIT INT TERM; if [ "$KEEP" -eq 0 ]; then [ "${setup_started:-0}" -eq 1 ] && "$case_dir/teardown.sh" >>"$tmp/logs/hooks.log" 2>&1 || :; [ "${started:-0}" -eq 1 ] && "$BAAS" stop "$platform" >>"$tmp/logs/baas.log" 2>&1 || :; fi; [ -d "$tmp" ] && { jq -n --arg status "$status" --arg set "$set_id" --arg benchmark "$benchmark_id" --arg platform "$platform" --arg variant "$variant" --arg run_id "$run_id" --arg commit "$(git rev-parse HEAD 2>/dev/null || echo unknown)" --arg debug "$KEEP" '{schema_version:1,status:$status,debug:($debug == "1"),run_id:$run_id,set:$set,benchmark:$benchmark,platform:$platform,variant:$variant,commit:$commit}' >"$tmp/run.json"; mv "$tmp" "$final"; }; rmdir "$lock" 2>/dev/null || rm -rf "$lock"; exit "$rc"; }
+ trap cleanup EXIT INT TERM
+ case_dir=$SETS/$set_id/benchmarks/$benchmark_id/cases/$platform/$variant
+ cp -R "$SETS/$set_id/." "$tmp/definitions/"
+ git_commit=$(git rev-parse HEAD)
+ "$BAAS" start "$platform" >"$tmp/logs/baas.log" 2>&1; started=1
+ "$case_dir/setup.sh" >"$tmp/logs/hooks.log" 2>&1; setup_started=1
+ "$case_dir/verify.sh" >>"$tmp/logs/hooks.log" 2>&1
+ warm=$(conf_value "$SETS/$set_id/benchmarks/$benchmark_id/benchmark.conf" warmup_trials); measured=$(conf_value "$SETS/$set_id/benchmarks/$benchmark_id/benchmark.conf" measured_trials)
+ trial=1; while [ "$trial" -le "$warm" ]; do BENCH_PHASE=warmup BENCH_TRIAL=$trial BENCH_OUTPUT_DIR=$tmp/warmups/$(printf '%03d' "$trial") sh -c 'mkdir -p "$BENCH_OUTPUT_DIR"; "$0"' "$case_dir/reset.sh"; BENCH_PHASE=warmup BENCH_TRIAL=$trial BENCH_OUTPUT_DIR=$tmp/warmups/$(printf '%03d' "$trial") "$case_dir/run.sh"; "$case_dir/verify.sh" >>"$tmp/logs/hooks.log" 2>&1; trial=$((trial+1)); done
+ trial=1; while [ "$trial" -le "$measured" ]; do dir=$tmp/trials/$(printf '%03d' "$trial"); mkdir -p "$dir"; BENCH_PHASE=measure BENCH_TRIAL=$trial BENCH_OUTPUT_DIR=$dir "$case_dir/reset.sh"; BENCH_PHASE=measure BENCH_TRIAL=$trial BENCH_OUTPUT_DIR=$dir "$case_dir/run.sh"; jq -e '.schema_version == 1 and (.duration_seconds|numbers) >= 0 and (.completed_operations|numbers) >= 0 and (.failed_operations|numbers) >= 0 and (.error_rate|numbers) >= 0 and .error_rate <= 1 and (.metrics|type == "object")' "$dir/summary.json" >/dev/null; "$case_dir/verify.sh" >>"$tmp/logs/hooks.log" 2>&1; trial=$((trial+1)); done
+ status=complete; [ "$KEEP" -eq 1 ] && status=debug; printf '%s\n' "$final"
+}
+command=${1:-}; subcommand=${2:-}; [ "$command" = new ] && { shift 2; case "$subcommand" in set) new_set "$@";; benchmark) new_benchmark "$@";; case) new_case "$@";; *) usage;; esac; exit; }; [ "$command" = validate ] && { target=${2:-all}; [ "$target" = all ] && validate_all || { IFS=/ read -r s b p v <<EOF
 $target
 EOF
- [ -n "${v:-}" ] || usage; validate_case "$s" "$b" "$p" "$v"; }; echo PASS
+ [ -n "${v:-}" ] || usage; validate_case "$s" "$b" "$p" "$v"; }; echo PASS; exit; }; [ "$command" = run ] || usage; [ "$#" -ge 5 ] || usage; shift; run_case "$@"

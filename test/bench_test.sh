@@ -57,5 +57,47 @@ sed -i.bench_test '/^password=/d' "$CASE/case.conf"
 rm -f "$CASE/case.conf.bench_test"
 printf 'platform=duplicate\n' >> "$CASE/case.conf"
 if "$BENCH" validate core-v1/read-throughput/supabase/rest-api >/dev/null 2>&1; then fail "duplicate key accepted"; fi
+sed -i.bench_test '/^platform=duplicate/d' "$CASE/case.conf"; rm -f "$CASE/case.conf.bench_test"
+
+FAKE_BAAS="$TMP/baas"
+cat > "$FAKE_BAAS" <<'EOF'
+#!/bin/sh
+case "$1" in list) printf '%s\n' supabase neon convex appwrite nhost directus pocketbase trailbase;; start|stop) printf '%s %s\n' "$1" "$2" >> "$BENCH_TEST_LOG";; esac
+EOF
+chmod +x "$FAKE_BAAS"
+export BENCH_BAAS_BIN="$FAKE_BAAS" BENCH_ALLOW_DIRTY=1 BENCH_TEST_LOG="$TMP/log"
+cat > "$CASE/setup.sh" <<'EOF'
+#!/bin/sh
+set -eu
+echo setup >> "$BENCH_TEST_LOG"
+EOF
+cat > "$CASE/verify.sh" <<'EOF'
+#!/bin/sh
+set -eu
+echo verify >> "$BENCH_TEST_LOG"
+EOF
+cat > "$CASE/reset.sh" <<'EOF'
+#!/bin/sh
+set -eu
+echo "reset:$BENCH_PHASE:$BENCH_TRIAL" >> "$BENCH_TEST_LOG"
+EOF
+cat > "$CASE/run.sh" <<'EOF'
+#!/bin/sh
+set -eu
+echo "run:$BENCH_PHASE:$BENCH_TRIAL" >> "$BENCH_TEST_LOG"
+[ "$BENCH_PHASE" = measure ] && printf '{"schema_version":1,"duration_seconds":1,"completed_operations":1,"failed_operations":0,"error_rate":0,"metrics":{"operations_per_second":1}}\n' > "$BENCH_OUTPUT_DIR/summary.json"
+EOF
+cat > "$CASE/teardown.sh" <<'EOF'
+#!/bin/sh
+set -eu
+echo teardown >> "$BENCH_TEST_LOG"
+EOF
+chmod +x "$CASE"/*.sh
+run_dir=$($BENCH run core-v1 read-throughput supabase rest-api)
+[ -f "$run_dir/run.json" ] || fail "run manifest missing"
+jq -e '.status == "complete" and .debug == false' "$run_dir/run.json" >/dev/null || fail "run not complete"
+[ -f "$run_dir/trials/001/summary.json" ] || fail "trial summary missing"
+grep -q '^start supabase$' "$TMP/log" || fail "platform did not start"
+grep -q '^stop supabase$' "$TMP/log" || fail "platform did not stop"
 
 printf '%s\n' PASS
