@@ -341,5 +341,6 @@ if "$BENCH" publish "$malicious" >/dev/null 2>&1; then fail "malicious metadata 
 [ ! -e "$TMP/escape" ] || fail "publication escaped root"
 grep -qx '.results/' "$ROOT/.gitignore" || fail "local benchmark results are not ignored"
 [ -d "$ROOT/results" ] || fail "published results directory missing"
+node --test "$ROOT/test/basic_js_test.mjs"
 
 printf '%s\n' PASS
