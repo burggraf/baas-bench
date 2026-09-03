@@ -68,6 +68,22 @@ rm -f "$CASE/case.conf.bench_test"
 printf 'platform=duplicate\n' >> "$CASE/case.conf"
 if "$BENCH" validate core-v1/read-throughput/supabase/rest-api >/dev/null 2>&1; then fail "duplicate key accepted"; fi
 sed -i.bench_test '/^platform=duplicate/d' "$CASE/case.conf"; rm -f "$CASE/case.conf.bench_test"
+cp "$BENCHMARK/benchmark.conf" "$TMP/benchmark.conf.valid"
+sed -i.bench_test 's/^schema_version=1/schema_version=2/' "$BENCHMARK/benchmark.conf"; rm -f "$BENCHMARK/benchmark.conf.bench_test"
+if "$BENCH" validate core-v1/read-throughput/supabase/rest-api >/dev/null 2>&1; then fail "unknown schema version accepted"; fi
+cp "$TMP/benchmark.conf.valid" "$BENCHMARK/benchmark.conf"
+sed -i.bench_test 's/^measured_trials=2/measured_trials=0/' "$BENCHMARK/benchmark.conf"; rm -f "$BENCHMARK/benchmark.conf.bench_test"
+if "$BENCH" validate core-v1/read-throughput/supabase/rest-api >/dev/null 2>&1; then fail "zero measured trials accepted"; fi
+cp "$TMP/benchmark.conf.valid" "$BENCHMARK/benchmark.conf"
+sed -i.bench_test 's/^primary_direction=higher/primary_direction=sideways/' "$BENCHMARK/benchmark.conf"; rm -f "$BENCHMARK/benchmark.conf.bench_test"
+if "$BENCH" validate core-v1/read-throughput/supabase/rest-api >/dev/null 2>&1; then fail "invalid metric direction accepted"; fi
+cp "$TMP/benchmark.conf.valid" "$BENCHMARK/benchmark.conf"
+chmod -x "$CASE/reset.sh"
+if "$BENCH" validate core-v1/read-throughput/supabase/rest-api >/dev/null 2>&1; then fail "non-executable hook accepted"; fi
+chmod +x "$CASE/reset.sh"
+printf '%s\n' "'" >> "$CASE/reset.sh"
+if "$BENCH" validate core-v1/read-throughput/supabase/rest-api >/dev/null 2>&1; then fail "hook syntax error accepted"; fi
+sed -i.bench_test '$d' "$CASE/reset.sh"; rm -f "$CASE/reset.sh.bench_test"
 
 FAKE_BAAS="$TMP/baas"
 cat > "$FAKE_BAAS" <<'EOF'
@@ -151,6 +167,22 @@ grep -q '^setup:setup:0:' "$TMP/log" || fail "setup did not receive hook context
 grep -q '^verify:verify:0:' "$TMP/log" || fail "initial verify did not receive hook context"
 grep -q '^teardown:teardown:0:' "$TMP/log" || fail "teardown did not receive hook context"
 grep -q '^stop supabase$' "$TMP/log" || fail "platform did not stop"
+expected_lifecycle='start supabase
+setup:setup:0
+verify:verify:0
+reset:warmup:1
+run:warmup:1
+verify:warmup:1
+reset:measure:1
+run:measure:1
+verify:measure:1
+reset:measure:2
+run:measure:2
+verify:measure:2
+teardown:teardown:0
+stop supabase'
+actual_lifecycle=$(cut -d: -f1-3 "$TMP/log")
+[ "$actual_lifecycle" = "$expected_lifecycle" ] || fail "unexpected lifecycle order"
 
 # Every path component is validated before any case path is resolved.
 if "$BENCH" validate 'core-v1/read-throughput/supabase/../rest-api' >/dev/null 2>&1; then
