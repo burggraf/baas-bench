@@ -65,7 +65,10 @@ cat > "$FAKE_BAAS" <<'EOF'
 case "$1" in list) printf '%s\n' supabase neon convex appwrite nhost directus pocketbase trailbase;; start|stop) printf '%s %s\n' "$1" "$2" >> "$BENCH_TEST_LOG";; esac
 EOF
 chmod +x "$FAKE_BAAS"
-export BENCH_BAAS_BIN="$FAKE_BAAS" BENCH_ALLOW_DIRTY=1 BENCH_TEST_LOG="$TMP/log"
+export BENCH_BAAS_BIN="$FAKE_BAAS" BENCH_TEST_LOG="$TMP/log"
+# Dirty definitions require explicit opt-in.
+if BENCH_ALLOW_DIRTY=0 "$BENCH" run core-v1 read-throughput supabase rest-api >/dev/null 2>&1; then fail "dirty definitions accepted"; fi
+export BENCH_ALLOW_DIRTY=1
 cat > "$CASE/setup.sh" <<'EOF'
 #!/bin/sh
 set -eu
@@ -106,6 +109,15 @@ expected="$BENCH_RESULTS_DIR/core-v1/read-throughput/supabase/rest-api/$(basenam
 [ -f "$expected/trials/001/summary.json" ] || fail "published summary missing"
 [ ! -d "$expected/trials/001/raw" ] || fail "raw output was committed"
 if "$BENCH" publish "$TMP" >/dev/null 2>&1; then fail "outside bundle was published"; fi
+# Publication metadata must not escape the results root.
+malicious="$BENCH_LOCAL_RESULTS_DIR/malicious"
+mkdir -p "$malicious/definitions" "$malicious/trials/001"
+cp "$run_dir/environment.json" "$malicious/environment.json"
+cp "$run_dir/definitions.sha256" "$malicious/definitions.sha256"
+cp "$run_dir/trials/001/summary.json" "$malicious/trials/001/summary.json"
+printf '%s\n' '{"status":"complete","debug":false,"set":"..","benchmark":"escape","platform":"x","variant":"y","run_id":"z"}' > "$malicious/run.json"
+if "$BENCH" publish "$malicious" >/dev/null 2>&1; then fail "malicious metadata published"; fi
+[ ! -e "$TMP/escape" ] || fail "publication escaped root"
 grep -qx '.results/' "$ROOT/.gitignore" || fail "local benchmark results are not ignored"
 [ -d "$ROOT/results" ] || fail "published results directory missing"
 

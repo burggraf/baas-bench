@@ -20,7 +20,7 @@ check_conf() {
  awk -F= 'BEGIN{bad=0} /^[[:space:]]*$/ {bad=1} !/^[a-z][a-z0-9_]*=[^[:cntrl:]]*$/ {bad=1} {if (++seen[$1]>1) bad=1; if ($1 ~ /password|secret|token|credential|api_key|connection_string/) bad=1} END{exit bad}' "$file" || { echo "invalid metadata: $file" >&2; return 1; }
  for key in "$@"; do value=$(conf_value "$file" "$key") || { echo "missing or duplicate $key: $file" >&2; return 1; }; [ -n "$value" ] || { echo "blank $key: $file" >&2; return 1; }; done
 }
-no_todo() { ! grep -R -n 'TODO' "$1" >/dev/null 2>&1 || { echo "unresolved TODO: $1" >&2; return 1; }; }
+no_todo() { ! find "$1" -type f -exec grep -n 'TODO' {} + >/dev/null 2>&1 || { echo "unresolved TODO: $1" >&2; return 1; }; }
 validate_set() { dir=$1; id=$2; check_conf "$dir/set.conf" schema_version id title description; [ "$(conf_value "$dir/set.conf" schema_version)" = 1 ] || return 1; [ "$(conf_value "$dir/set.conf" id)" = "$id" ] || return 1; valid_id "$id"; no_todo "$dir/set.conf"; }
 validate_benchmark() { dir=$1; set_id=$2; id=$3; check_conf "$dir/benchmark.conf" schema_version id title description primary_metric primary_unit primary_direction required_metrics warmup_trials measured_trials; [ "$(conf_value "$dir/benchmark.conf" schema_version)" = 1 ] || return 1; [ "$(conf_value "$dir/benchmark.conf" id)" = "$id" ] || return 1; metric=$(conf_value "$dir/benchmark.conf" primary_metric); valid_metric "$metric" || return 1; direction=$(conf_value "$dir/benchmark.conf" primary_direction); [ "$direction" = higher ] || [ "$direction" = lower ] || return 1; required=$(conf_value "$dir/benchmark.conf" required_metrics); oldifs=$IFS; IFS=,; for metric in $required; do valid_metric "$metric" || { IFS=$oldifs; return 1; }; done; IFS=$oldifs; warm=$(conf_value "$dir/benchmark.conf" warmup_trials); measured=$(conf_value "$dir/benchmark.conf" measured_trials); printf '%s\n%s\n' "$warm" "$measured" | grep -Eq '^[0-9]+$' || return 1; [ "$measured" -gt 0 ] || return 1; no_todo "$dir/benchmark.conf"; no_todo "$dir/METHODOLOGY.md"; }
 validate_case() { set_id=$1; benchmark_id=$2; platform=$3; variant=$4; casedir=$SETS/$set_id/benchmarks/$benchmark_id/cases/$platform/$variant; validate_set "$SETS/$set_id" "$set_id" || return 1; validate_benchmark "$SETS/$set_id/benchmarks/$benchmark_id" "$set_id" "$benchmark_id" || return 1; dir=$casedir; check_conf "$dir/case.conf" platform variant access_path connection client implementation; [ "$(conf_value "$dir/case.conf" platform)" = "$platform" ] && [ "$(conf_value "$dir/case.conf" variant)" = "$variant" ] || return 1; valid_platform "$platform" || return 1; no_todo "$dir/case.conf"; no_todo "$dir/README.md"; for hook in setup verify reset run teardown; do [ -x "$dir/$hook.sh" ] && sh -n "$dir/$hook.sh" || { echo "invalid hook: $dir/$hook.sh" >&2; return 1; }; no_todo "$dir/$hook.sh" || return 1; done; }
@@ -33,6 +33,9 @@ run_case() {
  while [ "$#" -gt 0 ]; do case "$1" in --allow-dirty) ALLOW=1;; --keep) KEEP=1;; *) usage;; esac; shift; done
  ALLOW=${ALLOW:-${BENCH_ALLOW_DIRTY:-0}}
  validate_case "$set_id" "$benchmark_id" "$platform" "$variant" || return 1
+ if [ "$ALLOW" != 1 ]; then
+  repo=$(git rev-parse --show-toplevel 2>/dev/null || :) ; case "$SETS/$set_id" in "$repo"/*) [ -z "$(git -C "$repo" status --porcelain -- "$SETS/$set_id")" ] || { echo "definitions are dirty; use --allow-dirty" >&2; return 1; } ;; *) echo "definitions are outside a Git worktree; use --allow-dirty" >&2; return 1;; esac
+ fi
  mkdir -p "$LOCAL_RESULTS"
  mkdir "$LOCAL_RESULTS/.lock" 2>/dev/null || { echo "benchmark lock is held" >&2; return 1; }
  lock=$LOCAL_RESULTS/.lock; run_id=$(date -u '+%Y%m%dT%H%M%SZ')-$set_id-$benchmark_id-$platform-$variant-$$
@@ -64,12 +67,18 @@ publish_run() {
  debug=$(jq -r '.debug' "$source/run.json")
  [ "$status" = complete ] && [ "$debug" = false ] || { echo "run is not publishable" >&2; return 1; }
  set_id=$(jq -r '.set' "$source/run.json"); benchmark_id=$(jq -r '.benchmark' "$source/run.json"); platform=$(jq -r '.platform' "$source/run.json"); variant=$(jq -r '.variant' "$source/run.json"); run_id=$(jq -r '.run_id' "$source/run.json")
+ valid_id "$set_id" && valid_id "$benchmark_id" && valid_id "$platform" && valid_id "$variant" && printf '%s\n' "$run_id" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$' || { echo "invalid publication metadata" >&2; return 1; }
  [ -n "$set_id" ] && [ "$set_id" != null ] || return 1
- dest=$PUBLISHED_RESULTS/$set_id/$benchmark_id/$platform/$variant/$run_id; [ ! -e "$dest" ] || { echo "destination exists" >&2; return 1; }
- mkdir -p "$dest" "$dest/definitions" "$dest/trials"
- cp "$source/run.json" "$source/environment.json" "$source/definitions.sha256" "$dest/"
- cp -R "$source/definitions/." "$dest/definitions/"
- for summary in "$source"/trials/*/summary.json; do [ -f "$summary" ] || continue; trial=$(basename "$(dirname "$summary")"); mkdir -p "$dest/trials/$trial"; cp "$summary" "$dest/trials/$trial/"; done
+ root=$PUBLISHED_RESULTS; mkdir -p "$root"
+ dest=$root/$set_id/$benchmark_id/$platform/$variant/$run_id; case "$dest" in "$root"/*) ;; *) return 1;; esac
+ [ ! -e "$dest" ] || { echo "destination exists" >&2; return 1; }
+ parent=$(dirname "$dest"); mkdir -p "$parent"; staging=$(mktemp -d "$parent/.publish.XXXXXX") || return 1
+ trap 'rm -rf "$staging"' 0 1 2 3 15
+ mkdir -p "$staging/definitions" "$staging/trials"
+ cp "$source/run.json" "$source/environment.json" "$source/definitions.sha256" "$staging/"
+ cp -R "$source/definitions/." "$staging/definitions/"
+ for summary in "$source"/trials/*/summary.json; do [ -f "$summary" ] || continue; trial=$(basename "$(dirname "$summary")"); mkdir -p "$staging/trials/$trial"; cp "$summary" "$staging/trials/$trial/"; done
+ mv "$staging" "$dest"; trap - 0 1 2 3 15
  echo "$dest"
 }
 command=${1:-}; subcommand=${2:-}; [ "$command" = new ] && { shift 2; case "$subcommand" in set) new_set "$@";; benchmark) new_benchmark "$@";; case) new_case "$@";; *) usage;; esac; exit; }; [ "$command" = validate ] && { target=${2:-all}; [ "$target" = all ] && validate_all || { IFS=/ read -r s b p v <<EOF
