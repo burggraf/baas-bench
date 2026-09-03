@@ -1,5 +1,7 @@
 # Benchmark Framework Implementation Plan
 
+**Status:** Implemented. See [`docs/benchmarks.md`](../benchmarks.md) for current operational documentation.
+
 > **REQUIRED SUB-SKILL:** Use the executing-plans skill to implement this plan task-by-task.
 
 **Goal:** Add dependency-light templates and a POSIX shell CLI for scaffolding, validating, running, and publishing reproducible cross-platform benchmark cases without adding an actual benchmark.

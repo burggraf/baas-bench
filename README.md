@@ -11,22 +11,22 @@ Reproducible local Docker environments for comparing self-hosted backend-as-a-se
 - PocketBase
 - TrailBase
 
-This first stage only provisions each environment and proves it accepts a request. Benchmark schemas and k6 workloads come later.
+The repository has two layers: `bin/baas` provisions and isolates the systems under test, while `bin/bench` scaffolds, validates, runs, and publishes benchmark cases. The framework is ready, but no benchmark definitions or results are committed yet.
 
-## Benchmark framework
-
-The dependency-light benchmark framework scaffolds and validates benchmark definitions, runs cases through `bin/baas`, and publishes compact evidence. See the [approved design](docs/plans/2026-09-03-benchmark-framework-design.md) and [authoring guide](docs/benchmarks.md). `jq` is required only for `bin/bench run` and `bin/bench publish`.
+A benchmark defines one shared methodology; each platform and access-path combination is a separate case. For example, REST API, database function, direct PostgreSQL, pooled ORM, and WASM-extension implementations belong in distinct cases under the same benchmark.
 
 ## Requirements
 
 - macOS or Linux
 - Docker with Compose v2 (Docker Desktop, OrbStack, or Docker Engine)
 - Git, curl, and OpenSSL
+- `jq` 1.6+ for benchmark execution and publication
+- `shasum` or `sha256sum`
 - At least 16 GB RAM recommended for the largest stacks
 
-The current versions target `linux/arm64` as well as `linux/amd64`.
+The current versions target `linux/arm64` as well as `linux/amd64`. Workload-specific runtimes such as k6, xk6, Node.js, or Rust are required only by cases that invoke them.
 
-## Usage
+## BaaS lifecycle
 
 ```sh
 # Fetch pinned upstream definitions, generate local secrets, and validate Compose.
@@ -53,6 +53,35 @@ supabase neon convex appwrite nhost directus pocketbase trailbase
 ```
 
 Generated deployments and secrets are stored in `.runtime/` and are not committed. Product versions and immutable upstream revisions are in [`versions.env`](versions.env).
+
+## Benchmark workflow
+
+```sh
+# Create the hierarchy; generated TODOs deliberately fail validation.
+bin/bench new set core-v1
+bin/bench new benchmark core-v1 read-throughput
+bin/bench new case core-v1 read-throughput supabase rest-api
+
+# After completing the methodology, metadata, and all five case hooks:
+bin/bench validate core-v1/read-throughput/supabase/rest-api
+bin/bench run core-v1 read-throughput supabase rest-api
+
+# Inspect the immutable local bundle, then publish compact evidence.
+bin/bench publish .results/<run-id>
+```
+
+Definitions live under `benchmark-sets/<set>/benchmarks/<benchmark>/cases/<platform>/<variant>/`. Local runs under `.results/` are ignored; validated published evidence belongs under `results/`. See [`docs/benchmarks.md`](docs/benchmarks.md) for the complete authoring contract and [`AGENTS.md`](AGENTS.md) for repository contribution rules.
+
+## Development checks
+
+```sh
+sh -n bin/baas bin/bench test/baas_test.sh test/bench_test.sh
+sh test/baas_test.sh
+sh test/bench_test.sh
+bin/bench validate all
+```
+
+The regression tests use fake Docker and BaaS commands; they do not start the real stacks.
 
 ## Endpoints
 

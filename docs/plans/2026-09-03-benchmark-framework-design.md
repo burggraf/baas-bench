@@ -1,7 +1,8 @@
 # Benchmark Framework Design
 
 **Date:** 2026-09-03  
-**Status:** Approved
+**Status:** Approved and implemented  
+**Operational guide:** [`docs/benchmarks.md`](../benchmarks.md)
 
 ## Goal
 
@@ -159,7 +160,7 @@ Each run is an immutable local bundle:
 
 Every measured trial summary contains schema version, duration, completed operations, failures, error rate, and a flexible `metrics` object. The benchmark declares which metric keys and units are required. Native outputs live under the trial's `raw/` directory.
 
-Secrets and connection strings are never copied into result metadata. Redaction applies an explicit denylist and key-name patterns. Topology is represented using labels such as `direct`, `pooler`, or `http-api`.
+Secrets and connection strings are never copied into result metadata. Definition validation rejects secret-like keys, while environment capture uses an explicit safe-field allowlist. Topology is represented using labels such as `direct`, `pooler`, or `http-api`.
 
 ## Publication
 
@@ -189,8 +190,8 @@ Publication does not rank platforms or aggregate cases with materially different
 - benchmark metric declarations;
 - executable lifecycle hooks and shell syntax;
 - unresolved template markers;
-- result JSON shape when validating a completed run.
+- result JSON shape during execution and again before publication.
 
 Validation cannot prove scientific equivalence; methodology and case deviations require human review.
 
-A small shell regression suite uses temporary definitions and fake Docker, BaaS, and hook commands. It covers scaffolding, invalid metadata, unresolved templates, lifecycle order, cleanup after ordinary failure and interruption, host locking, metadata redaction, result requirements, and publication rejection. No additional test framework or runtime is introduced beyond the JSON parser required by the benchmark CLI.
+A small shell regression suite uses temporary definitions and fake Docker, BaaS, and hook commands. It covers scaffolding, invalid metadata, unresolved templates, lifecycle order, cleanup after ordinary failure and interruption, host locking, sensitive metadata rejection, result requirements, and publication rejection. No additional test framework or runtime is introduced beyond the JSON parser required by the benchmark CLI.
