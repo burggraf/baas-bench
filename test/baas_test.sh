@@ -22,6 +22,7 @@ trailbase'
 actual=$($BAAS list) || fail "list command failed"
 [ "$actual" = "$expected" ] || fail "unexpected service list"
 grep -q '^NHOST_TRAEFIK_IMAGE=traefik:v3\.6\.1@sha256:' "$ROOT/versions.env" || fail "Nhost Traefik compatibility image is not pinned"
+grep -q 'ADMIN_EMAIL: admin@example.com' "$ROOT/services/directus/compose.yml" || fail "Directus bootstrap email is invalid"
 
 if "$BAAS" setup unknown >/dev/null 2>&1; then
   fail "unknown service was accepted"
