@@ -25,6 +25,8 @@ import { createAppwriteAdapter } from '../benchmark-sets/basic-js-v1/shared/lib/
 import { createAppwriteAdmin } from '../benchmark-sets/basic-js-v1/shared/lib/admin/appwrite.mjs';
 import { createDirectusAdapter } from '../benchmark-sets/basic-js-v1/shared/lib/adapters/directus.mjs';
 import { createDirectusAdmin } from '../benchmark-sets/basic-js-v1/shared/lib/admin/directus.mjs';
+import { createTrailBaseAdapter } from '../benchmark-sets/basic-js-v1/shared/lib/adapters/trailbase.mjs';
+import { createTrailBaseAdmin } from '../benchmark-sets/basic-js-v1/shared/lib/admin/trailbase.mjs';
 
 const setRoot = new URL('../benchmark-sets/basic-js-v1/', import.meta.url);
 const benchmarkIds = [
@@ -1104,5 +1106,275 @@ test('PocketBase setup preserves its original failure when cleanup also fails', 
     await assert.rejects(() => admin.setup(), (error) => error === original && error.cleanupError === 'superuser cleanup failed' && !error.message.includes('not-logged-secret'));
   } finally {
     rmSync(runtime, { recursive: true, force: true });
+  }
+});
+
+test('TrailBase adapter uses initClient and exact anonymous record APIs', async () => {
+  const calls = [];
+  const records = {
+    async list(options) {
+      calls.push(['list', options]);
+      return { records: Array.from({ length: 20 }, (_, index) => ({
+        id: index + 1,
+        author: 'author',
+        message: 'message',
+        created_at: '2025-01-01T00:00:01.000Z',
+        fixture_key: index + 1,
+      })) };
+    },
+    async read(id) {
+      calls.push(['read', id]);
+      return { id, author: 'user-0002', message: 'Guestbook message 00002 from basic-js-v1', created_at: '2025-01-01T00:00:02.000Z', fixture_key: 2 };
+    },
+    async create(value) { calls.push(['create', value]); return 10001; },
+  };
+  const clients = [];
+  const initClient = (endpoint) => {
+    calls.push(['client', endpoint]);
+    const client = { records(name) { calls.push(['records', name]); return records; } };
+    clients.push(client);
+    return client;
+  };
+  const adapter = createTrailBaseAdapter({ initClient, ids: [1, 2], selectFixtureIndex: () => 1 });
+  const first = await adapter.createClient({ vu: 1 });
+  const second = await adapter.createClient({ vu: 2 });
+  assert.notEqual(first, second);
+  const list = await adapter.operation(first, { operation: 'list' });
+  const itemContext = { operation: 'item', trial: 1, vu: 1, sequence: 0 };
+  const item = await adapter.operation(first, itemContext);
+  const writeContext = { operation: 'write', trial: 2, load: 10, vu: 3, sequence: 4 };
+  const created = await adapter.operation(second, writeContext);
+  assert.deepEqual(list[0], { id: 1, author: 'author', message: 'message', created_at: '2025-01-01T00:00:01.000Z' });
+  assert.deepEqual(item, { id: 2, author: 'user-0002', message: 'Guestbook message 00002 from basic-js-v1', created_at: '2025-01-01T00:00:02.000Z' });
+  assert.deepEqual(created, { id: 10001 });
+  assert.equal(adapter.validate(list, { operation: 'list' }), true);
+  assert.equal(adapter.validate(item, itemContext), true);
+  assert.equal(adapter.validate(created, writeContext), true);
+  assert.deepEqual(calls, [
+    ['client', 'http://127.0.0.1:4000'],
+    ['client', 'http://127.0.0.1:4000'],
+    ['records', 'bb_basic_js_v1_guestbook'],
+    ['list', { pagination: { limit: 20 }, order: ['-created_at'] }],
+    ['records', 'bb_basic_js_v1_guestbook'],
+    ['read', 2],
+    ['records', 'bb_basic_js_v1_guestbook'],
+    ['create', { author: 'bench-vu-3', message: 'basic-js-v1 trial-2 load-10 vu-3 operation-4' }],
+  ]);
+});
+
+test('TrailBase adapter rejects missing IDs, malformed lists, and non-scalar create IDs', async () => {
+  const records = { async list() { return {}; }, async read() { return null; }, async create() { return { id: 1 }; } };
+  const adapter = createTrailBaseAdapter({ initClient: () => ({ records: () => records }), ids: [], selectFixtureIndex: () => 0 });
+  const client = await adapter.createClient({ vu: 1 });
+  await assert.rejects(() => adapter.operation(client, { operation: 'item', trial: 1, vu: 1, sequence: 0 }), /missing TrailBase fixture ID/);
+  await assert.rejects(() => adapter.operation(client, { operation: 'write', trial: 1, load: 1, vu: 1, sequence: 0 }), /scalar ID/);
+  assert.equal(adapter.validate(await adapter.operation(client, { operation: 'list' }), { operation: 'list' }), false);
+});
+
+test('TrailBase schema and Record API fragment enforce the public benchmark contract', () => {
+  const migration = read('shared/trailbase/U1785764700__create_bb_basic_js_v1_guestbook.sql');
+  assert.match(migration, /CREATE TABLE bb_basic_js_v1_guestbook/);
+  assert.match(migration, /INTEGER PRIMARY KEY/);
+  assert.match(migration, /CHECK\s*\(length\(author\) BETWEEN 1 AND 32\)/);
+  assert.match(migration, /CHECK\s*\(length\(message\) BETWEEN 1 AND 256\)/);
+  assert.match(migration, /strftime\('%Y-%m-%dT%H:%M:%fZ','now'\)/);
+  assert.match(migration, /fixture_key INTEGER UNIQUE/);
+  assert.match(migration, /\) STRICT;/);
+  assert.match(migration, /created_at DESC/);
+
+  const config = read('shared/trailbase/record-api.textproto');
+  assert.match(config, /acl_world: \[READ, CREATE\]/);
+  assert.match(config, /excluded_columns: \["fixture_key"\]/);
+  assert.match(config, /create_access_rule: "_REQ_\.created_at IS NULL"/);
+  assert.doesNotMatch(config, /acl_authenticated|UPDATE|DELETE|SCHEMA/);
+});
+
+test('TrailBase admin preserves config and supports setup, teardown, then setup again', async () => {
+  const runtime = mkdtempSync(join(tmpdir(), 'basic-js-trailbase-admin-'));
+  const unrelatedConfig = 'server: { application_name: "kept" }\n';
+  let config = unrelatedConfig;
+  let tableExists = false;
+  let pendingDrop = false;
+  let migrationRecorded = false;
+  let fallbackCreates = 0;
+  let migrationFile;
+  const commands = [];
+  const adminQueries = [];
+  const migrationSql = read('shared/trailbase/U1785764700__create_bb_basic_js_v1_guestbook.sql');
+  const configFragment = read('shared/trailbase/record-api.textproto');
+  const wrap = (value) => value === null ? 'Null' : typeof value === 'number' ? { Integer: value } : { Text: value };
+  const baselineRows = () => Array.from({ length: 10000 }, (_, index) => {
+    const expected = fixture(index + 1);
+    return [expected.fixture_key, expected.fixture_key, expected.author, expected.message, expected.created_at].map(wrap);
+  });
+  const queryResponse = (query) => {
+    adminQueries.push(query);
+    if (/FROM "_schema_history"/.test(query)) return { rows: [[wrap(migrationRecorded ? 1 : 0)]] };
+    if (/FROM sqlite_schema WHERE type = 'table'/.test(query)) return { rows: tableExists ? [[wrap(1)]] : [] };
+    if (/SELECT fixture_key, id, author, message, created_at/.test(query)) return { rows: baselineRows() };
+    if (/SELECT count\(\*\), count\(fixture_key\)/.test(query)) return { rows: [[wrap(10000), wrap(10000), wrap(0)]] };
+    if (/SELECT count\(\*\) FROM "bb_basic_js_v1_guestbook" WHERE fixture_key IS NULL/.test(query)) return { rows: [[wrap(0)]] };
+    if (/SELECT sql FROM sqlite_schema/.test(query)) return { rows: [[wrap(migrationSql)], [wrap('CREATE INDEX idx_bb_guestbook_created_at ON bb_basic_js_v1_guestbook (created_at DESC)')]] };
+    if (/^CREATE TABLE/m.test(query)) { tableExists = true; fallbackCreates += 1; }
+    return { rows: [] };
+  };
+  const response = (body = {}) => ({ ok: true, status: 200, async json() { return body; }, async text() { return JSON.stringify(body); } });
+  const initClient = () => ({
+    async login() {
+      assert.ok(commands.some(({ args }) => args.includes('install-migration')));
+    },
+    tokens() { return { auth_token: 'auth-secret', refresh_token: 'refresh-secret', csrf_token: 'csrf-secret' }; },
+    async fetch(path, options = {}) {
+      if (path === '/api/_admin/query') return response(queryResponse(JSON.parse(options.body).query));
+      if (path === '/api/_admin/table' && options.method === 'DELETE') {
+        pendingDrop = true;
+        config = unrelatedConfig;
+        return response({ sql: 'DROP TABLE' });
+      }
+      throw Object.assign(new Error('forbidden'), { status: 403 });
+    },
+    records(name) {
+      assert.equal(name, 'bb_basic_js_v1_guestbook');
+      return {
+        async list() {
+          return { records: Array.from({ length: 20 }, (_, index) => {
+            const { fixture_key: _fixtureKey, ...record } = fixture(10000 - index);
+            return { ...record, id: 10000 - index };
+          }) };
+        },
+      };
+    },
+  });
+  const run = async (command, args, options = {}) => {
+    commands.push({ command, args, input: options.input });
+    if (args[2] === 'logs') return {
+      stdout: "trailbase-1 | Created new admin user:\ntrailbase-1 |     email: 'admin@localhost'\ntrailbase-1 |     password: 'bootstrap-secret'\n",
+      stderr: '',
+    };
+    if (args.includes('inspect-migration')) return { stdout: migrationFile === undefined ? 'absent\n' : `present\n${migrationFile}`, stderr: '' };
+    if (args.includes('cat') && args.at(-1) === '/app/traildepot/config.textproto') return { stdout: config, stderr: '' };
+    if (args.includes('append-config')) config += options.input;
+    if (args.includes('install-migration')) {
+      migrationFile = options.input;
+      if (!migrationRecorded) {
+        migrationRecorded = true;
+        tableExists = true;
+      }
+    }
+    if (args[2] === 'kill') {
+      if (pendingDrop) { pendingDrop = false; tableExists = false; }
+      else if (!migrationRecorded) { migrationRecorded = true; tableExists = true; }
+    }
+    return { stdout: '', stderr: '' };
+  };
+  try {
+    const admin = createTrailBaseAdmin({
+      initClient,
+      run,
+      root: runtime,
+      runtime,
+      environmentRuntime: join(runtime, '.runtime'),
+      migrationSql,
+      configFragment,
+      sleep: async () => {},
+    });
+    await admin.setup();
+    assert.equal(config, `${unrelatedConfig}${configFragment}`);
+    assert.equal(statSync(join(runtime, 'state/trailbase-admin.json')).mode & 0o777, 0o600);
+    assert.equal(statSync(join(runtime, 'state/trailbase-ids.json')).mode & 0o777, 0o600);
+    assert.ok(commands.some(({ args }) => args[2] === 'logs'));
+    assert.equal(commands.some(({ args }) => args.includes('user') && args.includes('add')), false);
+    assert.equal(commands.some(({ args }) => args.includes('admin') && args.includes('promote')), false);
+    assert.equal(statSync(join(runtime, '.runtime/trailbase/bootstrap-admin.json')).mode & 0o777, 0o600);
+    const migrationWrite = commands.find(({ args, input }) => args.includes('install-migration') && input === migrationSql);
+    assert.ok(migrationWrite);
+    assert.match(migrationWrite.args[7], /set -C/);
+    assert.ok(adminQueries.some((query) => query.startsWith('INSERT INTO "bb_basic_js_v1_guestbook"')));
+    await admin.teardown();
+    assert.equal(config, unrelatedConfig);
+    assert.equal(tableExists, false);
+    assert.equal(commands.some(({ args }) => args.includes('rm') && args.includes('-f')), false);
+    await admin.setup();
+    assert.equal(fallbackCreates, 1);
+    assert.equal(commands.filter(({ args }) => args.includes('install-migration')).length, 1);
+    assert.equal(config, `${unrelatedConfig}${configFragment}`);
+    await admin.verifyReadiness({ operation: 'list', result: Array.from({ length: 20 }, (_, index) => {
+      const expected = fixture(10000 - index);
+      return { id: 10000 - index, author: expected.author, message: expected.message, created_at: expected.created_at };
+    }) });
+    await admin.verifyStage({ operation: 'list', stage: { completed: 3 } });
+    await admin.teardown();
+    assert.equal(existsSync(join(runtime, 'state/trailbase-admin.json')), false);
+    assert.equal(existsSync(join(runtime, 'state/trailbase-ids.json')), false);
+    migrationFile = 'CREATE TABLE conflicting (id INTEGER);\n';
+    const conflicting = createTrailBaseAdmin({
+      initClient,
+      run,
+      root: runtime,
+      runtime,
+      environmentRuntime: join(runtime, '.runtime'),
+      migrationSql,
+      configFragment,
+      credentials: { email: 'admin@localhost', password: 'bootstrap-secret' },
+      sleep: async () => {},
+    });
+    await assert.rejects(() => conflicting.setup(), /migration conflicts/);
+  } finally {
+    rmSync(runtime, { recursive: true, force: true });
+  }
+});
+
+test('TrailBase setup preserves its original failure when cleanup also fails', async () => {
+  const runtime = mkdtempSync(join(tmpdir(), 'basic-js-trailbase-failure-'));
+  const original = new Error('admin login failed');
+  let logins = 0;
+  const run = async (_command, args, options = {}) => {
+    if (args.includes('inspect-migration')) return { stdout: 'absent\n', stderr: '' };
+    return { stdout: '', stderr: '', input: options.input };
+  };
+  try {
+    const admin = createTrailBaseAdmin({
+      initClient: () => ({
+        async login() {
+          logins += 1;
+          if (logins === 1) throw original;
+          throw new Error('admin cleanup failed');
+        },
+      }),
+      run,
+      root: '/repo',
+      runtime,
+      migrationSql: 'CREATE TABLE owned (id INTEGER);\n',
+      configFragment: 'record_apis: []\n',
+      credentials: { email: 'basic-js-v1-test@localhost.invalid', password: 'not-logged-secret' },
+    });
+    await assert.rejects(() => admin.setup(), (error) => error === original && error.cleanupError === 'admin cleanup failed' && !error.message.includes('not-logged-secret'));
+  } finally {
+    rmSync(runtime, { recursive: true, force: true });
+  }
+});
+
+test('TrailBase cases are complete thin JavaScript SDK delegations', () => {
+  const operations = { 'read-list-throughput': 'list', 'read-item-throughput': 'item', 'write-throughput': 'write' };
+  for (const [benchmark, operation] of Object.entries(operations)) {
+    const config = parseConf(read(`benchmarks/${benchmark}/cases/trailbase/javascript-sdk/case.conf`));
+    assert.deepEqual(config, {
+      schema_version: '1',
+      platform: 'trailbase',
+      variant: 'javascript-sdk',
+      access_path: 'record-api',
+      connection: 'http',
+      client: 'trailbase@0.14.1',
+      implementation: 'javascript-node-22',
+    });
+    const readme = read(`benchmarks/${benchmark}/cases/trailbase/javascript-sdk/README.md`).toLowerCase();
+    assert.match(readme, /trailbase 0\.33\.10/);
+    assert.match(readme, /one .*client per virtual user/);
+    assert.match(readme, /unauthenticated/);
+    assert.match(readme, /strict/);
+    for (const hook of ['setup', 'verify', 'reset', 'run', 'teardown']) {
+      const contents = read(`benchmarks/${benchmark}/cases/trailbase/javascript-sdk/${hook}.sh`);
+      assert.match(contents, new RegExp(`shared/case\\.sh" ${hook} trailbase ${operation}`));
+    }
   }
 });
