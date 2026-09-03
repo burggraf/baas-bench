@@ -1,87 +1,688 @@
 #!/bin/sh
 set -eu
+
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 SETS=${BENCH_SETS_DIR:-$ROOT/benchmark-sets}
 LOCAL_RESULTS=${BENCH_LOCAL_RESULTS_DIR:-$ROOT/.results}
 PUBLISHED_RESULTS=${BENCH_RESULTS_DIR:-$ROOT/results}
 BAAS=${BENCH_BAAS_BIN:-$ROOT/bin/baas}
 TEMPLATES=$ROOT/templates
-usage() { echo "usage: bin/bench {new|validate|run|publish} ..." >&2; exit 2; }
-valid_id() { printf '%s\n' "$1" | grep -Eq '^[a-z0-9][a-z0-9-]*$'; }
-valid_metric() { printf '%s\n' "$1" | grep -Eq '^[a-z][a-z0-9_]*$'; }
-valid_platform() { "$BAAS" list | grep -qx "$1"; }
-replace() { file=$1 token=$2 value=$3; sed "s|{{$token}}|$value|g" "$file" > "$file.tmp"; mv "$file.tmp" "$file"; }
-new_set() { [ "$#" -eq 1 ] || usage; id=$1; valid_id "$id" || { echo "invalid set id" >&2; exit 2; }; dest=$SETS/$id; [ ! -e "$dest" ] || { echo "already exists: $dest" >&2; exit 1; }; mkdir -p "$dest"; cp -R "$TEMPLATES/benchmark-set/." "$dest/"; mkdir -p "$dest/benchmarks"; replace "$dest/set.conf" SET_ID "$id"; replace "$dest/README.md" SET_ID "$id"; echo "$dest"; }
-new_benchmark() { [ "$#" -eq 2 ] || usage; set_id=$1; id=$2; valid_id "$set_id" && valid_id "$id" || { echo "invalid id" >&2; exit 2; }; parent=$SETS/$set_id; [ -f "$parent/set.conf" ] || { echo "unknown set" >&2; exit 1; }; dest=$parent/benchmarks/$id; [ ! -e "$dest" ] || { echo "already exists" >&2; exit 1; }; mkdir -p "$dest"; cp -R "$TEMPLATES/benchmark/." "$dest/"; mkdir -p "$dest/fixtures" "$dest/cases"; replace "$dest/benchmark.conf" BENCHMARK_ID "$id"; replace "$dest/METHODOLOGY.md" BENCHMARK_ID "$id"; echo "$dest"; }
-new_case() { [ "$#" -eq 4 ] || usage; set_id=$1; benchmark_id=$2; platform=$3; variant=$4; valid_id "$set_id" && valid_id "$benchmark_id" && valid_id "$platform" && valid_id "$variant" || { echo "invalid case path" >&2; exit 2; }; valid_platform "$platform" || { echo "unknown platform" >&2; exit 2; }; parent=$SETS/$set_id/benchmarks/$benchmark_id; [ -f "$parent/benchmark.conf" ] || { echo "unknown benchmark" >&2; exit 1; }; dest=$parent/cases/$platform/$variant; [ ! -e "$dest" ] || { echo "already exists" >&2; exit 1; }; mkdir -p "$dest"; cp -R "$TEMPLATES/case/." "$dest/"; replace "$dest/case.conf" PLATFORM "$platform"; replace "$dest/case.conf" VARIANT "$variant"; replace "$dest/README.md" PLATFORM "$platform"; replace "$dest/README.md" VARIANT "$variant"; chmod +x "$dest"/*.sh; echo "$dest"; }
-conf_value() { awk -F= -v wanted="$2" '$1 == wanted { sub(/^[^=]*=/, ""); print; found++ } END { exit found == 1 ? 0 : 1 }' "$1"; }
-check_conf() {
- file=$1; shift
- awk -F= 'BEGIN{bad=0} /^[[:space:]]*$/ {bad=1} !/^[a-z][a-z0-9_]*=[^[:cntrl:]]*$/ {bad=1} {if (++seen[$1]>1) bad=1; if ($1 ~ /password|secret|token|credential|api_key|connection_string/) bad=1} END{exit bad}' "$file" || { echo "invalid metadata: $file" >&2; return 1; }
- for key in "$@"; do value=$(conf_value "$file" "$key") || { echo "missing or duplicate $key: $file" >&2; return 1; }; [ -n "$value" ] || { echo "blank $key: $file" >&2; return 1; }; done
-}
-no_todo() { ! find "$1" -type f -exec grep -n 'TODO' {} + >/dev/null 2>&1 || { echo "unresolved TODO: $1" >&2; return 1; }; }
-validate_set() { dir=$1; id=$2; check_conf "$dir/set.conf" schema_version id title description; [ "$(conf_value "$dir/set.conf" schema_version)" = 1 ] || return 1; [ "$(conf_value "$dir/set.conf" id)" = "$id" ] || return 1; valid_id "$id"; no_todo "$dir/set.conf"; }
-validate_benchmark() { dir=$1; set_id=$2; id=$3; check_conf "$dir/benchmark.conf" schema_version id title description primary_metric primary_unit primary_direction required_metrics warmup_trials measured_trials; [ "$(conf_value "$dir/benchmark.conf" schema_version)" = 1 ] || return 1; [ "$(conf_value "$dir/benchmark.conf" id)" = "$id" ] || return 1; metric=$(conf_value "$dir/benchmark.conf" primary_metric); valid_metric "$metric" || return 1; direction=$(conf_value "$dir/benchmark.conf" primary_direction); [ "$direction" = higher ] || [ "$direction" = lower ] || return 1; required=$(conf_value "$dir/benchmark.conf" required_metrics); oldifs=$IFS; IFS=,; for metric in $required; do valid_metric "$metric" || { IFS=$oldifs; return 1; }; done; IFS=$oldifs; warm=$(conf_value "$dir/benchmark.conf" warmup_trials); measured=$(conf_value "$dir/benchmark.conf" measured_trials); printf '%s\n%s\n' "$warm" "$measured" | grep -Eq '^[0-9]+$' || return 1; [ "$measured" -gt 0 ] || return 1; no_todo "$dir/benchmark.conf"; no_todo "$dir/METHODOLOGY.md"; }
-validate_case() { set_id=$1; benchmark_id=$2; platform=$3; variant=$4; casedir=$SETS/$set_id/benchmarks/$benchmark_id/cases/$platform/$variant; validate_set "$SETS/$set_id" "$set_id" || return 1; validate_benchmark "$SETS/$set_id/benchmarks/$benchmark_id" "$set_id" "$benchmark_id" || return 1; dir=$casedir; check_conf "$dir/case.conf" platform variant access_path connection client implementation; [ "$(conf_value "$dir/case.conf" platform)" = "$platform" ] && [ "$(conf_value "$dir/case.conf" variant)" = "$variant" ] || return 1; valid_platform "$platform" || return 1; no_todo "$dir/case.conf"; no_todo "$dir/README.md"; for hook in setup verify reset run teardown; do [ -x "$dir/$hook.sh" ] && sh -n "$dir/$hook.sh" || { echo "invalid hook: $dir/$hook.sh" >&2; return 1; }; no_todo "$dir/$hook.sh" || return 1; done; }
-validate_all() { found=0; for setdir in "$SETS"/*; do [ -d "$setdir" ] || continue; set_id=${setdir##*/}; validate_set "$setdir" "$set_id" || return 1; for bdir in "$setdir"/benchmarks/*; do [ -d "$bdir" ] || continue; bid=${bdir##*/}; validate_benchmark "$bdir" "$set_id" "$bid" || return 1; for cfile in "$bdir"/cases/*/*/case.conf; do [ -f "$cfile" ] || continue; rel=${cfile#"$SETS/"}; s=${rel%%/*}; rest=${rel#*/}; rest=${rest#benchmarks/}; b=${rest%%/*}; rest=${rest#*/}; rest=${rest#cases/}; platform=${rest%%/*}; variant=${rest#*/}; variant=${variant%/case.conf}
- validate_case "$s" "$b" "$platform" "$variant" || return 1; found=1; done; done; done; [ "$found" -eq 0 ] || :; }
-sha256() { if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'; else sha256sum "$1" | awk '{print $1}'; fi; }
-run_case() {
- set_id=$1; benchmark_id=$2; platform=$3; variant=$4; KEEP=0
- shift 4
- while [ "$#" -gt 0 ]; do case "$1" in --allow-dirty) ALLOW=1;; --keep) KEEP=1;; *) usage;; esac; shift; done
- ALLOW=${ALLOW:-${BENCH_ALLOW_DIRTY:-0}}
- validate_case "$set_id" "$benchmark_id" "$platform" "$variant" || return 1
- if [ "$ALLOW" != 1 ]; then
-  repo=$(git rev-parse --show-toplevel 2>/dev/null || :) ; case "$SETS/$set_id" in "$repo"/*) [ -z "$(git -C "$repo" status --porcelain -- "$SETS/$set_id")" ] || { echo "definitions are dirty; use --allow-dirty" >&2; return 1; } ;; *) echo "definitions are outside a Git worktree; use --allow-dirty" >&2; return 1;; esac
- fi
- mkdir -p "$LOCAL_RESULTS"
- mkdir "$LOCAL_RESULTS/.lock" 2>/dev/null || { echo "benchmark lock is held" >&2; return 1; }
- lock=$LOCAL_RESULTS/.lock; run_id=$(date -u '+%Y%m%dT%H%M%SZ')-$set_id-$benchmark_id-$platform-$variant-$$
- tmp=$LOCAL_RESULTS/.tmp-$run_id; final=$LOCAL_RESULTS/$run_id; mkdir -p "$tmp/definitions" "$tmp/logs" "$tmp/warmups" "$tmp/trials"
- status=failed
- cleanup() { rc=$?; trap - EXIT INT TERM; if [ "$KEEP" -eq 0 ]; then [ "${setup_started:-0}" -eq 1 ] && "$case_dir/teardown.sh" >>"$tmp/logs/hooks.log" 2>&1 || :; [ "${started:-0}" -eq 1 ] && "$BAAS" stop "$platform" >>"$tmp/logs/baas.log" 2>&1 || :; fi; [ -d "$tmp" ] && { jq -n --arg status "$status" --arg set "$set_id" --arg benchmark "$benchmark_id" --arg platform "$platform" --arg variant "$variant" --arg run_id "$run_id" --arg commit "$(git rev-parse HEAD 2>/dev/null || echo unknown)" --arg debug "$KEEP" '{schema_version:1,status:$status,debug:($debug == "1"),run_id:$run_id,set:$set,benchmark:$benchmark,platform:$platform,variant:$variant,commit:$commit}' >"$tmp/run.json"; mv "$tmp" "$final"; }; rmdir "$lock" 2>/dev/null || rm -rf "$lock"; exit "$rc"; }
- trap cleanup EXIT INT TERM
- case_dir=$SETS/$set_id/benchmarks/$benchmark_id/cases/$platform/$variant
- cp -R "$SETS/$set_id/." "$tmp/definitions/"
- jq -n --arg os "$(uname -s)" --arg arch "$(uname -m)" --arg commit "$(git rev-parse HEAD)" --arg timestamp "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" --arg versions "$(sha256 "$ROOT/versions.env")" '{schema_version:1,os:$os,architecture:$arch,git_commit:$commit,versions_sha256:$versions,utc_timestamp:$timestamp}' > "$tmp/environment.json"
- (cd "$tmp/definitions" && find . -type f -print | sort | while IFS= read -r file; do printf '%s  %s\\n' "$(sha256 "$file")" "$file"; done) > "$tmp/definitions.sha256"
- git_commit=$(git rev-parse HEAD)
- "$BAAS" start "$platform" >"$tmp/logs/baas.log" 2>&1; started=1
- "$case_dir/setup.sh" >"$tmp/logs/hooks.log" 2>&1; setup_started=1
- "$case_dir/verify.sh" >>"$tmp/logs/hooks.log" 2>&1
- warm=$(conf_value "$SETS/$set_id/benchmarks/$benchmark_id/benchmark.conf" warmup_trials); measured=$(conf_value "$SETS/$set_id/benchmarks/$benchmark_id/benchmark.conf" measured_trials)
- trial=1; while [ "$trial" -le "$warm" ]; do BENCH_PHASE=warmup BENCH_TRIAL=$trial BENCH_OUTPUT_DIR=$tmp/warmups/$(printf '%03d' "$trial") sh -c 'mkdir -p "$BENCH_OUTPUT_DIR"; "$0"' "$case_dir/reset.sh"; BENCH_PHASE=warmup BENCH_TRIAL=$trial BENCH_OUTPUT_DIR=$tmp/warmups/$(printf '%03d' "$trial") "$case_dir/run.sh"; "$case_dir/verify.sh" >>"$tmp/logs/hooks.log" 2>&1; trial=$((trial+1)); done
- trial=1; while [ "$trial" -le "$measured" ]; do dir=$tmp/trials/$(printf '%03d' "$trial"); mkdir -p "$dir"; BENCH_PHASE=measure BENCH_TRIAL=$trial BENCH_OUTPUT_DIR=$dir "$case_dir/reset.sh"; BENCH_PHASE=measure BENCH_TRIAL=$trial BENCH_OUTPUT_DIR=$dir "$case_dir/run.sh"; jq -e '.schema_version == 1 and (.duration_seconds|numbers) >= 0 and (.completed_operations|numbers) >= 0 and (.failed_operations|numbers) >= 0 and (.error_rate|numbers) >= 0 and .error_rate <= 1 and (.metrics|type == "object")' "$dir/summary.json" >/dev/null; "$case_dir/verify.sh" >>"$tmp/logs/hooks.log" 2>&1; trial=$((trial+1)); done
- status=complete; [ "$KEEP" -eq 1 ] && status=debug; printf '%s\n' "$final"
-}
-publish_run() {
- source=$1; [ "$#" -eq 1 ] || usage
- source=$(CDPATH= cd -- "$source" 2>/dev/null && pwd -P) || { echo "invalid source" >&2; return 1; }
- localroot=$(CDPATH= cd -- "$LOCAL_RESULTS" 2>/dev/null && pwd -P) || return 1
- case "$source" in "$localroot"/*) ;; *) echo "source outside local results" >&2; return 1;; esac
- [ "$(dirname "$source")" = "$localroot" ] || { echo "source must be a run bundle" >&2; return 1; }
- [ -f "$source/run.json" ] || return 1
- status=$(jq -r '.status' "$source/run.json")
- debug=$(jq -r '.debug' "$source/run.json")
- [ "$status" = complete ] && [ "$debug" = false ] || { echo "run is not publishable" >&2; return 1; }
- set_id=$(jq -r '.set' "$source/run.json"); benchmark_id=$(jq -r '.benchmark' "$source/run.json"); platform=$(jq -r '.platform' "$source/run.json"); variant=$(jq -r '.variant' "$source/run.json"); run_id=$(jq -r '.run_id' "$source/run.json")
- valid_id "$set_id" && valid_id "$benchmark_id" && valid_id "$platform" && valid_id "$variant" && printf '%s\n' "$run_id" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$' || { echo "invalid publication metadata" >&2; return 1; }
- [ -n "$set_id" ] && [ "$set_id" != null ] || return 1
- root=$PUBLISHED_RESULTS; mkdir -p "$root"
- dest=$root/$set_id/$benchmark_id/$platform/$variant/$run_id; case "$dest" in "$root"/*) ;; *) return 1;; esac
- [ ! -e "$dest" ] || { echo "destination exists" >&2; return 1; }
- parent=$(dirname "$dest"); mkdir -p "$parent"; staging=$(mktemp -d "$parent/.publish.XXXXXX") || return 1
- trap 'rm -rf "$staging"' 0 1 2 3 15
- mkdir -p "$staging/definitions" "$staging/trials"
- cp "$source/run.json" "$source/environment.json" "$source/definitions.sha256" "$staging/"
- cp -R "$source/definitions/." "$staging/definitions/"
- for summary in "$source"/trials/*/summary.json; do [ -f "$summary" ] || continue; trial=$(basename "$(dirname "$summary")"); mkdir -p "$staging/trials/$trial"; cp "$summary" "$staging/trials/$trial/"; done
- mv "$staging" "$dest"; trap - 0 1 2 3 15
- echo "$dest"
-}
-command=${1:-}; subcommand=${2:-}; [ "$command" = new ] && { shift 2; case "$subcommand" in set) new_set "$@";; benchmark) new_benchmark "$@";; case) new_case "$@";; *) usage;; esac; exit; }; [ "$command" = validate ] && { target=${2:-all}; [ "$target" = all ] && validate_all || { IFS=/ read -r s b p v <<EOF
-$target
+
+usage() {
+  cat >&2 <<'EOF'
+usage:
+  bin/bench new set SET
+  bin/bench new benchmark SET BENCHMARK
+  bin/bench new case SET BENCHMARK PLATFORM VARIANT
+  bin/bench validate [all|SET/BENCHMARK/PLATFORM/VARIANT]
+  bin/bench run SET BENCHMARK PLATFORM VARIANT [--allow-dirty] [--keep]
+  bin/bench publish .results/RUN_ID
 EOF
- [ -n "${v:-}" ] || usage; validate_case "$s" "$b" "$p" "$v"; }; echo PASS; exit; }; [ "$command" = publish ] && { [ "$#" -eq 2 ] || usage; publish_run "$2"; exit; }; [ "$command" = run ] || usage; [ "$#" -ge 5 ] || usage; shift; run_case "$@"
+  exit 2
+}
+
+error() {
+  echo "$*" >&2
+  return 1
+}
+
+valid_id() {
+  printf '%s\n' "$1" | grep -Eq '^[a-z0-9][a-z0-9-]*$'
+}
+
+valid_metric() {
+  printf '%s\n' "$1" | grep -Eq '^[a-z][a-z0-9_]*$'
+}
+
+valid_platform() {
+  "$BAAS" list | grep -qx "$1"
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || error "missing required tool: $1"
+}
+
+require_result_tools() {
+  for tool in jq git docker; do require_command "$tool" || return 1; done
+  command -v shasum >/dev/null 2>&1 || command -v sha256sum >/dev/null 2>&1 ||
+    error "missing required tool: shasum or sha256sum"
+}
+
+sha256() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    sha256sum "$1" | awk '{print $1}'
+  fi
+}
+
+replace() {
+  file=$1 token=$2 value=$3
+  sed "s|{{$token}}|$value|g" "$file" > "$file.tmp"
+  mv "$file.tmp" "$file"
+}
+
+new_set() {
+  [ "$#" -eq 1 ] || usage
+  id=$1
+  valid_id "$id" || { error "invalid set id: $id"; exit 2; }
+  dest=$SETS/$id
+  [ ! -e "$dest" ] || error "already exists: $dest"
+  mkdir -p "$dest"
+  cp -R "$TEMPLATES/benchmark-set/." "$dest/"
+  mkdir -p "$dest/benchmarks"
+  replace "$dest/set.conf" SET_ID "$id"
+  replace "$dest/README.md" SET_ID "$id"
+  echo "$dest"
+}
+
+new_benchmark() {
+  [ "$#" -eq 2 ] || usage
+  set_id=$1
+  benchmark_id=$2
+  valid_id "$set_id" && valid_id "$benchmark_id" || { error "invalid set or benchmark id"; exit 2; }
+  parent=$SETS/$set_id
+  [ -f "$parent/set.conf" ] || error "unknown set: $set_id"
+  dest=$parent/benchmarks/$benchmark_id
+  [ ! -e "$dest" ] || error "already exists: $dest"
+  mkdir -p "$dest"
+  cp -R "$TEMPLATES/benchmark/." "$dest/"
+  mkdir -p "$dest/fixtures" "$dest/cases"
+  replace "$dest/benchmark.conf" BENCHMARK_ID "$benchmark_id"
+  replace "$dest/METHODOLOGY.md" BENCHMARK_ID "$benchmark_id"
+  echo "$dest"
+}
+
+new_case() {
+  [ "$#" -eq 4 ] || usage
+  set_id=$1
+  benchmark_id=$2
+  platform=$3
+  variant=$4
+  valid_id "$set_id" && valid_id "$benchmark_id" && valid_id "$platform" && valid_id "$variant" || {
+    error "invalid case path"
+    exit 2
+  }
+  valid_platform "$platform" || { error "unknown platform: $platform"; exit 2; }
+  parent=$SETS/$set_id/benchmarks/$benchmark_id
+  [ -f "$parent/benchmark.conf" ] || error "unknown benchmark: $set_id/$benchmark_id"
+  dest=$parent/cases/$platform/$variant
+  [ ! -e "$dest" ] || error "already exists: $dest"
+  mkdir -p "$dest"
+  cp -R "$TEMPLATES/case/." "$dest/"
+  for file in "$dest/case.conf" "$dest/README.md"; do
+    replace "$file" PLATFORM "$platform"
+    replace "$file" VARIANT "$variant"
+  done
+  chmod +x "$dest"/*.sh
+  echo "$dest"
+}
+
+conf_value() {
+  [ -f "$1" ] || return 1
+  awk -F= -v wanted="$2" '
+    $1 == wanted { sub(/^[^=]*=/, ""); print; found++ }
+    END { exit found == 1 ? 0 : 1 }
+  ' "$1"
+}
+
+check_conf() {
+  file=$1
+  shift
+  [ -f "$file" ] || error "missing metadata: $file"
+  awk -F= '
+    BEGIN { bad=0 }
+    /^[[:space:]]*$/ { bad=1 }
+    !/^[a-z][a-z0-9_]*=[^[:cntrl:]]*$/ { bad=1 }
+    { if (++seen[$1] > 1) bad=1 }
+    { if ($1 ~ /password|secret|token|credential|api_key|connection_string/) bad=1 }
+    END { exit bad }
+  ' "$file" || { error "invalid metadata: $file"; return 1; }
+  for key in "$@"; do
+    value=$(conf_value "$file" "$key") || { error "missing or duplicate $key: $file"; return 1; }
+    [ -n "$value" ] || { error "blank $key: $file"; return 1; }
+  done
+}
+
+no_todo() {
+  path=$1
+  [ -e "$path" ] || { error "missing required path: $path"; return 1; }
+  if [ -d "$path" ]; then
+    ! find "$path" -type f -exec grep -n TODO {} + >/dev/null 2>&1 || error "unresolved TODO: $path"
+  else
+    ! grep -n TODO "$path" >/dev/null 2>&1 || error "unresolved TODO: $path"
+  fi
+}
+
+is_uint() {
+  printf '%s\n' "$1" | grep -Eq '^[0-9]+$'
+}
+
+validate_set_at() {
+  sets_root=$1
+  id=$2
+  valid_id "$id" || { error "invalid set id: $id"; return 1; }
+  dir=$sets_root/$id
+  check_conf "$dir/set.conf" schema_version id title description || return 1
+  [ "$(conf_value "$dir/set.conf" schema_version)" = 1 ] || { error "unsupported set schema: $dir/set.conf"; return 1; }
+  [ "$(conf_value "$dir/set.conf" id)" = "$id" ] || { error "set id does not match path: $dir"; return 1; }
+  no_todo "$dir/set.conf" || return 1
+  no_todo "$dir/README.md" || return 1
+}
+
+validate_benchmark_at() {
+  sets_root=$1
+  set_id=$2
+  benchmark_id=$3
+  valid_id "$set_id" && valid_id "$benchmark_id" || error "invalid benchmark path"
+  dir=$sets_root/$set_id/benchmarks/$benchmark_id
+  check_conf "$dir/benchmark.conf" schema_version id title description primary_metric primary_unit \
+    primary_direction required_metrics warmup_trials measured_trials || return 1
+  [ "$(conf_value "$dir/benchmark.conf" schema_version)" = 1 ] || { error "unsupported benchmark schema: $dir/benchmark.conf"; return 1; }
+  [ "$(conf_value "$dir/benchmark.conf" id)" = "$benchmark_id" ] || { error "benchmark id does not match path: $dir"; return 1; }
+  metric=$(conf_value "$dir/benchmark.conf" primary_metric)
+  valid_metric "$metric" || { error "invalid primary metric: $metric"; return 1; }
+  direction=$(conf_value "$dir/benchmark.conf" primary_direction)
+  [ "$direction" = higher ] || [ "$direction" = lower ] || { error "invalid primary direction: $direction"; return 1; }
+  required=$(conf_value "$dir/benchmark.conf" required_metrics)
+  old_ifs=$IFS
+  IFS=,
+  for metric in $required; do
+    valid_metric "$metric" || { IFS=$old_ifs; error "invalid required metric: $metric"; return 1; }
+  done
+  IFS=$old_ifs
+  warm=$(conf_value "$dir/benchmark.conf" warmup_trials)
+  measured=$(conf_value "$dir/benchmark.conf" measured_trials)
+  is_uint "$warm" || { error "invalid warmup_trials: $warm"; return 1; }
+  is_uint "$measured" && [ "$measured" -gt 0 ] || { error "invalid measured_trials: $measured"; return 1; }
+  no_todo "$dir/benchmark.conf" || return 1
+  no_todo "$dir/METHODOLOGY.md" || return 1
+}
+
+validate_case_at() {
+  sets_root=$1
+  set_id=$2
+  benchmark_id=$3
+  platform=$4
+  variant=$5
+  valid_id "$set_id" && valid_id "$benchmark_id" && valid_id "$platform" && valid_id "$variant" || {
+    error "invalid case path"
+    return 1
+  }
+  validate_set_at "$sets_root" "$set_id" || return 1
+  validate_benchmark_at "$sets_root" "$set_id" "$benchmark_id" || return 1
+  dir=$sets_root/$set_id/benchmarks/$benchmark_id/cases/$platform/$variant
+  check_conf "$dir/case.conf" schema_version platform variant access_path connection client implementation || return 1
+  [ "$(conf_value "$dir/case.conf" schema_version)" = 1 ] || { error "unsupported case schema: $dir/case.conf"; return 1; }
+  [ "$(conf_value "$dir/case.conf" platform)" = "$platform" ] || { error "case platform does not match path: $dir"; return 1; }
+  [ "$(conf_value "$dir/case.conf" variant)" = "$variant" ] || { error "case variant does not match path: $dir"; return 1; }
+  valid_platform "$platform" || { error "unknown platform: $platform"; return 1; }
+  no_todo "$dir/case.conf" || return 1
+  no_todo "$dir/README.md" || return 1
+  for hook in setup verify reset run teardown; do
+    [ -x "$dir/$hook.sh" ] || { error "missing executable hook: $dir/$hook.sh"; return 1; }
+    sh -n "$dir/$hook.sh" || { error "invalid hook: $dir/$hook.sh"; return 1; }
+    no_todo "$dir/$hook.sh" || return 1
+  done
+}
+
+validate_case() {
+  validate_case_at "$SETS" "$@"
+}
+
+validate_all() {
+  [ -d "$SETS" ] || return 0
+  for setdir in "$SETS"/*; do
+    [ -d "$setdir" ] || continue
+    set_id=${setdir##*/}
+    validate_set_at "$SETS" "$set_id" || return 1
+    for benchmark_dir in "$setdir"/benchmarks/*; do
+      [ -d "$benchmark_dir" ] || continue
+      benchmark_id=${benchmark_dir##*/}
+      validate_benchmark_at "$SETS" "$set_id" "$benchmark_id" || return 1
+      for case_file in "$benchmark_dir"/cases/*/*/case.conf; do
+        [ -f "$case_file" ] || continue
+        case_dir=${case_file%/case.conf}
+        variant=${case_dir##*/}
+        platform_dir=${case_dir%/*}
+        platform=${platform_dir##*/}
+        validate_case_at "$SETS" "$set_id" "$benchmark_id" "$platform" "$variant" || return 1
+      done
+    done
+  done
+}
+
+parse_target() {
+  target=$1
+  set_id=$(printf '%s\n' "$target" | cut -d/ -f1)
+  benchmark_id=$(printf '%s\n' "$target" | cut -d/ -f2)
+  platform=$(printf '%s\n' "$target" | cut -d/ -f3)
+  variant=$(printf '%s\n' "$target" | cut -d/ -f4)
+  [ "$target" = "$set_id/$benchmark_id/$platform/$variant" ] || error "invalid validation target: $target"
+  valid_id "$set_id" && valid_id "$benchmark_id" && valid_id "$platform" && valid_id "$variant" ||
+    error "invalid validation target: $target"
+  validate_case "$set_id" "$benchmark_id" "$platform" "$variant"
+}
+
+write_checksums() {
+  base=$1
+  output=$2
+  (cd "$base" && find . -type f -print | LC_ALL=C sort | while IFS= read -r file; do
+    printf '%s  %s\n' "$(sha256 "$base/$file")" "$file"
+  done) > "$output"
+}
+
+definition_state() {
+  set_dir=$SETS/$1
+  repo=$(git -C "$set_dir" rev-parse --show-toplevel 2>/dev/null) || return 1
+  set_abs=$(CDPATH= cd -- "$set_dir" && pwd -P) || return 1
+  case "$set_abs" in "$repo"/*) ;; *) return 1 ;; esac
+  DEFINITION_REPO=$repo
+  DEFINITION_COMMIT=$(git -C "$repo" rev-parse HEAD)
+  relative=${set_abs#"$repo"/}
+  if [ -n "$(git -C "$repo" status --porcelain -- "$relative")" ]; then
+    DEFINITION_DIRTY=1
+  else
+    DEFINITION_DIRTY=0
+  fi
+}
+
+copy_definitions() {
+  destination=$1
+  set_id=$2
+  benchmark_id=$3
+  platform=$4
+  variant=$5
+  source_set=$SETS/$set_id
+  target_set=$destination/benchmark-sets/$set_id
+  target_benchmark=$target_set/benchmarks/$benchmark_id
+  target_case=$target_benchmark/cases/$platform/$variant
+  mkdir -p "$target_case"
+  cp "$source_set/set.conf" "$source_set/README.md" "$target_set/"
+  cp "$source_set/benchmarks/$benchmark_id/benchmark.conf" "$source_set/benchmarks/$benchmark_id/METHODOLOGY.md" "$target_benchmark/"
+  if [ -d "$source_set/benchmarks/$benchmark_id/fixtures" ]; then
+    cp -R "$source_set/benchmarks/$benchmark_id/fixtures" "$target_benchmark/"
+  else
+    mkdir -p "$target_benchmark/fixtures"
+  fi
+  cp -R "$source_set/benchmarks/$benchmark_id/cases/$platform/$variant/." "$target_case/"
+}
+
+validate_summary() {
+  summary=$1
+  benchmark_conf=$2
+  [ -f "$summary" ] || error "missing trial summary: $summary"
+  jq -e '
+    .schema_version == 1 and
+    ((.duration_seconds | type) == "number" and .duration_seconds >= 0) and
+    ((.completed_operations | type) == "number" and .completed_operations >= 0) and
+    ((.failed_operations | type) == "number" and .failed_operations >= 0) and
+    ((.error_rate | type) == "number" and .error_rate >= 0 and .error_rate <= 1) and
+    (.metrics | type) == "object"
+  ' "$summary" >/dev/null || error "invalid trial summary: $summary"
+  metrics=$(conf_value "$benchmark_conf" required_metrics),$(conf_value "$benchmark_conf" primary_metric)
+  old_ifs=$IFS
+  IFS=,
+  for metric in $metrics; do
+    jq -e --arg metric "$metric" '(.metrics[$metric] | type) == "number"' "$summary" >/dev/null || {
+      IFS=$old_ifs
+      error "missing numeric metric $metric: $summary"
+      return 1
+    }
+  done
+  IFS=$old_ifs
+}
+
+hook() {
+  name=$1
+  phase=$2
+  trial=$3
+  output=$4
+  BENCH_PHASE=$phase BENCH_TRIAL=$trial BENCH_OUTPUT_DIR=$output \
+    "$CASE_DIR/$name.sh" >> "$TMP_RUN/logs/hooks.log" 2>&1
+}
+
+write_environment() {
+  docker_version=$(docker version --format '{{.Server.Version}}')
+  compose_version=$(docker compose version --short)
+  docker_cpus=$(docker info --format '{{.NCPU}}')
+  docker_memory=$(docker info --format '{{.MemTotal}}')
+  jq -n \
+    --arg os "$(uname -s)" \
+    --arg architecture "$(uname -m)" \
+    --arg git_commit "$DEFINITION_COMMIT" \
+    --arg versions_sha256 "$(sha256 "$ROOT/versions.env")" \
+    --arg utc_timestamp "$STARTED_AT" \
+    --arg docker_server_version "$docker_version" \
+    --arg docker_compose_version "$compose_version" \
+    --argjson docker_cpus "$docker_cpus" \
+    --argjson docker_memory_bytes "$docker_memory" \
+    '{schema_version:1, os:$os, architecture:$architecture, git_commit:$git_commit,
+      versions_sha256:$versions_sha256, utc_timestamp:$utc_timestamp,
+      docker_server_version:$docker_server_version, docker_compose_version:$docker_compose_version,
+      docker_cpus:$docker_cpus, docker_memory_bytes:$docker_memory_bytes}' > "$TMP_RUN/environment.json"
+}
+
+write_run_manifest() {
+  finished_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+  definitions_sha256=$(sha256 "$TMP_RUN/definitions.sha256")
+  jq -n \
+    --arg status "$RUN_STATUS" \
+    --arg set "$SET_ID" \
+    --arg benchmark "$BENCHMARK_ID" \
+    --arg platform "$PLATFORM" \
+    --arg variant "$VARIANT" \
+    --arg run_id "$RUN_ID" \
+    --arg commit "$DEFINITION_COMMIT" \
+    --arg started_at "$STARTED_AT" \
+    --arg finished_at "$finished_at" \
+    --arg definitions_sha256 "$definitions_sha256" \
+    --arg start "$START_OUTCOME" \
+    --arg setup "$SETUP_OUTCOME" \
+    --arg teardown "$TEARDOWN_OUTCOME" \
+    --arg stop "$STOP_OUTCOME" \
+    --argjson debug "$KEEP" \
+    --argjson dirty "$DEFINITION_DIRTY" \
+    --argjson allow_dirty_flag "$ALLOW_DIRTY_FLAG" \
+    --argjson warmup_trials "$WARMUP_TRIALS" \
+    --argjson measured_trials "$MEASURED_TRIALS" \
+    '{schema_version:1, status:$status, debug:($debug == 1), dirty:($dirty == 1),
+      run_id:$run_id, set:$set, benchmark:$benchmark, platform:$platform, variant:$variant,
+      commit:$commit, started_at:$started_at, finished_at:$finished_at,
+      arguments:(["run",$set,$benchmark,$platform,$variant]
+        + (if $allow_dirty_flag == 1 then ["--allow-dirty"] else [] end)
+        + (if $debug == 1 then ["--keep"] else [] end)),
+      definitions_sha256:$definitions_sha256,
+      warmup_trials:$warmup_trials, measured_trials:$measured_trials,
+      lifecycle:{start:$start,setup:$setup,teardown:$teardown,stop:$stop}}' > "$TMP_RUN/run.json"
+}
+
+cleanup_run() {
+  primary_exit=$1
+  trap - 0 1 2 15
+  set +e
+  cleanup_failed=0
+  if [ "$KEEP" -eq 0 ]; then
+    if [ "$SETUP_STARTED" -eq 1 ]; then
+      hook teardown teardown 0 "$TMP_RUN"
+      if [ "$?" -eq 0 ]; then TEARDOWN_OUTCOME=complete; else TEARDOWN_OUTCOME=failed; cleanup_failed=1; fi
+    fi
+    if [ "$PLATFORM_STARTED" -eq 1 ]; then
+      "$BAAS" stop "$PLATFORM" >> "$TMP_RUN/logs/baas.log" 2>&1
+      if [ "$?" -eq 0 ]; then STOP_OUTCOME=complete; else STOP_OUTCOME=failed; cleanup_failed=1; fi
+    fi
+  else
+    TEARDOWN_OUTCOME=skipped
+    STOP_OUTCOME=skipped
+  fi
+  if [ "$cleanup_failed" -eq 1 ]; then
+    RUN_STATUS=failed
+    [ "$primary_exit" -ne 0 ] || primary_exit=1
+  fi
+  write_run_manifest
+  manifest_exit=$?
+  if [ "$manifest_exit" -ne 0 ]; then
+    echo "failed to write run manifest" >&2
+    [ "$primary_exit" -ne 0 ] || primary_exit=$manifest_exit
+  fi
+  if [ -d "$TMP_RUN" ] && [ ! -e "$FINAL_RUN" ]; then
+    mv "$TMP_RUN" "$FINAL_RUN"
+    move_exit=$?
+    [ "$move_exit" -eq 0 ] || { [ "$primary_exit" -ne 0 ] || primary_exit=$move_exit; }
+  fi
+  rm -rf "$LOCK_DIR"
+  if [ "$primary_exit" -eq 0 ]; then echo "$FINAL_RUN"; fi
+  exit "$primary_exit"
+}
+
+run_case() {
+  [ "$#" -ge 4 ] || usage
+  SET_ID=$1
+  BENCHMARK_ID=$2
+  PLATFORM=$3
+  VARIANT=$4
+  shift 4
+  KEEP=0
+  ALLOW_DIRTY=${BENCH_ALLOW_DIRTY:-0}
+  ALLOW_DIRTY_FLAG=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --allow-dirty) ALLOW_DIRTY=1; ALLOW_DIRTY_FLAG=1 ;;
+      --keep) KEEP=1 ;;
+      *) usage ;;
+    esac
+    shift
+  done
+  valid_id "$SET_ID" && valid_id "$BENCHMARK_ID" && valid_id "$PLATFORM" && valid_id "$VARIANT" ||
+    error "invalid case path"
+  validate_case "$SET_ID" "$BENCHMARK_ID" "$PLATFORM" "$VARIANT"
+  require_result_tools
+  if definition_state "$SET_ID"; then
+    :
+  else
+    DEFINITION_REPO=
+    DEFINITION_COMMIT=unknown
+    DEFINITION_DIRTY=1
+  fi
+  if [ "$DEFINITION_DIRTY" -eq 1 ] && [ "$ALLOW_DIRTY" != 1 ]; then
+    error "definitions are dirty or outside a Git worktree; use --allow-dirty"
+    return 1
+  fi
+
+  mkdir -p "$LOCAL_RESULTS"
+  LOCK_DIR=$LOCAL_RESULTS/.lock
+  mkdir "$LOCK_DIR" 2>/dev/null || error "benchmark lock is held$(test -f "$LOCK_DIR/owner" && printf ': %s' "$(cat "$LOCK_DIR/owner")")"
+  printf 'pid=%s host=%s\n' "$$" "$(uname -n)" > "$LOCK_DIR/owner"
+
+  RUN_ID=$(date -u '+%Y%m%dT%H%M%SZ')-$SET_ID-$BENCHMARK_ID-$PLATFORM-$VARIANT-$$
+  TMP_RUN=$LOCAL_RESULTS/.tmp-$RUN_ID
+  FINAL_RUN=$LOCAL_RESULTS/$RUN_ID
+  CASE_DIR=$SETS/$SET_ID/benchmarks/$BENCHMARK_ID/cases/$PLATFORM/$VARIANT
+  STARTED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+  RUN_STATUS=failed
+  START_OUTCOME=not_started
+  SETUP_OUTCOME=not_started
+  TEARDOWN_OUTCOME=not_started
+  STOP_OUTCOME=not_started
+  PLATFORM_STARTED=0
+  SETUP_STARTED=0
+  WARMUP_TRIALS=$(conf_value "$SETS/$SET_ID/benchmarks/$BENCHMARK_ID/benchmark.conf" warmup_trials)
+  MEASURED_TRIALS=$(conf_value "$SETS/$SET_ID/benchmarks/$BENCHMARK_ID/benchmark.conf" measured_trials)
+
+  mkdir -p "$TMP_RUN/definitions" "$TMP_RUN/logs" "$TMP_RUN/warmups" "$TMP_RUN/trials"
+  trap 'cleanup_run $?' 0
+  trap 'exit 129' 1
+  trap 'exit 130' 2
+  trap 'exit 143' 15
+
+  copy_definitions "$TMP_RUN/definitions" "$SET_ID" "$BENCHMARK_ID" "$PLATFORM" "$VARIANT"
+  write_checksums "$TMP_RUN/definitions" "$TMP_RUN/definitions.sha256"
+  write_environment
+
+  PLATFORM_STARTED=1
+  START_OUTCOME=failed
+  "$BAAS" start "$PLATFORM" > "$TMP_RUN/logs/baas.log" 2>&1
+  START_OUTCOME=complete
+
+  SETUP_STARTED=1
+  SETUP_OUTCOME=failed
+  hook setup setup 0 "$TMP_RUN"
+  SETUP_OUTCOME=complete
+
+  RUN_STATUS=invalid
+  hook verify verify 0 "$TMP_RUN"
+  RUN_STATUS=failed
+
+  trial=1
+  while [ "$trial" -le "$WARMUP_TRIALS" ]; do
+    output=$TMP_RUN/warmups/$(printf '%03d' "$trial")
+    mkdir -p "$output/raw"
+    hook reset warmup "$trial" "$output"
+    hook run warmup "$trial" "$output"
+    RUN_STATUS=invalid
+    hook verify warmup "$trial" "$output"
+    RUN_STATUS=failed
+    trial=$((trial + 1))
+  done
+
+  trial=1
+  benchmark_conf=$SETS/$SET_ID/benchmarks/$BENCHMARK_ID/benchmark.conf
+  while [ "$trial" -le "$MEASURED_TRIALS" ]; do
+    output=$TMP_RUN/trials/$(printf '%03d' "$trial")
+    mkdir -p "$output/raw"
+    hook reset measure "$trial" "$output"
+    hook run measure "$trial" "$output"
+    RUN_STATUS=invalid
+    validate_summary "$output/summary.json" "$benchmark_conf"
+    hook verify measure "$trial" "$output"
+    RUN_STATUS=failed
+    trial=$((trial + 1))
+  done
+
+  if [ "$KEEP" -eq 1 ]; then RUN_STATUS=debug; else RUN_STATUS=complete; fi
+}
+
+validate_manifest() {
+  manifest=$1
+  jq -e '
+    .schema_version == 1 and
+    (.status | type) == "string" and
+    (.debug | type) == "boolean" and
+    (.dirty | type) == "boolean" and
+    (.run_id | type) == "string" and
+    (.set | type) == "string" and
+    (.benchmark | type) == "string" and
+    (.platform | type) == "string" and
+    (.variant | type) == "string" and
+    (.commit | type) == "string" and
+    (.started_at | type) == "string" and
+    (.finished_at | type) == "string" and
+    (.arguments | type) == "array" and
+    (.definitions_sha256 | type) == "string" and
+    (.warmup_trials | type) == "number" and
+    (.measured_trials | type) == "number" and
+    (.lifecycle | type) == "object"
+  ' "$manifest" >/dev/null || error "invalid run manifest: $manifest"
+}
+
+validate_environment() {
+  jq -e '
+    .schema_version == 1 and
+    (.os | type) == "string" and
+    (.architecture | type) == "string" and
+    (.git_commit | type) == "string" and
+    (.versions_sha256 | type) == "string" and
+    (.utc_timestamp | type) == "string" and
+    (.docker_server_version | type) == "string" and
+    (.docker_compose_version | type) == "string" and
+    (.docker_cpus | type) == "number" and
+    (.docker_memory_bytes | type) == "number"
+  ' "$1" >/dev/null || error "invalid environment manifest: $1"
+}
+
+publish_run() {
+  [ "$#" -eq 1 ] || usage
+  require_result_tools
+  source=$(CDPATH= cd -- "$1" 2>/dev/null && pwd -P) || error "invalid source: $1"
+  local_root=$(CDPATH= cd -- "$LOCAL_RESULTS" 2>/dev/null && pwd -P) || error "missing local results directory"
+  [ "$(dirname "$source")" = "$local_root" ] || error "source must be a direct child of local results"
+  validate_manifest "$source/run.json"
+  validate_environment "$source/environment.json"
+
+  status=$(jq -r .status "$source/run.json")
+  debug=$(jq -r .debug "$source/run.json")
+  dirty=$(jq -r .dirty "$source/run.json")
+  [ "$status" = complete ] && [ "$debug" = false ] && [ "$dirty" = false ] || error "run is not publishable"
+
+  set_id=$(jq -r .set "$source/run.json")
+  benchmark_id=$(jq -r .benchmark "$source/run.json")
+  platform=$(jq -r .platform "$source/run.json")
+  variant=$(jq -r .variant "$source/run.json")
+  run_id=$(jq -r .run_id "$source/run.json")
+  valid_id "$set_id" && valid_id "$benchmark_id" && valid_id "$platform" && valid_id "$variant" ||
+    error "invalid publication identity"
+  printf '%s\n' "$run_id" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$' || error "invalid run id"
+  [ "$(basename "$source")" = "$run_id" ] || error "run id does not match source directory"
+
+  validate_case "$set_id" "$benchmark_id" "$platform" "$variant"
+  definition_state "$set_id" || error "current definitions are outside a Git worktree"
+  [ "$DEFINITION_DIRTY" -eq 0 ] || error "current definitions are dirty"
+  recorded_commit=$(jq -r .commit "$source/run.json")
+  [ "$recorded_commit" = "$DEFINITION_COMMIT" ] || error "run commit does not match current Git commit"
+
+  snapshot_sets=$source/definitions/benchmark-sets
+  validate_case_at "$snapshot_sets" "$set_id" "$benchmark_id" "$platform" "$variant"
+  checksum_tmp=$source/.definitions.sha256.$$
+  current_tmp=$source/.current-definitions.$$
+  trap 'rm -f "$checksum_tmp"; rm -rf "$current_tmp"' 0 1 2 15
+  write_checksums "$source/definitions" "$checksum_tmp"
+  cmp -s "$checksum_tmp" "$source/definitions.sha256" || error "definition checksums do not match"
+  [ "$(sha256 "$source/definitions.sha256")" = "$(jq -r .definitions_sha256 "$source/run.json")" ] ||
+    error "definition manifest checksum does not match"
+  mkdir -p "$current_tmp"
+  copy_definitions "$current_tmp" "$set_id" "$benchmark_id" "$platform" "$variant"
+  diff -qr "$current_tmp" "$source/definitions" >/dev/null || error "captured definitions differ from the recorded commit"
+  rm -f "$checksum_tmp"
+  rm -rf "$current_tmp"
+  trap - 0 1 2 15
+
+  measured=$(conf_value "$snapshot_sets/$set_id/benchmarks/$benchmark_id/benchmark.conf" measured_trials)
+  [ "$(jq -r .measured_trials "$source/run.json")" = "$measured" ] || error "measured trial count does not match"
+  trial=1
+  while [ "$trial" -le "$measured" ]; do
+    summary=$source/trials/$(printf '%03d' "$trial")/summary.json
+    validate_summary "$summary" "$snapshot_sets/$set_id/benchmarks/$benchmark_id/benchmark.conf" || return 1
+    trial=$((trial + 1))
+  done
+
+  root=$PUBLISHED_RESULTS
+  mkdir -p "$root"
+  dest=$root/$set_id/$benchmark_id/$platform/$variant/$run_id
+  [ ! -e "$dest" ] || error "destination exists: $dest"
+  parent=$(dirname "$dest")
+  mkdir -p "$parent"
+  staging=$(mktemp -d "$parent/.publish.XXXXXX")
+  trap 'rm -rf "$staging"' 0 1 2 15
+  mkdir -p "$staging/definitions" "$staging/trials"
+  cp "$source/run.json" "$source/environment.json" "$source/definitions.sha256" "$staging/"
+  cp -R "$source/definitions/." "$staging/definitions/"
+  trial=1
+  while [ "$trial" -le "$measured" ]; do
+    name=$(printf '%03d' "$trial")
+    mkdir -p "$staging/trials/$name"
+    cp "$source/trials/$name/summary.json" "$staging/trials/$name/"
+    trial=$((trial + 1))
+  done
+  mv "$staging" "$dest"
+  trap - 0 1 2 15
+  echo "$dest"
+}
+
+command=${1:-}
+case "$command" in
+  new)
+    subcommand=${2:-}
+    shift 2 || usage
+    case "$subcommand" in
+      set) new_set "$@" ;;
+      benchmark) new_benchmark "$@" ;;
+      case) new_case "$@" ;;
+      *) usage ;;
+    esac
+    ;;
+  validate)
+    [ "$#" -le 2 ] || usage
+    target=${2:-all}
+    if [ "$target" = all ]; then validate_all; else parse_target "$target"; fi
+    echo PASS
+    ;;
+  run)
+    shift
+    run_case "$@"
+    ;;
+  publish)
+    shift
+    publish_run "$@"
+    ;;
+  *) usage ;;
+esac
