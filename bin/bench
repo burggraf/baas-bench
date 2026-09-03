@@ -42,6 +42,8 @@ run_case() {
  trap cleanup EXIT INT TERM
  case_dir=$SETS/$set_id/benchmarks/$benchmark_id/cases/$platform/$variant
  cp -R "$SETS/$set_id/." "$tmp/definitions/"
+ jq -n --arg os "$(uname -s)" --arg arch "$(uname -m)" --arg commit "$(git rev-parse HEAD)" --arg timestamp "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" --arg versions "$(sha256 "$ROOT/versions.env")" '{schema_version:1,os:$os,architecture:$arch,git_commit:$commit,versions_sha256:$versions,utc_timestamp:$timestamp}' > "$tmp/environment.json"
+ (cd "$tmp/definitions" && find . -type f -print | sort | while IFS= read -r file; do printf '%s  %s\\n' "$(sha256 "$file")" "$file"; done) > "$tmp/definitions.sha256"
  git_commit=$(git rev-parse HEAD)
  "$BAAS" start "$platform" >"$tmp/logs/baas.log" 2>&1; started=1
  "$case_dir/setup.sh" >"$tmp/logs/hooks.log" 2>&1; setup_started=1
@@ -65,7 +67,7 @@ publish_run() {
  [ -n "$set_id" ] && [ "$set_id" != null ] || return 1
  dest=$PUBLISHED_RESULTS/$set_id/$benchmark_id/$platform/$variant/$run_id; [ ! -e "$dest" ] || { echo "destination exists" >&2; return 1; }
  mkdir -p "$dest" "$dest/definitions" "$dest/trials"
- cp "$source/run.json" "$source/environment.json" "$source/definitions.sha256" "$dest/" 2>/dev/null || :
+ cp "$source/run.json" "$source/environment.json" "$source/definitions.sha256" "$dest/"
  cp -R "$source/definitions/." "$dest/definitions/"
  for summary in "$source"/trials/*/summary.json; do [ -f "$summary" ] || continue; trial=$(basename "$(dirname "$summary")"); mkdir -p "$dest/trials/$trial"; cp "$summary" "$dest/trials/$trial/"; done
  echo "$dest"
