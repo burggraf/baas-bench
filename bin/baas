@@ -296,6 +296,8 @@ start_one() {
   setup_one "$1"
   stop_target all
   compose "$1" up -d --build
+  # Appwrite's reused Traefik can miss Docker labels during simultaneous restart.
+  [ "$1" = appwrite ] && compose appwrite restart traefik >/dev/null
   wait_until_ready "$1"
   echo "$1: started and smoke-tested"
 }

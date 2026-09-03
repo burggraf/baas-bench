@@ -83,6 +83,9 @@ grep -q 'curl .*localhost:8055/server/ping' "$BAAS_TEST_LOG" || fail "Directus s
 "$BAAS" setup appwrite >/dev/null
 [ -f "$BAAS_RUNTIME_DIR/appwrite/mongo-entrypoint.sh" ] || fail "Appwrite Mongo entrypoint was not downloaded"
 [ -f "$BAAS_RUNTIME_DIR/appwrite/mongo-init.js" ] || fail "Appwrite Mongo init script was not downloaded"
+: > "$BAAS_TEST_LOG"
+"$BAAS" start appwrite >/dev/null
+grep -q 'docker compose .* restart traefik' "$BAAS_TEST_LOG" || fail "Appwrite proxy was not refreshed after start"
 
 mkdir -p "$BAAS_RUNTIME_DIR/supabase/docker"
 printf '%s\n' 'SUPABASE_PUBLISHABLE_KEY=test-key' > "$BAAS_RUNTIME_DIR/supabase/docker/.env"
