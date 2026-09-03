@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import {
   fixture,
@@ -10,6 +11,115 @@ import {
   runStage,
 } from '../benchmark-sets/basic-js-v1/shared/lib/runner.mjs';
 import { summarize } from '../benchmark-sets/basic-js-v1/shared/lib/summary.mjs';
+
+const setRoot = new URL('../benchmark-sets/basic-js-v1/', import.meta.url);
+const benchmarkIds = [
+  'read-list-throughput',
+  'read-item-throughput',
+  'write-throughput',
+];
+const loads = [1, 10, 100, 1000];
+const metricNames = loads.flatMap((load) => [
+  `operations_per_second_vu_${load}`,
+  `latency_p50_ms_vu_${load}`,
+  `latency_p95_ms_vu_${load}`,
+  `latency_p99_ms_vu_${load}`,
+  `attempted_operations_vu_${load}`,
+  `completed_operations_vu_${load}`,
+  `failed_operations_vu_${load}`,
+  `error_rate_vu_${load}`,
+]);
+
+function read(relativePath) {
+  return readFileSync(new URL(relativePath, setRoot), 'utf8');
+}
+
+function parseConf(contents) {
+  return Object.fromEntries(contents.trim().split('\n').map((line) => line.split('=', 2)));
+}
+
+test('set metadata is exact', () => {
+  assert.deepEqual(parseConf(read('set.conf')), {
+    schema_version: '1',
+    id: 'basic-js-v1',
+    title: 'Basic JavaScript API throughput',
+    description: 'Unauthenticated guestbook list-read, item-read, and write throughput through mainstream JavaScript SDKs',
+  });
+});
+
+test('benchmark definitions require the complete load metric contract', () => {
+  for (const id of benchmarkIds) {
+    const config = parseConf(read(`benchmarks/${id}/benchmark.conf`));
+    assert.equal(config.id, id);
+    assert.equal(config.primary_metric, 'operations_per_second_vu_100');
+    assert.equal(config.primary_unit, 'ops/s');
+    assert.equal(config.primary_direction, 'higher');
+    assert.equal(config.warmup_trials, '1');
+    assert.equal(config.measured_trials, '3');
+    assert.deepEqual(config.required_metrics.split(','), metricNames);
+  }
+});
+
+test('set and methodologies disclose the shared benchmark policy', () => {
+  const documents = [
+    read('README.md'),
+    ...benchmarkIds.map((id) => read(`benchmarks/${id}/METHODOLOGY.md`)),
+  ];
+  for (const document of documents) {
+    const normalized = document.toLowerCase();
+    assert.match(normalized, /unauthenticated/);
+    assert.match(normalized, /neon/);
+    assert.match(normalized, /one client per virtual user/);
+    assert.match(document, /1, 10, 100, and 1,000/);
+    assert.match(normalized, /5-second/);
+    assert.match(normalized, /15-second/);
+  }
+
+  const headings = [
+    'Objective and non-goals',
+    'Correctness and response equivalence',
+    'Measured system boundary',
+    'Dataset, distribution, seed, and indexes',
+    'Authentication and authorization',
+    'Cache and warm-up policy',
+    'Workload, concurrency, duration, and pacing',
+    'Connections, pooling, retries, timeouts, and errors',
+    'Host and container environment',
+    'Trial order, cooldown, acceptance, and invalidation',
+    'Metrics and units',
+    'Permitted deviations and tuning',
+    'Limitations',
+  ];
+  for (const id of benchmarkIds) {
+    const methodology = read(`benchmarks/${id}/METHODOLOGY.md`);
+    const normalized = methodology.toLowerCase();
+    for (const heading of headings) assert.match(methodology, new RegExp(`^## ${heading}$`, 'm'));
+    for (const term of ['10,000', 'readiness', 'reset', 'index', 'retry', 'batch', 'application cache', 'nearest-rank', 'invalidat', 'appwrite', 'directus', 'pocketbase']) {
+      assert.ok(normalized.includes(term), `${id} must disclose ${term}`);
+    }
+  }
+});
+
+test('workload dependencies and Node version are pinned', () => {
+  const expected = {
+    '@directus/sdk': '25.0.1',
+    '@nhost/nhost-js': '4.8.0',
+    '@supabase/supabase-js': '2.115.0',
+    appwrite: '26.2.0',
+    convex: '1.45.0',
+    'node-appwrite': '28.0.0',
+    pocketbase: '0.28.0',
+    trailbase: '0.14.1',
+  };
+  const packageJson = JSON.parse(read('shared/package.json'));
+  const packageLock = JSON.parse(read('shared/package-lock.json'));
+  assert.deepEqual(packageJson.engines, { node: '>=22' });
+  assert.deepEqual(packageJson.dependencies, expected);
+  assert.deepEqual(packageLock.packages[''].dependencies, expected);
+  for (const [name, version] of Object.entries(expected)) {
+    assert.equal(packageLock.packages[`node_modules/${name}`].version, version);
+  }
+});
 
 test('fixture data is deterministic and bounded', () => {
   assert.deepEqual(fixture(1), {
