@@ -13,6 +13,10 @@ Reproducible local Docker environments for comparing self-hosted backend-as-a-se
 
 This first stage only provisions each environment and proves it accepts a request. Benchmark schemas and k6 workloads come later.
 
+## Benchmark framework
+
+The dependency-light benchmark framework scaffolds and validates benchmark definitions, runs cases through `bin/baas`, and publishes compact evidence. See the [approved design](docs/plans/2026-09-03-benchmark-framework-design.md) and [authoring guide](docs/benchmarks.md). `jq` is required only for `bin/bench run` and `bin/bench publish`.
+
 ## Requirements
 
 - macOS or Linux
