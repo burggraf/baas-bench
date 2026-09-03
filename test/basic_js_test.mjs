@@ -17,6 +17,7 @@ import { runAdmin } from '../benchmark-sets/basic-js-v1/shared/lib/admin.mjs';
 import { runFromArguments } from '../benchmark-sets/basic-js-v1/shared/lib/run.mjs';
 import { createSupabaseAdapter } from '../benchmark-sets/basic-js-v1/shared/lib/adapters/supabase.mjs';
 import { createSupabaseAdmin } from '../benchmark-sets/basic-js-v1/shared/lib/admin/supabase.mjs';
+import { createNhostAdapter } from '../benchmark-sets/basic-js-v1/shared/lib/adapters/nhost.mjs';
 
 const setRoot = new URL('../benchmark-sets/basic-js-v1/', import.meta.url);
 const benchmarkIds = [
@@ -381,6 +382,51 @@ test('Supabase administration uses compose psql and preserves setup failure', as
   await lifecycle.teardown({ operation: 'write' });
   assert.match(lifecycleCalls[0].input, /fixture_key IS NULL/);
   assert.match(lifecycleCalls[2].input, /DROP TABLE/);
+});
+
+test('Nhost adapter sends exact GraphQL operations and validates responses', async () => {
+  const requests = [];
+  const responses = [
+    { body: { data: { bb_basic_js_v1_guestbook: Array.from({ length: 20 }, (_, index) => ({ id: `id-${index}`, author: 'a', message: 'm', created_at: '2025-01-01T00:00:01+00:00' })) } } },
+    { body: { data: { bb_basic_js_v1_guestbook_by_pk: { id: 'id-2', author: 'user-0002', message: 'Guestbook message 00002 from basic-js-v1', created_at: '2025-01-01T00:00:02+00:00' } } } },
+    { body: { data: { insert_bb_basic_js_v1_guestbook_one: { id: 'new-id' } } } },
+  ];
+  const client = { graphql: { async request(request) { requests.push(request); return responses.shift(); } } };
+  const options = [];
+  const adapter = createNhostAdapter({
+    sdkCreateClient(value) { options.push(value); return client; },
+    ids: ['id-1', 'id-2'],
+    selectFixtureIndex: () => 1,
+  });
+  assert.equal(await adapter.createClient({ vu: 1 }), client);
+  assert.deepEqual(options[0], {
+    authUrl: 'http://local.auth.local.nhost.run/v1',
+    graphqlUrl: 'http://local.graphql.local.nhost.run/v1/graphql',
+    storageUrl: 'http://local.storage.local.nhost.run/v1',
+    functionsUrl: 'http://local.functions.local.nhost.run/v1',
+  });
+  const list = await adapter.operation(client, { operation: 'list' });
+  const itemContext = { operation: 'item', trial: 1, vu: 1, sequence: 0 };
+  const item = await adapter.operation(client, itemContext);
+  const writeContext = { operation: 'write', trial: 2, load: 10, vu: 3, sequence: 4 };
+  const created = await adapter.operation(client, writeContext);
+  assert.deepEqual(requests.map((request) => request.variables), [undefined, { id: 'id-2' }, { object: { author: 'bench-vu-3', message: 'basic-js-v1 trial-2 load-10 vu-3 operation-4' } }]);
+  assert.match(requests[0].query, /order_by: \{ created_at: desc \}, limit: 20/);
+  assert.doesNotMatch(requests[0].query, /fixture_key/);
+  assert.match(requests[1].query, /bb_basic_js_v1_guestbook_by_pk\(id: \$id\)/);
+  assert.match(requests[2].query, /insert_bb_basic_js_v1_guestbook_one\(object: \$object\)/);
+  assert.equal(adapter.validate(list, { operation: 'list' }), true);
+  assert.equal(adapter.validate(item, itemContext), true);
+  assert.equal(adapter.validate(created, writeContext), true);
+});
+
+test('Nhost adapter rejects GraphQL errors and invalid shapes', async () => {
+  const adapter = createNhostAdapter({ sdkCreateClient: () => ({}), ids: [] });
+  const errorClient = { graphql: { request: async () => ({ body: { errors: [{ message: 'denied' }] } }) } };
+  await assert.rejects(adapter.operation(errorClient, { operation: 'list' }), /denied/);
+  assert.equal(adapter.validate(null, { operation: 'item', trial: 1, vu: 1, sequence: 0 }), false);
+  assert.equal(adapter.validate([{ id: 'only-one' }], { operation: 'list' }), false);
+  assert.equal(adapter.validate({ id: '' }, { operation: 'write' }), false);
 });
 
 test('fixture data is deterministic and bounded', () => {
