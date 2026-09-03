@@ -1,0 +1,328 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+RUNTIME=${BAAS_RUNTIME_DIR:-$ROOT/.runtime}
+SERVICES='supabase neon convex appwrite nhost directus pocketbase trailbase'
+# shellcheck disable=SC1091
+. "$ROOT/versions.env"
+
+usage() {
+  echo "usage: bin/baas {list|setup|start|smoke|stop|status} [service|all]" >&2
+  exit 2
+}
+
+valid_service() {
+  case " $SERVICES " in *" $1 "*) return 0;; *) return 1;; esac
+}
+
+require_tools() {
+  for tool in docker git curl openssl; do
+    command -v "$tool" >/dev/null 2>&1 || { echo "missing required tool: $tool" >&2; exit 1; }
+  done
+  docker compose version >/dev/null 2>&1 || { echo "Docker Compose v2 is required" >&2; exit 1; }
+}
+
+random_hex() {
+  openssl rand -hex "$1"
+}
+
+set_env() {
+  file=$1 key=$2 value=$3
+  if grep -q "^${key}=" "$file"; then
+    sed -i.baas "s|^${key}=.*$|${key}=${value}|" "$file"
+    rm -f "$file.baas"
+  else
+    printf '%s=%s\n' "$key" "$value" >> "$file"
+  fi
+}
+
+sparse_checkout() {
+  name=$1 repo=$2 ref=$3 path=$4
+  dest="$RUNTIME/$name"
+  if [ -f "$dest/.baas-ref" ] && [ "$(cat "$dest/.baas-ref")" = "$ref" ]; then
+    return
+  fi
+  rm -rf "$dest"
+  mkdir -p "$dest"
+  git -C "$dest" init -q
+  git -C "$dest" remote add origin "https://github.com/$repo.git"
+  git -C "$dest" sparse-checkout init --cone
+  git -C "$dest" sparse-checkout set "$path"
+  git -C "$dest" fetch -q --depth 1 origin "$ref"
+  git -C "$dest" checkout -q --detach FETCH_HEAD
+  printf '%s\n' "$ref" > "$dest/.baas-ref"
+}
+
+download_at_ref() {
+  repo=$1 ref=$2 path=$3 output=$4
+  curl -fsSL "https://raw.githubusercontent.com/$repo/$ref/$path" -o "$output"
+}
+
+setup_supabase() {
+  sparse_checkout supabase supabase/supabase "$SUPABASE_REF" docker
+  dir="$RUNTIME/supabase/docker"
+  if [ ! -f "$dir/.env" ]; then
+    cp "$dir/.env.example" "$dir/.env"
+    (cd "$dir" && sh utils/generate-keys.sh --update-env >/dev/null && sh utils/add-new-auth-keys.sh --update-env >/dev/null)
+    # Supabase documents named storage volumes for macOS Docker hosts.
+    sed -i.baas 's|\./volumes/storage:/var/lib/storage:z|storage-data:/var/lib/storage:z|g' "$dir/docker-compose.yml"
+    rm -f "$dir/docker-compose.yml.baas"
+    printf '  storage-data:\n' >> "$dir/docker-compose.yml"
+  fi
+  chmod 600 "$dir/.env"
+}
+
+setup_neon() {
+  sparse_checkout neon neondatabase/neon "$NEON_REF" docker-compose
+  dir="$RUNTIME/neon/docker-compose"
+  file="$dir/.env"
+  if [ ! -f "$file" ]; then
+    cat > "$file" <<EOF
+PG_VERSION=16
+TAG=$NEON_IMAGE
+COMPUTE_TAG=$NEON_COMPUTE_IMAGE
+EOF
+  fi
+  sed -i.baas \
+    -e "s|image: quay.io/minio/minio:RELEASE.2022-10-20T00-55-09Z$|image: $NEON_MINIO_IMAGE|" \
+    -e "s|image: minio/mc$|image: $NEON_MC_IMAGE|" \
+    -e "s|image: postgres:latest$|image: $NEON_READY_IMAGE|" \
+    "$dir/docker-compose.yml"
+  rm -f "$dir/docker-compose.yml.baas"
+  chmod 600 "$file"
+}
+
+setup_convex() {
+  dir="$RUNTIME/convex"
+  if [ ! -f "$dir/.baas-ref" ] || [ "$(cat "$dir/.baas-ref")" != "$CONVEX_REF" ]; then
+    rm -rf "$dir"
+    mkdir -p "$dir"
+    download_at_ref get-convex/convex-backend "$CONVEX_REF" self-hosted/docker/docker-compose.yml "$dir/docker-compose.yml"
+    sed -i.baas \
+      -e "s|ghcr.io/get-convex/convex-backend:latest|$CONVEX_BACKEND_IMAGE|" \
+      -e "s|ghcr.io/get-convex/convex-dashboard:latest|$CONVEX_DASHBOARD_IMAGE|" \
+      "$dir/docker-compose.yml"
+    rm -f "$dir/docker-compose.yml.baas"
+    printf '%s\n' "$CONVEX_REF" > "$dir/.baas-ref"
+  fi
+}
+
+setup_appwrite() {
+  dir="$RUNTIME/appwrite"
+  if [ ! -f "$dir/.baas-ref" ] || [ "$(cat "$dir/.baas-ref")" != "$APPWRITE_REF" ]; then
+    rm -rf "$dir"
+    mkdir -p "$dir"
+    download_at_ref appwrite/appwrite "$APPWRITE_REF" docker-compose.yml "$dir/docker-compose.yml"
+    download_at_ref appwrite/appwrite "$APPWRITE_REF" .env "$dir/.env"
+    set_env "$dir/.env" _APP_IMAGE appwrite/appwrite
+    set_env "$dir/.env" _APP_VERSION "$APPWRITE_VERSION"
+    set_env "$dir/.env" _APP_HTTP_PORT 8080
+    set_env "$dir/.env" _APP_HTTPS_PORT 8443
+    set_env "$dir/.env" _APP_DOMAIN localhost
+    set_env "$dir/.env" _APP_OPENSSL_KEY_V1 "$(random_hex 32)"
+    set_env "$dir/.env" _APP_EXECUTOR_SECRET "$(random_hex 32)"
+    printf '%s\n' "$APPWRITE_REF" > "$dir/.baas-ref"
+  fi
+  grep -q '^_APP_DB_PASS=password$' "$dir/.env" && set_env "$dir/.env" _APP_DB_PASS "$(random_hex 24)"
+  grep -q '^_APP_DB_ROOT_PASS=rootsecretpassword$' "$dir/.env" && set_env "$dir/.env" _APP_DB_ROOT_PASS "$(random_hex 24)"
+  chmod 600 "$dir/.env"
+}
+
+setup_nhost() {
+  sparse_checkout nhost nhost/nhost "$NHOST_REF" examples/docker-compose
+  dir="$RUNTIME/nhost/examples/docker-compose"
+  if [ ! -f "$dir/.env" ]; then
+    cp "$dir/.env.example" "$dir/.env"
+    set_env "$dir/.env" GRAPHQL_ADMIN_SECRET "$(random_hex 32)"
+    set_env "$dir/.env" POSTGRES_PASSWORD "$(random_hex 24)"
+    set_env "$dir/.env" JWT_SECRET "{\"type\":\"HS256\",\"key\":\"$(random_hex 32)\"}"
+    set_env "$dir/.env" STORAGE_ACCESS_KEY "$(random_hex 16)"
+    set_env "$dir/.env" STORAGE_SECRET_KEY "$(random_hex 32)"
+    sed -i.baas 's|Label(`com.docker.compose.project`,`docker-compose`)|Label(`com.docker.compose.project`,`baas-nhost`)|' "$dir/docker-compose.yaml"
+    rm -f "$dir/docker-compose.yaml.baas"
+  fi
+  chmod 600 "$dir/.env"
+}
+
+setup_directus() {
+  dir="$RUNTIME/directus"
+  mkdir -p "$dir"
+  if [ ! -f "$dir/.env" ]; then
+    umask 077
+    cat > "$dir/.env" <<EOF
+DIRECTUS_DB_PASSWORD=$(random_hex 24)
+DIRECTUS_SECRET=$(random_hex 32)
+DIRECTUS_ADMIN_PASSWORD=$(random_hex 16)
+EOF
+  fi
+  chmod 600 "$dir/.env"
+}
+
+setup_one() {
+  service=$1
+  case "$service" in
+    supabase) setup_supabase ;;
+    neon) setup_neon ;;
+    convex) setup_convex ;;
+    appwrite) setup_appwrite ;;
+    nhost) setup_nhost ;;
+    directus) setup_directus ;;
+    pocketbase|trailbase) : ;;
+  esac
+  compose "$service" config --quiet
+  echo "$service: ready"
+}
+
+compose_path() {
+  case "$1" in
+    supabase) printf '%s\n' "$RUNTIME/supabase/docker/docker-compose.yml" ;;
+    neon) printf '%s\n' "$RUNTIME/neon/docker-compose/docker-compose.yml" ;;
+    convex) printf '%s\n' "$RUNTIME/convex/docker-compose.yml" ;;
+    appwrite) printf '%s\n' "$RUNTIME/appwrite/docker-compose.yml" ;;
+    nhost) printf '%s\n' "$RUNTIME/nhost/examples/docker-compose/docker-compose.yaml" ;;
+    *) printf '%s\n' "$ROOT/services/$1/compose.yml" ;;
+  esac
+}
+
+compose_dir() {
+  dirname "$(compose_path "$1")"
+}
+
+compose_env() {
+  case "$1" in
+    directus) printf '%s\n' "$RUNTIME/directus/.env" ;;
+    *) printf '%s\n' "$(compose_dir "$1")/.env" ;;
+  esac
+}
+
+is_setup() {
+  [ -f "$(compose_path "$1")" ] || return 1
+  case "$1" in
+    supabase|neon|appwrite|nhost|directus) [ -f "$(compose_env "$1")" ] ;;
+    *) return 0 ;;
+  esac
+}
+
+run_compose() {
+  service=$1
+  shift
+  dir=$(compose_dir "$service")
+  env=$(compose_env "$service")
+  if [ -f "$env" ]; then
+    docker compose -p "baas-$service" --project-directory "$dir" --env-file "$ROOT/versions.env" --env-file "$env" -f "$(compose_path "$service")" "$@"
+  else
+    docker compose -p "baas-$service" --project-directory "$dir" --env-file "$ROOT/versions.env" -f "$(compose_path "$service")" "$@"
+  fi
+}
+
+compose() {
+  run_compose "$@"
+}
+
+stop_one() {
+  is_setup "$1" || return 0
+  compose "$1" stop >/dev/null
+}
+
+stop_target() {
+  if [ "$1" = all ]; then
+    for service in $SERVICES; do stop_one "$service"; done
+  else
+    stop_one "$1"
+  fi
+}
+
+smoke_one() {
+  case "$1" in
+    supabase) curl -fsS http://localhost:8000/auth/v1/health >/dev/null ;;
+    neon) compose neon exec -T compute1 psql postgresql://cloud_admin:cloud_admin@localhost:55433/postgres -Atqc 'select 1' | grep -qx 1 ;;
+    convex) curl -fsS http://localhost:3210/version >/dev/null ;;
+    appwrite) curl -fsS http://localhost:8080/v1/health/version >/dev/null ;;
+    nhost) curl -fsS --resolve local.graphql.local.nhost.run:80:127.0.0.1 http://local.graphql.local.nhost.run/v1/version >/dev/null ;;
+    directus) curl -fsS http://localhost:8055/server/health >/dev/null ;;
+    pocketbase) curl -fsS http://localhost:8090/api/health >/dev/null ;;
+    trailbase) curl -fsS http://localhost:4000/api/healthcheck >/dev/null ;;
+  esac
+}
+
+smoke_target() {
+  if [ "$1" = all ]; then
+    failed=0
+    for service in $SERVICES; do
+      if smoke_one "$service"; then
+        echo "$service: ok"
+      else
+        echo "$service: failed" >&2
+        failed=1
+      fi
+    done
+    return "$failed"
+  fi
+  smoke_one "$1"
+  echo "$1: ok"
+}
+
+wait_until_ready() {
+  service=$1
+  timeout=${BAAS_START_TIMEOUT:-600}
+  started=$(date +%s)
+  while ! smoke_one "$service" 2>/dev/null; do
+    now=$(date +%s)
+    if [ $((now - started)) -ge "$timeout" ]; then
+      echo "$service did not become ready within ${timeout}s" >&2
+      compose "$service" ps >&2 || true
+      compose "$service" logs --tail 80 >&2 || true
+      return 1
+    fi
+    sleep 2
+  done
+}
+
+start_one() {
+  setup_one "$1"
+  stop_target all
+  compose "$1" up -d --build
+  wait_until_ready "$1"
+  echo "$1: started and smoke-tested"
+}
+
+status_all() {
+  for service in $SERVICES; do
+    is_setup "$service" || continue
+    echo "[$service]"
+    compose "$service" ps
+  done
+}
+
+command=${1:-}
+target=${2:-}
+
+case "$command" in
+  list) printf '%s\n' $SERVICES ;;
+  setup|smoke|stop)
+    [ -n "$target" ] || usage
+    [ "$target" = all ] || valid_service "$target" || { echo "unknown service: $target" >&2; exit 2; }
+    require_tools
+    case "$command" in
+      setup)
+        mkdir -p "$RUNTIME"
+        if [ "$target" = all ]; then for service in $SERVICES; do setup_one "$service"; done; else setup_one "$target"; fi
+        ;;
+      smoke) smoke_target "$target" ;;
+      stop) stop_target "$target" ;;
+    esac
+    ;;
+  start)
+    [ -n "$target" ] || usage
+    valid_service "$target" || { echo "unknown service: $target" >&2; exit 2; }
+    require_tools
+    mkdir -p "$RUNTIME"
+    start_one "$target"
+    ;;
+  status)
+    require_tools
+    status_all
+    ;;
+  *) usage ;;
+esac

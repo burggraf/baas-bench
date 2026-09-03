@@ -1,0 +1,13 @@
+services:
+  trailbase:
+    image: trailbase/trailbase:${TRAILBASE_VERSION}
+    ports:
+      - 4000:4000
+    environment:
+      ADDRESS: 0.0.0.0:4000
+    volumes:
+      - data:/app/traildepot
+    restart: unless-stopped
+
+volumes:
+  data:

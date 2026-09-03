@@ -1,0 +1,14 @@
+services:
+  pocketbase:
+    build:
+      context: .
+      args:
+        PB_VERSION: ${POCKETBASE_VERSION}
+    ports:
+      - 8090:8090
+    volumes:
+      - data:/pb/pb_data
+    restart: unless-stopped
+
+volumes:
+  data:
