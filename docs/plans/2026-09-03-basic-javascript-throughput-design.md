@@ -21,11 +21,11 @@ Each benchmark has a `javascript-sdk` case for:
 
 - Supabase using `@supabase/supabase-js`;
 - Convex using `convex` and `ConvexHttpClient`;
-- Appwrite using the `appwrite` web SDK;
+- Appwrite using the `appwrite` web SDK's current TablesDB API;
 - Nhost using `@nhost/nhost-js`;
 - Directus using `@directus/sdk`;
 - PocketBase using `pocketbase`;
-- TrailBase using `@trailbase/client`.
+- TrailBase using `trailbase@0.14.1` and `initClient` (`@trailbase/client` does not exist).
 
 ### Neon exclusion
 
@@ -49,7 +49,7 @@ The baseline contains 10,000 entries generated from a fixed seed and formula. Au
 
 The list operation selects only `id`, `author`, `message`, and `created_at`, orders by `created_at` descending, and returns exactly 20 records. The item operation chooses a baseline primary ID using the same deterministic pseudo-random sequence for every case and returns those same four fields. Setup records each platform's generated baseline IDs in ignored runtime state so the measured operation uses the native primary-key lookup path.
 
-The write operation creates one entry with deterministic unique content and a server-generated ID and timestamp. A successful timed write must return a non-empty ID. Setup and post-stage verification check stored fields outside the measured interval rather than adding a second read to each timed write.
+The write operation creates one entry with deterministic unique content and a platform- or SDK-generated native ID and a platform-generated timestamp. A successful timed write must return a non-empty ID. Appwrite's recommended `ID.unique()` generates its required row ID in the client; the other cases use native server-generated IDs. Setup and post-stage verification check stored fields outside the measured interval rather than adding a second read to each timed write.
 
 An equivalent descending-order index on `created_at` is created where the platform supports explicit indexes. Native primary-key indexing serves item reads. Any platform-specific index behavior or limitation is disclosed in its case README.
 
@@ -75,7 +75,7 @@ Use a shared Node.js load runner with thin platform adapters. The runner owns co
 - read an entry by native ID;
 - create an entry.
 
-Each case uses one normally configured SDK client, matching the singleton-client pattern common in JavaScript applications. SDK defaults are retained for connection reuse and pooling. No application-level cache, batch API, retry loop, or platform-specific performance tuning is enabled.
+Each virtual user uses one normally configured, long-lived SDK client and issues one request at a time, matching separate browser or application instances. Client construction occurs outside timing. This avoids artificial cross-user serialization in Convex and duplicate-request cancellation in PocketBase while preserving both SDK defaults. No application-level cache, batch API, retry loop, or platform-specific performance tuning is enabled. The shared workload requires Node.js 22 or newer, as required by the pinned current SDKs.
 
 Platform-specific administrative setup/reset code is separate from timed adapters. It may use documented administrative APIs or container-native tools to create and remove case-owned resources. Credentials remain in ignored runtime state and never enter committed metadata, definitions, summaries, or logs.
 

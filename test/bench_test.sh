@@ -26,6 +26,8 @@ export BENCH_RESULTS_DIR="$TMP/results"
 SET="$BENCH_SETS_DIR/core-v1"
 BENCHMARK="$SET/benchmarks/read-throughput"
 CASE="$BENCHMARK/cases/supabase/rest-api"
+mkdir -p "$SET/shared"
+printf '%s\n' 'captured shared workload' > "$SET/shared/runner.txt"
 
 [ -f "$SET/set.conf" ] || fail "set scaffold missing"
 [ -f "$BENCHMARK/METHODOLOGY.md" ] || fail "methodology scaffold missing"
@@ -161,6 +163,7 @@ jq -e '.started_at and .finished_at and (.arguments | type == "array") and .defi
 jq -e '.docker_server_version == "29.4.0" and .docker_compose_version == "5.1.2" and .docker_cpus == 8 and .docker_memory_bytes == 17179869184' "$run_dir/environment.json" >/dev/null || fail "environment manifest lacks Docker resource provenance"
 [ -f "$run_dir/trials/001/summary.json" ] || fail "first trial summary missing"
 [ -f "$run_dir/trials/002/summary.json" ] || fail "second trial summary missing"
+[ -f "$run_dir/definitions/benchmark-sets/core-v1/shared/runner.txt" ] || fail "set-level shared definitions were not captured"
 [ -d "$run_dir/warmups/001/raw" ] || fail "warm-up output directory missing"
 grep -q '^start supabase$' "$TMP/log" || fail "platform did not start"
 grep -q '^setup:setup:0:' "$TMP/log" || fail "setup did not receive hook context"
@@ -270,6 +273,7 @@ expected="$BENCH_RESULTS_DIR/core-v1/read-throughput/supabase/rest-api/$(basenam
 [ -f "$expected/run.json" ] || fail "published run manifest missing"
 [ -f "$expected/trials/001/summary.json" ] || fail "first published summary missing"
 [ -f "$expected/trials/002/summary.json" ] || fail "second published summary missing"
+[ -f "$expected/definitions/benchmark-sets/core-v1/shared/runner.txt" ] || fail "published shared definitions missing"
 [ ! -d "$expected/trials/001/raw" ] || fail "raw output was committed"
 if "$BENCH" publish "$run_dir" >/dev/null 2>&1; then fail "existing publication was overwritten"; fi
 if BENCH_LOCAL_RESULTS_DIR="$invalid_results" "$BENCH" publish "$invalid_bundle" >/dev/null 2>&1; then fail "invalid run was published"; fi
@@ -320,6 +324,10 @@ if "$BENCH" publish "$bad_lifecycle" >/dev/null 2>&1; then fail "run with incomp
 current_dirty=$(copy_bundle current-dirty)
 printf '%s\n' 'changed' >> "$CASE/README.md"
 if "$BENCH" publish "$current_dirty" >/dev/null 2>&1; then fail "run with dirty current definitions was published"; fi
+git -C "$TMP" checkout -q -- benchmark-sets
+current_shared_dirty=$(copy_bundle current-shared-dirty)
+printf '%s\n' 'changed' >> "$SET/shared/runner.txt"
+if "$BENCH" publish "$current_shared_dirty" >/dev/null 2>&1; then fail "run with dirty shared definitions was published"; fi
 git -C "$TMP" checkout -q -- benchmark-sets
 
 # Publication metadata must not escape the results root.

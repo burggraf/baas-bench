@@ -299,6 +299,9 @@ copy_definitions() {
   target_case=$target_benchmark/cases/$platform/$variant
   mkdir -p "$target_case"
   cp "$source_set/set.conf" "$source_set/README.md" "$target_set/"
+  if [ -d "$source_set/shared" ]; then
+    cp -R "$source_set/shared" "$target_set/"
+  fi
   cp "$source_set/benchmarks/$benchmark_id/benchmark.conf" "$source_set/benchmarks/$benchmark_id/METHODOLOGY.md" "$target_benchmark/"
   if [ -d "$source_set/benchmarks/$benchmark_id/fixtures" ]; then
     cp -R "$source_set/benchmarks/$benchmark_id/fixtures" "$target_benchmark/"
