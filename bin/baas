@@ -301,7 +301,7 @@ start_one() {
     # smoke timeout before starting the dependent dashboard.
     compose convex up -d --build backend
     wait_until_ready convex
-    compose convex up -d --build
+    compose convex up -d --build --no-deps dashboard
   else
     compose "$1" up -d --build
     # Appwrite's reused Traefik can miss Docker labels during simultaneous restart.

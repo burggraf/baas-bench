@@ -93,7 +93,7 @@ grep -q 'docker compose .* restart traefik' "$BAAS_TEST_LOG" || fail "Appwrite p
 grep -q 'docker compose .* up -d --build backend' "$BAAS_TEST_LOG" || fail "Convex backend was not started independently"
 backend_line=$(grep -n ' up -d --build backend' "$BAAS_TEST_LOG" | head -1 | cut -d: -f1)
 ready_line=$(grep -n 'curl .*localhost:3210/version' "$BAAS_TEST_LOG" | head -1 | cut -d: -f1)
-dashboard_line=$(grep -n ' up -d --build$' "$BAAS_TEST_LOG" | tail -1 | cut -d: -f1)
+dashboard_line=$(grep -n ' up -d --build --no-deps dashboard$' "$BAAS_TEST_LOG" | tail -1 | cut -d: -f1)
 [ "$backend_line" -lt "$ready_line" ] && [ "$ready_line" -lt "$dashboard_line" ] || fail "Convex dashboard started before the backend was ready"
 
 mkdir -p "$BAAS_RUNTIME_DIR/supabase/docker"
