@@ -173,8 +173,16 @@ test('measured run resets, checks, records, and summarizes every load', async ()
   const events = [];
   const admin = {
     async reset({ load }) { events.push(`reset:${load}`); },
-    async verifyReadiness({ load }) { events.push(`ready:${load}`); },
-    async cleanupReadiness({ load }) { events.push(`cleanup:${load}`); },
+    async verifyReadiness({ load, vu, sequence }) {
+      assert.equal(vu, 0);
+      assert.equal(sequence, 0);
+      events.push(`ready:${load}`);
+    },
+    async cleanupReadiness({ load, vu, sequence }) {
+      assert.equal(vu, 0);
+      assert.equal(sequence, 0);
+      events.push(`cleanup:${load}`);
+    },
     async verifyStage({ load }) { events.push(`verify:${load}`); },
   };
   const adapter = {

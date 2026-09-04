@@ -52,20 +52,21 @@ export async function executeRun(context, dependencies) {
     const stageContext = { ...context, load };
     await admin.reset(stageContext);
 
+    const readinessContext = { ...stageContext, vu: 0, sequence: 0, readiness: true };
     let readinessResult;
     let readinessError;
     try {
-      const client = await adapter.createClient({ ...stageContext, vu: 0, readiness: true });
-      readinessResult = await adapter.operation(client, { ...stageContext, vu: 0, sequence: 0, readiness: true });
-      if (!(await adapter.validate(readinessResult, { ...stageContext, vu: 0, sequence: 0, readiness: true }))) {
+      const client = await adapter.createClient(readinessContext);
+      readinessResult = await adapter.operation(client, readinessContext);
+      if (!(await adapter.validate(readinessResult, readinessContext))) {
         throw new Error('readiness operation returned an invalid response');
       }
-      await admin.verifyReadiness({ ...stageContext, result: readinessResult });
+      await admin.verifyReadiness({ ...readinessContext, result: readinessResult });
     } catch (error) {
       readinessError = error;
     }
     if (context.operation === 'write' && readinessResult !== undefined) {
-      await cleanupReadiness(admin, stageContext, readinessResult, readinessError);
+      await cleanupReadiness(admin, readinessContext, readinessResult, readinessError);
     } else if (readinessError) {
       throw readinessError;
     }
