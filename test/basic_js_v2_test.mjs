@@ -26,6 +26,11 @@ test('database-path cases cover supported direct and extension topologies', asyn
   const trailbaseAdmin = readFileSync(new URL('shared/lib/admin/trailbase.mjs', setRoot), 'utf8');
   assert.match(trailbaseAdmin, /async function removeDeploymentArtifacts/);
   assert.match(trailbaseAdmin, /baas-bench\.wasm/);
+  const trailbaseImage = readFileSync(new URL('shared/wasm-rust/Dockerfile', setRoot), 'utf8');
+  const trailbaseCompose = readFileSync(new URL('../../services/trailbase/compose.yml', setRoot), 'utf8');
+  assert.match(trailbaseImage, /U1785764800__create_bb_basic_js_v2_guestbook\.sql/);
+  assert.match(trailbaseCompose, /\/migration\.sql/);
+  assert.match(trailbaseCompose, /chown 1000:1000 \/app\/traildepot\/wasm \/app\/traildepot\/migrations\/main/);
   const pocketbase = readFileSync(new URL('shared/pocketbase-go/main.go', setRoot), 'utf8');
   const pocketbaseImage = readFileSync(new URL('shared/pocketbase-go/Dockerfile', setRoot), 'utf8');
   assert.match(pocketbaseImage, /--dir=\/pb\/pb_data/);

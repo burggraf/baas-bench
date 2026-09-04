@@ -9,3 +9,4 @@ RUN cargo build --locked --target wasm32-wasip2 --release
 
 FROM ${BUSYBOX_IMAGE}
 COPY --from=build /src/target/wasm32-wasip2/release/baas_bench_trailbase.wasm /component.wasm
+COPY benchmark-sets/basic-js-v2/shared/trailbase/U1785764800__create_bb_basic_js_v2_guestbook.sql /migration.sql

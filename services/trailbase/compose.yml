@@ -6,7 +6,7 @@ services:
       args:
         RUST_IMAGE: ${TRAILBASE_WASM_RUST_IMAGE}
         BUSYBOX_IMAGE: ${TRAILBASE_WASM_BUSYBOX_IMAGE}
-    command: [sh, -c, "mkdir -p /app/traildepot/wasm && cp /component.wasm /app/traildepot/wasm/baas-bench.wasm"]
+    command: [sh, -c, "mkdir -p /app/traildepot/wasm /app/traildepot/migrations/main && cp /component.wasm /app/traildepot/wasm/baas-bench.wasm && cp /migration.sql /app/traildepot/migrations/main/U1785764800__create_bb_basic_js_v2_guestbook.sql && chown 1000:1000 /app/traildepot/wasm /app/traildepot/migrations/main /app/traildepot/wasm/baas-bench.wasm /app/traildepot/migrations/main/U1785764800__create_bb_basic_js_v2_guestbook.sql"]
     volumes:
       - data:/app/traildepot
 
