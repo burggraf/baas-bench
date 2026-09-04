@@ -415,9 +415,27 @@ test('postgres admin schema provides tenant RLS, workload indexes, activity, res
   assert.match(schema, /create trigger comments_activity/i);
   assert.match(schema, /create table benchmark_auth\.passwords/i);
   assert.match(schema, /create table benchmark_auth\.sessions/i);
-  assert.match(schema, /security definer[\s\S]*benchmark_auth\.sign_in/i);
-  assert.match(schema, /security definer[\s\S]*benchmark_auth\.validate_session/i);
-  assert.match(schema, /security definer[\s\S]*benchmark_auth\.sign_out/i);
+  assert.match(schema, /create schema if not exists benchmark_extensions/i);
+  assert.match(schema, /revoke all on schema benchmark_extensions from public/i);
+  assert.match(schema, /create extension if not exists pgcrypto with schema benchmark_extensions/i);
+  assert.match(schema, /create extension if not exists pg_trgm with schema benchmark_extensions/i);
+  const definerFunctions = [
+    'benchmark_private.log_workflow_activity',
+    'benchmark_auth.sign_in',
+    'benchmark_auth.validate_session',
+    'benchmark_auth.sign_out',
+  ];
+  for (const functionName of definerFunctions) {
+    const escapedName = functionName.replace('.', '\\.');
+    const declaration = schema.match(new RegExp(`create function ${escapedName}\\([^)]*\\)[\\s\\S]*?as \\$\\$`, 'i'))?.[0];
+    assert.ok(declaration, `${functionName} declaration is present`);
+    assert.match(declaration, /language plpgsql security definer/i, `${functionName} is security definer`);
+    assert.match(declaration, /set search_path = pg_catalog\s+as \$\$$/i, `${functionName} has a restricted search path`);
+    assert.doesNotMatch(declaration, /search_path\s*=.*\b(?:public|extensions)\b/i, `${functionName} excludes writable schemas`);
+  }
+  for (const extensionCall of ['gen_random_uuid', 'crypt', 'gen_salt', 'gen_random_bytes', 'digest']) {
+    assert.doesNotMatch(schema, new RegExp(`(?<!benchmark_extensions\\.)\\b${extensionCall}\\s*\\(`, 'i'));
+  }
   assert.doesNotMatch(schema, /auth\.uid\(|auth\.users|create role|alter role/i);
   assert.match(CREATE_FIXTURE_STATE_SQL, /realworld-api-v3-baseline-v1/);
   assert.match(RESET_FIXTURE_STATE_SQL, /realworld-api-v3-baseline-v1/);
@@ -454,6 +472,34 @@ test('postgres admin streams escaped bounded COPY and verifies every exact count
   await assert.rejects(verifyExactCounts(async () => exact.map((row, index) => index ? row : { ...row, count: String(Number(row.count) + 1) })), /organizations.*expected/i);
   await assert.rejects(verifyExactCounts(async () => exact.slice(1)), /organizations.*missing/i);
   await assert.rejects(verifyExactCounts(async () => [...exact, { table: 'intruder', count: '0' }]), /unexpected table/i);
+});
+
+test('postgres parameterized administrative transports preserve SQL, values, results, and failures', async () => {
+  const {
+    CREATE_FIXTURE_STATE_SQL, RESET_FIXTURE_STATE_SQL, CREATE_NEON_PASSWORDS_SQL,
+    createFixtureState, resetFixtureState, createNeonPasswords,
+  } = await import('../benchmark-sets/realworld-api-v3/shared/lib/admin/postgres.mjs');
+  const calls = [];
+  const execute = async (sql, values) => {
+    calls.push([sql, values]);
+    return { call: calls.length };
+  };
+  assert.deepEqual(await createFixtureState(execute), { call: 1 });
+  assert.deepEqual(await resetFixtureState(execute), { call: 2 });
+  assert.deepEqual(await createNeonPasswords(execute, 'separate-secret'), { call: 3 });
+  assert.deepEqual(calls, [
+    [CREATE_FIXTURE_STATE_SQL, []],
+    [RESET_FIXTURE_STATE_SQL, []],
+    [CREATE_NEON_PASSWORDS_SQL, ['separate-secret']],
+  ]);
+  assert.doesNotMatch(CREATE_NEON_PASSWORDS_SQL, /separate-secret/);
+
+  const failure = new Error('transport failed');
+  for (const invoke of [
+    () => createFixtureState(async (sql, values) => { assert.equal(sql, CREATE_FIXTURE_STATE_SQL); assert.deepEqual(values, []); throw failure; }),
+    () => resetFixtureState(async (sql, values) => { assert.equal(sql, RESET_FIXTURE_STATE_SQL); assert.deepEqual(values, []); throw failure; }),
+    () => createNeonPasswords(async (sql, values) => { assert.equal(sql, CREATE_NEON_PASSWORDS_SQL); assert.deepEqual(values, ['pw']); throw failure; }, 'pw'),
+  ]) await assert.rejects(invoke, error => error === failure);
 });
 
 test('administrative dispatch invokes exactly the requested platform handler', async () => {

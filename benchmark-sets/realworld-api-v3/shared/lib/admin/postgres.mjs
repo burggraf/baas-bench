@@ -160,7 +160,7 @@ COMMIT;
 `;
 
 export const CREATE_NEON_PASSWORDS_SQL = `INSERT INTO benchmark_auth.passwords(user_id, password_hash)
-SELECT id, crypt($1, gen_salt('bf')) FROM public.users
+SELECT id, benchmark_extensions.crypt($1, benchmark_extensions.gen_salt('bf')) FROM public.users
 ON CONFLICT (user_id) DO UPDATE SET password_hash = excluded.password_hash;`;
 
 export async function createFixtureState(execute) {
