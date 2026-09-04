@@ -853,9 +853,10 @@ test('Directus admin verifies exact baseline, readiness, stage count, and cleans
   const baseline = Array.from({ length: 10000 }, (_, i) => ({ ...fixture(i + 1), id: i + 1 }));
   const calls = [];
   const commandCalls = [];
+  const restConfigs = [];
   const sdk = {};
   for (const name of ['readItem', 'readCollections', 'deleteCollection', 'createCollection', 'customEndpoint', 'readItems', 'readFieldsByCollection', 'createPermissions', 'readPermissions', 'createItems', 'deleteItems', 'deletePermission', 'deleteItem']) sdk[name] = (...args) => ({ name, args });
-  sdk.rest = () => 'rest';
+  sdk.rest = (config) => { restConfigs.push(config); return 'rest'; };
   sdk.authentication = () => 'auth';
   sdk.createDirectus = () => ({ with() { return this; }, async login() {}, stopRefreshing() { calls.push({ name: 'stopRefreshing' }); }, async request(command) {
     calls.push(command);
@@ -878,6 +879,11 @@ test('Directus admin verifies exact baseline, readiness, stage count, and cleans
     run: async (command, args, options) => { commandCalls.push({ command, args, input: options.input }); return { stdout: '' }; },
   });
   await admin.setup();
+  assert.ok(restConfigs.length > 0);
+  const transformed = await restConfigs[0].onRequest({ headers: { Existing: 'kept' } });
+  const transformedHeaders = new Headers(transformed.headers);
+  assert.equal(transformedHeaders.get('existing'), 'kept');
+  assert.equal(transformedHeaders.get('cache-control'), 'no-store');
   const definition = calls.find((command) => command.name === 'createCollection').args[0];
   assert.deepEqual(definition.schema, {});
   assert.deepEqual(definition.fields.map((field) => field.field), ['id', 'author', 'message', 'created_at', 'fixture_key']);

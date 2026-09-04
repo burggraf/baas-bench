@@ -18,7 +18,13 @@ export function createDirectusAdmin({ sdk, endpoint = 'http://127.0.0.1:8055', r
   const stateDir = join(runtime, 'state');
   let client;
   async function connect() {
-    const anonymous = sdk.createDirectus(endpoint).with(sdk.rest()).with(sdk.authentication('json'));
+    const anonymous = sdk.createDirectus(endpoint).with(sdk.rest({
+      onRequest(options) {
+        const headers = new Headers(options.headers);
+        headers.set('Cache-Control', 'no-store');
+        return { ...options, headers };
+      },
+    })).with(sdk.authentication('json'));
     await anonymous.login({ email, password });
     anonymous.stopRefreshing();
     client = anonymous;
