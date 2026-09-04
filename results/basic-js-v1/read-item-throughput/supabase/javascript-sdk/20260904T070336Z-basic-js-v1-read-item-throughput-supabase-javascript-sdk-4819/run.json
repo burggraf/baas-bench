@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "status": "complete",
+  "debug": false,
+  "dirty": false,
+  "run_id": "20260904T070336Z-basic-js-v1-read-item-throughput-supabase-javascript-sdk-4819",
+  "set": "basic-js-v1",
+  "benchmark": "read-item-throughput",
+  "platform": "supabase",
+  "variant": "javascript-sdk",
+  "commit": "6c9bf828c48f54a754536cb79865c1d76a96f8dc",
+  "started_at": "2026-09-04T07:03:36Z",
+  "finished_at": "2026-09-04T07:08:05Z",
+  "arguments": [
+    "run",
+    "basic-js-v1",
+    "read-item-throughput",
+    "supabase",
+    "javascript-sdk"
+  ],
+  "definitions_sha256": "39c1a3bd7f0c5f29fbaa40ac0cdfdd616cf6f4f6d4193538c9e733cdee936a69",
+  "warmup_trials": 1,
+  "measured_trials": 3,
+  "lifecycle": {
+    "start": "complete",
+    "setup": "complete",
+    "teardown": "complete",
+    "stop": "complete"
+  }
+}

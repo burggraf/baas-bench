@@ -30,4 +30,4 @@ Neon is deliberately excluded. Its official JavaScript driver requires Neon's SQ
 
 ## Release status
 
-This set defines workloads and cases only. No results or rankings are published yet, and the primary metric does not constitute an overall platform ranking. Platform-specific behavior and permitted deviations are disclosed in benchmark methodologies and case READMEs.
+Validated evidence bundles are published under `results/basic-js-v1/`. No cross-platform rankings are published, and the primary metric does not constitute an overall platform ranking. Platform-specific behavior and permitted deviations are disclosed in benchmark methodologies and case READMEs.

@@ -1,0 +1,18 @@
+{
+  "name": "baas-bench-basic-js-v1",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@directus/sdk": "25.0.1",
+    "@nhost/nhost-js": "4.8.0",
+    "@supabase/supabase-js": "2.115.0",
+    "appwrite": "26.2.0",
+    "convex": "1.45.0",
+    "node-appwrite": "28.0.0",
+    "pocketbase": "0.28.0",
+    "trailbase": "0.14.1"
+  }
+}
