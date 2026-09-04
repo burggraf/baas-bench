@@ -24,9 +24,13 @@ if [ "$action" = setup ]; then
     install=1
   fi
   mkdir -p "$runtime"
-  rm -rf "$runtime/lib"
+  rm -rf "$runtime/lib" "$runtime/convex" "$runtime/trailbase" "$runtime/pocketbase" "$runtime/sql"
   cp "$script_dir/package.json" "$script_dir/package-lock.json" "$runtime/"
   cp -R "$script_dir/lib" "$runtime/"
+  if [ -d "$script_dir/convex" ]; then cp -R "$script_dir/convex" "$runtime/"; fi
+  if [ -d "$script_dir/trailbase" ]; then cp -R "$script_dir/trailbase" "$runtime/"; fi
+  if [ -d "$script_dir/pocketbase" ]; then cp -R "$script_dir/pocketbase" "$runtime/"; fi
+  if [ -d "$script_dir/sql" ]; then cp -R "$script_dir/sql" "$runtime/"; fi
   if [ "$install" -eq 1 ]; then npm ci --ignore-scripts --prefix "$runtime"; fi
 fi
 

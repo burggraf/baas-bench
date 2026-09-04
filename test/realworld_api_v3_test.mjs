@@ -21,10 +21,11 @@ test('real-world API capacity scaffold declares its lifecycle and metrics', () =
   assert.match(config, /^measured_trials=1$/m);
   const required = config.match(/^required_metrics=(.+)$/m)?.[1].split(',') ?? [];
   assert.deepEqual(required, [
-    'capacity_users', 'achieved_users', 'workflow_tps', 'physical_api_calls_per_second',
-    'calls_per_workflow', 'read_latency_p95_ms', 'read_error_rate',
-    'write_latency_p95_ms', 'write_error_rate', 'auth_search_latency_p95_ms',
-    'auth_search_error_rate',
+    'capacity_bounded', 'achieved_users_at_capacity', 'workflow_tps_at_capacity',
+    'remote_operations_per_second_at_capacity', 'read_latency_p95_ms_at_capacity',
+    'write_latency_p95_ms_at_capacity', 'auth_search_latency_p95_ms_at_capacity',
+    'read_error_rate_at_capacity', 'write_error_rate_at_capacity',
+    'auth_search_error_rate_at_capacity',
   ]);
   assert.doesNotMatch(text('METHODOLOGY.md', benchmarkRoot), /TODO/);
   readFileSync(new URL('fixtures/.gitkeep', benchmarkRoot));
@@ -56,6 +57,9 @@ test('shared hook validates dispatch and installs an isolated Node 22 runtime', 
   assert.match(hook, /requires Node\.js 22 or newer/);
   assert.match(hook, /npm ci --ignore-scripts --prefix "\$runtime"/);
   assert.match(hook, /cp -R "\$script_dir\/lib" "\$runtime\/"/);
+  for (const asset of ['convex', 'trailbase', 'pocketbase', 'sql']) {
+    assert.match(hook, new RegExp(`if \\[ -d "\\$script_dir/${asset}" \\]; then cp -R "\\$script_dir/${asset}" "\\$runtime/"; fi`));
+  }
   assert.match(hook, /lib\/run\.mjs/);
   assert.match(hook, /lib\/admin\.mjs/);
   const pkg = JSON.parse(text('shared/package.json'));
