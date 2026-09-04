@@ -119,6 +119,55 @@ test('dataset IDs, roles, references, and virtual-user contexts are stable', asy
   assert.throws(() => buildVirtualUserSpecs(16_001, 42), /exceed/);
 });
 
+test('workflow selection follows the approved application mix', async () => {
+  const { selectWorkflow } = await import('../benchmark-sets/realworld-api-v3/shared/lib/workflows.mjs');
+  const weights = { dashboard: 20, taskList: 25, taskDetail: 15, createTask: 10, updateTask: 12, addComment: 10, search: 5, profileUpdate: 1, signIn: 2 };
+  const cases = [[0, 'dashboard'], [.2, 'taskList'], [.45, 'taskDetail'], [.6, 'createTask'], [.7, 'updateTask'], [.82, 'addComment'], [.92, 'search'], [.97, 'profileUpdate'], [.98, 'signIn'], [1, 'signIn']];
+  for (const [value, expected] of cases) assert.equal(selectWorkflow(weights, () => value), expected);
+  assert.throws(() => selectWorkflow({ ...weights, signIn: 1 }, () => 0), /total 100/);
+});
+
+test('workflow and remote measurements are separate and reject boundary leakage', async () => {
+  const { measureRemoteCall, withRemoteMeasurement } = await import('../benchmark-sets/realworld-api-v3/shared/lib/measurement.mjs');
+  const { runWorkflow } = await import('../benchmark-sets/realworld-api-v3/shared/lib/workflows.mjs');
+  const samples = [];
+  let now = 0;
+  await withRemoteMeasurement({ name: 'listTasks', workflow: 'taskList', operationClass: 'read', kind: 'read', now: () => ++now, sample: (sample) => samples.push(sample) }, () => measureRemoteCall(async () => []));
+  assert.equal(samples.length, 1);
+  assert.equal(samples[0].type, 'remote');
+
+  const context = {
+    session: { listTasks: async () => ({ items: [], page: 0, pageSize: 10, total: 0, hasNext: false }) },
+    workflow: 'taskList', organizationId: 'org', projectId: 'project', taskId: 'task',
+    random: () => 0, pageSize: () => 10, now: () => ++now,
+    invoke: (_name, _operationClass, _kind, action) => action(),
+    sample: (sample) => samples.push(sample), replaceSession: async () => {},
+  };
+  await runWorkflow('taskList', context);
+  assert.equal(samples.at(-1).type, 'workflow');
+  context.session.listTasks = async () => ({ items: [{ id: 'task', projectId: 'foreign', creatorId: 'user', assigneeId: null, title: 't', description: 'd', status: 'todo', priority: 'low', dueDate: null, createdAt: 'x', updatedAt: 'x' }], page: 0, pageSize: 10, total: 1, hasNext: false });
+  await assert.rejects(runWorkflow('taskList', context), /boundary/);
+
+  context.session.dashboard = async () => ({
+    organization: { id: 'org' }, projects: [],
+    recentActivity: [{ id: 'activity', organizationId: 'foreign', projectId: null, actorId: 'user', action: 'created', subjectType: 'task', subjectId: 'task', createdAt: 'x' }],
+  });
+  await assert.rejects(runWorkflow('dashboard', context), /boundary/);
+});
+
+test('operation errors are classified and credentials are redacted and bounded', async () => {
+  const { BenchmarkOperationError, classifyOperationError } = await import('../benchmark-sets/realworld-api-v3/shared/lib/correctness.mjs');
+  const { safeErrorDetails } = await import('../benchmark-sets/realworld-api-v3/shared/lib/errors.mjs');
+  assert.equal(classifyOperationError({ status: 401 }), 'authentication');
+  assert.equal(classifyOperationError({ status: 403 }), 'authorization');
+  assert.equal(classifyOperationError({ code: 'timeout' }), 'timeout');
+  assert.equal(classifyOperationError(new BenchmarkOperationError('invalid_response')), 'invalid_response');
+  const secret = 'credential-value';
+  const details = safeErrorDetails(new Error(`password=${secret} Bearer aaa.bbb.ccc ${'x'.repeat(500)}`), [secret]);
+  assert.doesNotMatch(details.message, /credential-value|aaa\.bbb\.ccc/);
+  assert.ok(details.message.length <= 300);
+});
+
 test('shared hook validates dispatch and installs an isolated Node 22 runtime', () => {
   const hook = text('shared/case.sh');
   assert.match(hook, /setup\|verify\|reset\|run\|teardown/);
