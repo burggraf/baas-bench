@@ -11,7 +11,7 @@ Reproducible local Docker environments for comparing self-hosted backend-as-a-se
 - PocketBase
 - TrailBase
 
-The repository has two layers: `bin/baas` provisions and isolates the systems under test, while `bin/bench` scaffolds, validates, runs, and publishes benchmark cases. The framework, `basic-js-v1` JavaScript SDK benchmark definitions, and validated evidence are committed. See the [`basic-js-v1` result report](results/basic-js-v1/REPORT.md).
+The repository has two layers: `bin/baas` provisions and isolates the systems under test, while `bin/bench` scaffolds, validates, runs, and publishes benchmark cases. The framework and validated evidence for JavaScript SDK (`basic-js-v1`) and database-path (`basic-js-v2`) workloads are committed. See the [`basic-js-v1` result report](results/basic-js-v1/REPORT.md) and [`basic-js-v2` result report](results/basic-js-v2/REPORT.md).
 
 A benchmark defines one shared methodology; each platform and access-path combination is a separate case. For example, REST API, database function, direct PostgreSQL, pooled ORM, and WASM-extension implementations belong in distinct cases under the same benchmark.
 
@@ -57,13 +57,16 @@ Generated deployments and secrets are stored in `.runtime/` and are not committe
 
 ## Benchmark workflow
 
-For the committed basic JavaScript SDK workload, validate the definitions and run one case at a time:
+For the committed basic JavaScript workloads, validate the definitions and run one case at a time:
 
 ```sh
 bin/bench validate all
 bin/bench run basic-js-v1 read-list-throughput supabase javascript-sdk
 bin/bench run basic-js-v1 read-item-throughput pocketbase javascript-sdk
 bin/bench run basic-js-v1 write-throughput trailbase javascript-sdk
+bin/bench run basic-js-v2 read-list-throughput supabase direct-postgres
+bin/bench run basic-js-v2 read-item-throughput supabase pooler-postgres
+bin/bench run basic-js-v2 write-throughput trailbase rust-wasm
 ```
 
 Each case uses anonymous access, one long-lived client per virtual user, and sequential requests within each virtual user. The four loads (1, 10, 100, and 1,000 VUs) take 4 × (5 seconds warm-up + 3 × 15 seconds measured) = 200 seconds of timed load, or about 3.5 minutes per case including setup and other overhead. Validated evidence and the [result report](results/basic-js-v1/REPORT.md) are published without cross-platform rankings. Neon is excluded because its prepared self-hosted deployment exposes PostgreSQL protocol access but no reproducible official JavaScript-driver proxy.

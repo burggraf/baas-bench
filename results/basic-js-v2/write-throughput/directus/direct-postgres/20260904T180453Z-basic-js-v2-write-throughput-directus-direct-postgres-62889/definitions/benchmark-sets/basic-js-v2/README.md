@@ -1,6 +1,6 @@
 # Basic JavaScript direct-database throughput
 
-`basic-js-v2` repeats the `basic-js-v1` guestbook list, item, and write workloads through supported low-level database paths rather than mainstream JavaScript SDKs.
+`basic-js-v2` repeats the `basic-js-v1` guestbook list, item, and write workloads through PostgreSQL rather than a platform HTTP API.
 
 ## Cases
 
@@ -14,5 +14,3 @@
 Convex and Appwrite do not expose a supported PostgreSQL-compatible database endpoint in the prepared self-hosting setup, so they have no direct-database cases here.
 
 The same fixture, load, trial, correctness, and timing contract as v1 applies. Access path and connection topology are separate cases. TrailBase and PocketBase extension paths include HTTP routing and server-side extension execution and must not be treated as direct client database connections.
-
-Validated evidence is published in [`results/basic-js-v2`](../../results/basic-js-v2), with a [result report](../../results/basic-js-v2/REPORT.md) and [analysis](../../results/basic-js-v2/ANALYSIS.md).
