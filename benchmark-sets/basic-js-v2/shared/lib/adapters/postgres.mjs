@@ -5,12 +5,16 @@ import { fixture, fixtureIndex, writeRecord } from '../fixtures.mjs';
 const table = 'bb_basic_js_v2_guestbook';
 const fields = 'id,author,message,created_at';
 
+function timestamp(value) {
+  return value instanceof Date ? value.getTime() : typeof value === 'string' ? Date.parse(value) : Number.NaN;
+}
+
 function validRecord(record) {
   return record && Object.keys(record).sort().join(',') === 'author,created_at,id,message' &&
     (typeof record.id === 'string' || typeof record.id === 'number') && String(record.id).length > 0 &&
     typeof record.author === 'string' && record.author.length > 0 && record.author.length <= 32 &&
     typeof record.message === 'string' && record.message.length > 0 && record.message.length <= 256 &&
-    typeof record.created_at === 'string' && Number.isFinite(Date.parse(record.created_at));
+    Number.isFinite(timestamp(record.created_at));
 }
 
 export function createPostgresAdapter({ Pool, platform, mode = 'direct', ids }) {
@@ -58,7 +62,7 @@ export function createPostgresAdapter({ Pool, platform, mode = 'direct', ids }) 
           const index = 9_999 - offset;
           const expected = fixture(index + 1);
           return validRecord(row) && String(row.id) === String(ids[index]) && row.author === expected.author &&
-            row.message === expected.message && Date.parse(row.created_at) === Date.parse(expected.created_at);
+            row.message === expected.message && timestamp(row.created_at) === Date.parse(expected.created_at);
         });
       }
       if (context.operation === 'write') return result && (typeof result.id === 'string' || typeof result.id === 'number');
@@ -66,7 +70,7 @@ export function createPostgresAdapter({ Pool, platform, mode = 'direct', ids }) 
       const index = fixtureIndex(context.trial, context.vu, context.sequence);
       const expected = fixture(index + 1);
       return String(result.id) === String(ids[index]) && result.author === expected.author &&
-        result.message === expected.message && Date.parse(result.created_at) === Date.parse(expected.created_at);
+        result.message === expected.message && timestamp(result.created_at) === Date.parse(expected.created_at);
     },
   };
 }

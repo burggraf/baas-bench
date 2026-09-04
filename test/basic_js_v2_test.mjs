@@ -80,4 +80,10 @@ test('database adapters reject list rows with wrong order', async () => {
   });
   assert.equal(await pocketbase.validate(rows, { operation: 'list' }), false);
   assert.equal(await postgres.validate(rows, { operation: 'list' }), false);
+  const correctPostgresRows = Array.from({ length: 20 }, (_, offset) => {
+    const number = 10_000 - offset;
+    const value = fixture(number);
+    return { id: ids[number - 1], author: value.author, message: value.message, created_at: new Date(value.created_at) };
+  });
+  assert.equal(await postgres.validate(correctPostgresRows, { operation: 'list' }), true);
 });
