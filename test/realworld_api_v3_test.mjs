@@ -155,6 +155,27 @@ test('workflow and remote measurements are separate and reject boundary leakage'
   await assert.rejects(runWorkflow('dashboard', context), /boundary/);
 });
 
+test('workload prepares outside measurement and closes each session once', async () => {
+  const { runWorkload, SESSION_PREPARATION_CONCURRENCY } = await import('../benchmark-sets/realworld-api-v3/shared/lib/workload.mjs');
+  assert.equal(SESSION_PREPARATION_CONCURRENCY, 10);
+  const events = [];
+  let closes = 0;
+  const session = { cancelPending() {}, async close() { closes += 1; } };
+  const backend = { async createSession() { events.push('prepare'); return session; } };
+  const config = {
+    seed: 42, stageSeconds: 1, timeoutMs: 5_000, thinkTimeMs: { min: 1_000, max: 5_000 },
+    weights: { dashboard: 20, taskList: 25, taskDetail: 15, createTask: 10, updateTask: 12, addComment: 10, search: 5, profileUpdate: 1, signIn: 2 },
+  };
+  const result = await runWorkload(backend, config, {
+    users: [{ credentials: { email: 'user@example.test', password: 'secret' }, organizationId: 'org', projectId: 'project', taskId: 'task' }],
+    durationMs: 0, graceMs: 0, now: () => 0, sleep: async () => {},
+    onMeasuredStart: () => events.push('start'), onMeasuredEnd: () => events.push('end'),
+  });
+  assert.deepEqual(events, ['prepare', 'start', 'end']);
+  assert.equal(result.startedUsers, 1);
+  assert.equal(closes, 1);
+});
+
 test('operation errors are classified and credentials are redacted and bounded', async () => {
   const { BenchmarkOperationError, classifyOperationError } = await import('../benchmark-sets/realworld-api-v3/shared/lib/correctness.mjs');
   const { safeErrorDetails } = await import('../benchmark-sets/realworld-api-v3/shared/lib/errors.mjs');
