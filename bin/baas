@@ -295,10 +295,19 @@ wait_until_ready() {
 start_one() {
   setup_one "$1"
   stop_target all
-  compose "$1" up -d --build
-  # Appwrite's reused Traefik can miss Docker labels during simultaneous restart.
-  [ "$1" = appwrite ] && compose appwrite restart traefik >/dev/null
-  wait_until_ready "$1"
+  if [ "$1" = convex ]; then
+    # The dashboard depends on Docker health, whose short upstream retry window
+    # can expire while a persisted backend rebuilds indexes. Wait on our longer
+    # smoke timeout before starting the dependent dashboard.
+    compose convex up -d --build backend
+    wait_until_ready convex
+    compose convex up -d --build
+  else
+    compose "$1" up -d --build
+    # Appwrite's reused Traefik can miss Docker labels during simultaneous restart.
+    [ "$1" = appwrite ] && compose appwrite restart traefik >/dev/null
+    wait_until_ready "$1"
+  fi
   echo "$1: started and smoke-tested"
 }
 
