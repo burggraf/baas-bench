@@ -16,6 +16,7 @@ export async function discoverPlatformContainers(platform, command = runCommand)
   if (!PLATFORMS.has(platform)) throw new Error('invalid platform');
   const { stdout } = await command('docker', ['compose', '-p', `baas-${platform}`, 'ps', '-q'], { timeoutMs: 5_000 });
   const ids = stdout.split(/\r?\n/).map(value => value.trim().toLowerCase()).filter(Boolean);
+  if (!ids.length) throw new Error('no compose containers discovered');
   if (ids.some(id => !/^[0-9a-f]{12,64}$/.test(id)) || new Set(ids).size !== ids.length) throw new Error('invalid compose container IDs');
   return ids;
 }
@@ -54,9 +55,10 @@ export async function collectResources(options) {
   let previousCpu = cpuUsage();
   let previousTime = now();
   const samples = [];
+  const validityReasons = [];
   try {
     for (let index = 0; index < count && !options.signal?.aborted; index++) {
-      if (index > 0 || options.waitBeforeFirstSample) await sleep(intervalMs, options.signal);
+      await sleep(intervalMs, options.signal);
       const timestampMs = now();
       const currentCpu = cpuUsage();
       const elapsedMs = timestampMs - previousTime;
@@ -64,8 +66,13 @@ export async function collectResources(options) {
       const runner = { cpuPercent: elapsedMs > 0 ? Math.max(0, usedMicros / (elapsedMs * 10)) : 0, rssBytes: memoryUsage().rss };
       let containers = { cpuPercent: 0, memoryBytes: 0, count: 0 };
       if (options.containerIds?.length) {
-        const response = await command('docker', ['stats', '--no-stream', '--format', '{{json .}}', ...options.containerIds], { timeoutMs: 5_000 });
-        containers = parseDockerStats(response.stdout, new Set(options.containerIds));
+        try {
+          const response = await command('docker', ['stats', '--no-stream', '--format', '{{json .}}', ...options.containerIds], { timeoutMs: 5_000 });
+          containers = parseDockerStats(response.stdout, new Set(options.containerIds));
+          if (containers.count !== options.containerIds.length) validityReasons.push(`sample ${index + 1}: missing container telemetry (${containers.count}/${options.containerIds.length})`);
+        } catch (error) {
+          validityReasons.push(`sample ${index + 1}: container probe failed: ${String(error?.message ?? error).slice(0, 300)}`);
+        }
       }
       const p99 = monitor.percentile(99) / 1e6;
       const max = (typeof monitor.max === 'function' ? monitor.max() : monitor.max) / 1e6;
@@ -73,7 +80,9 @@ export async function collectResources(options) {
       monitor.reset();
       previousCpu = currentCpu; previousTime = timestampMs;
     }
-    return { samples, valid: samples.length > 0, validityReasons: samples.length ? [] : ['resource samples unavailable'] };
+    if (!samples.length) validityReasons.push('resource samples unavailable');
+    if (samples.length !== count) validityReasons.push(`resource samples incomplete (${samples.length}/${count})`);
+    return { samples, valid: samples.length === count && validityReasons.length === 0, validityReasons };
   } finally { monitor.disable?.(); }
 }
 
@@ -81,10 +90,16 @@ export function evaluateRunnerOverload(samples, thresholds = {}) {
   const cpu = thresholds.cpuPercent ?? 90;
   const p99 = thresholds.p99Ms ?? 100;
   const max = thresholds.maxMs ?? 250;
-  for (let index = 0; index + 3 <= samples.length; index++) {
-    if (samples.slice(index, index + 3).every(sample => sample.runner.cpuPercent > cpu || sample.eventLoop.p99Ms > p99 || sample.eventLoop.maxMs > max)) {
-      return 'runner overload for three consecutive samples; backend capacity attribution invalid';
+  const breachedForThree = metric => {
+    for (let index = 0; index + 3 <= samples.length; index++) {
+      if (samples.slice(index, index + 3).every(metric)) return true;
     }
+    return false;
+  };
+  if (breachedForThree(sample => sample.runner.cpuPercent > cpu)
+    || breachedForThree(sample => sample.eventLoop.p99Ms > p99)
+    || breachedForThree(sample => sample.eventLoop.maxMs > max)) {
+    return 'runner overload for three consecutive samples; backend capacity attribution invalid';
   }
   return null;
 }

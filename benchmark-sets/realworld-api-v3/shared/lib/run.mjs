@@ -34,12 +34,17 @@ const safeErrors = errors => errors.slice(0, 100).map(value => {
 
 export async function preservePrimaryFailure(work, teardown) {
   let primary;
-  try { return await work(); } catch (error) { primary = error; }
+  let didFail = false;
+  try { return await work(); } catch (error) { primary = error; didFail = true; }
   finally {
     try { await teardown(); }
     catch (error) {
-      if (primary && typeof primary === 'object') primary.teardownError = String(error?.message ?? error).slice(0, 300);
-      else throw error;
+      if (!didFail) throw error;
+      // Teardown is secondary: annotate extensible failures when possible, but never
+      // let annotation (or a primitive throw) replace the original failure.
+      if (primary && (typeof primary === 'object' || typeof primary === 'function')) {
+        try { primary.teardownError = String(error?.message ?? error).slice(0, 300); } catch { /* primary may be frozen */ }
+      }
     }
   }
   throw primary;
@@ -104,8 +109,10 @@ export async function executeRun(context, dependencies) {
     if (overload) stage.validityReasons.push(overload);
     if (!resource.valid) stage.validityReasons.push(...(resource.validityReasons ?? ['resource collection failed']));
     if (result.stageFailed) stage.validityReasons.push('workload failed');
+    if (dependencies.containerDiscoveryError) stage.validityReasons.push(`container discovery failed: ${String(dependencies.containerDiscoveryError?.message ?? dependencies.containerDiscoveryError).slice(0, 300)}`);
     stage.valid = stage.validityReasons.length === 0;
-    stage.errorExamples = (stage.errorExamples ?? []).slice(0, 100);
+    failures.push(...(stage.errorExamples ?? []));
+    stage.errorExamples = safeErrors(stage.errorExamples ?? []);
     stages.push(stage); resources.push({ requestedUsers, samples: resource.samples ?? [] }); measuredUsers.push(requestedUsers);
     stages.sort((a, b) => a.requestedUsers - b.requestedUsers);
     capacity = evaluate(stages, config, { minSamples: 20 });
@@ -126,9 +133,11 @@ export async function runFromArguments(args, dependencies = {}) {
   const loadAdapter = dependencies.loadAdapter ?? (platform => import(`./adapters/${platform}.mjs`).then(module => module.createAdapter()));
   const adapter = await loadAdapter(context.platform);
   let ids = [];
-  try { ids = await (dependencies.discoverContainers ?? discoverPlatformContainers)(context.platform); } catch { /* non-container adapters record no container metrics */ }
+  let containerDiscoveryError;
+  try { ids = await (dependencies.discoverContainers ?? discoverPlatformContainers)(context.platform); }
+  catch (error) { containerDiscoveryError = error; }
   return preservePrimaryFailure(
-    () => executeRun({ ...context, accessPath: adapter.accessPath, deviations: adapter.deviations }, { ...dependencies, adapter, containerIds: ids }),
+    () => executeRun({ ...context, accessPath: adapter.accessPath, deviations: adapter.deviations }, { ...dependencies, adapter, containerIds: ids, containerDiscoveryError }),
     () => dependencies.teardown?.(context) ?? Promise.resolve(),
   );
 }

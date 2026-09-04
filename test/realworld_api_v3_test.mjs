@@ -227,27 +227,57 @@ test('resources select compose project containers and sum docker stats', async (
   });
   assert.deepEqual(calls, [['docker', ['compose', '-p', 'baas-supabase', 'ps', '-q']]]);
   assert.deepEqual(ids, ['aaaaaaaaaaaa', 'bbbbbbbbbbbb']);
+  await assert.rejects(discoverPlatformContainers('supabase', async () => ({ stdout: '' })), /no compose containers/);
   const stats = parseDockerStats('{"ID":"aaaaaaaaaaaa","CPUPerc":"12.5%","MemUsage":"1.5MiB / 2GiB"}\n{"ID":"bbbbbbbbbbbb","CPUPerc":"7.5%","MemUsage":"512KiB / 2GiB"}\n', new Set(ids));
   assert.equal(stats.cpuPercent, 20);
   assert.equal(stats.memoryBytes, 2 * 1024 * 1024);
 });
 
-test('resources sample runner CPU RSS and event-loop once per interval and detect overload', async () => {
+test('resources sample complete one-second windows and detect sustained overload per metric', async () => {
   const { collectResources, evaluateRunnerOverload } = await import('../benchmark-sets/realworld-api-v3/shared/lib/resources.mjs');
   let cpuMicros = 0;
-  let rss = 100;
   let now = 0;
   let resets = 0;
-  const monitor = { enable() {}, disable() {}, reset() { resets++; }, percentile() { return 110_000_000; }, max: 260_000_000 };
+  const sleeps = [];
+  const monitor = { enable() {}, disable() {}, reset() { resets++; }, percentile() { return 0; }, max: 0 };
   const result = await collectResources({
     platform: 'neon', containerIds: [], samples: 3, intervalMs: 1_000,
-    now: () => (now += 1_000), sleep: async () => {}, cpuUsage: () => ({ user: (cpuMicros += 950_000), system: 0 }),
-    memoryUsage: () => ({ rss: rss++ }), monitorFactory: () => monitor,
-    command: async () => ({ stdout: '', stderr: '' }),
+    now: () => now, sleep: async ms => { sleeps.push(ms); now += ms; },
+    cpuUsage: () => ({ user: (cpuMicros += 950_000), system: 0 }),
+    memoryUsage: () => ({ rss: 100 }), monitorFactory: () => monitor,
   });
-  assert.equal(result.samples.length, 3);
+  assert.deepEqual(sleeps, [1_000, 1_000, 1_000]);
+  assert.deepEqual(result.samples.map(sample => sample.timestampMs), [1_000, 2_000, 3_000]);
+  assert.ok(result.samples.every(sample => sample.runner.cpuPercent === 95));
   assert.equal(resets, 3);
   assert.match(evaluateRunnerOverload(result.samples), /three consecutive/);
+
+  const mixed = [
+    { runner: { cpuPercent: 91 }, eventLoop: { p99Ms: 0, maxMs: 0 } },
+    { runner: { cpuPercent: 0 }, eventLoop: { p99Ms: 101, maxMs: 0 } },
+    { runner: { cpuPercent: 0 }, eventLoop: { p99Ms: 0, maxMs: 251 } },
+  ];
+  assert.equal(evaluateRunnerOverload(mixed), null);
+});
+
+test('resource collection invalidates missing and failed container probes', async () => {
+  const { collectResources } = await import('../benchmark-sets/realworld-api-v3/shared/lib/resources.mjs');
+  const base = {
+    platform: 'supabase', containerIds: ['aaaaaaaaaaaa', 'bbbbbbbbbbbb'], samples: 1,
+    intervalMs: 1_000, sleep: async () => {}, now: (() => { let now = 0; return () => (now += 1_000); })(),
+    cpuUsage: () => ({ user: 0, system: 0 }), memoryUsage: () => ({ rss: 1 }),
+    monitorFactory: () => ({ enable() {}, disable() {}, reset() {}, percentile: () => 0, max: 0 }),
+  };
+  const missing = await collectResources({ ...base, command: async () => ({ stdout: '{"ID":"aaaaaaaaaaaa","CPUPerc":"1%","MemUsage":"1MiB / 2GiB"}' }) });
+  assert.equal(missing.valid, false);
+  assert.match(missing.validityReasons.join(' '), /missing container telemetry/);
+  const failed = await collectResources({ ...base, command: async () => { throw new Error('docker unavailable'); } });
+  assert.equal(failed.valid, false);
+  assert.match(failed.validityReasons.join(' '), /docker unavailable/);
+  const signal = { aborted: false };
+  const incomplete = await collectResources({ ...base, containerIds: [], samples: 2, signal, sleep: async () => { signal.aborted = true; } });
+  assert.equal(incomplete.valid, false);
+  assert.match(incomplete.validityReasons.join(' '), /incomplete/);
 });
 
 function passingStage(users) {
@@ -263,6 +293,7 @@ test('runner performs correctness before warm-up, keeps warm-up writes, and foll
     await executeRun({ platform: 'neon', phase: 'measure', trial: 1, outputDir, accessPath: 'sql-over-http', deviations: ['auth emulated'], warmupMs: 1, stageMs: 1 }, {
       adapter: { users: Array.from({ length: 100 }, (_, i) => ({ i })), fixture: {} },
       correctness: async () => { events.push('correctness'); return { findings: [{ passed: true }] }; },
+      reset: async () => { events.push('reset'); },
       workload: async (_adapter, _config, options) => {
         const users = options.users.length;
         events.push(users === 50 && !events.includes('stage:5') ? 'warmup-write' : `stage:${users}`);
@@ -270,7 +301,7 @@ test('runner performs correctness before warm-up, keeps warm-up writes, and foll
         return { startedUsers: users, lostUsers: 0, stageFailed: false };
       },
       metricsFactory: () => ({ record() {}, finalize(_elapsed, counts) { return passingStage(counts.requestedUsers); } }),
-      collectResources: async () => ({ samples: [], valid: true, validityReasons: [] }),
+      collectResources: async () => ({ samples: Array.from({ length: 3 }, () => ({ runner: { cpuPercent: 95 }, eventLoop: { p99Ms: 0, maxMs: 0 } })), valid: true, validityReasons: [] }),
       evaluateCapacity: stages => ({ selectedCapacityUsers: stages.at(-1).requestedUsers, stages: stages.map(stage => ({ requestedUsers: stage.requestedUsers, passed: true, invalid: false, reasons: [] })), reasons: [], saturation: false }),
       nextStage: ({ measuredUsers }) => [5, 10, 25][measuredUsers.length] ?? null,
       monotonic: (() => { let n = 0; return () => ++n * 1000; })(),
@@ -282,6 +313,7 @@ test('runner performs correctness before warm-up, keeps warm-up writes, and foll
     assert.equal(statSync(join(outputDir, 'raw.json')).mode & 0o777, 0o600);
     assert.equal(statSync(join(outputDir, 'summary.json')).mode & 0o777, 0o600);
     assert.deepEqual(raw.stages.map(stage => stage.requestedUsers), [5, 10, 25]);
+    assert.ok(raw.stages.every(stage => !stage.valid && stage.validityReasons.some(reason => reason.includes('runner overload'))));
     assert.ok(Array.isArray(raw.resources));
     assert.equal(raw.accessPath, 'sql-over-http');
     assert.deepEqual(raw.deviations, ['auth emulated']);
@@ -295,10 +327,64 @@ test('summary contains every fixed numeric metric and zeroes without a passing s
   assert.ok(Object.values(summary.metrics).every(value => typeof value === 'number' && value === 0));
 });
 
-test('runner overload invalidates attribution and primary failure survives teardown failure', async () => {
+test('runner overload invalidates attribution and every primary failure survives teardown failure', async () => {
   const { preservePrimaryFailure } = await import('../benchmark-sets/realworld-api-v3/shared/lib/run.mjs');
+  await assert.rejects(preservePrimaryFailure(async () => 'ok', async () => { throw new Error('teardown only'); }), /teardown only/);
   const primary = new Error('primary');
   await assert.rejects(preservePrimaryFailure(async () => { throw primary; }, async () => { throw new Error('teardown'); }), error => error === primary && error.teardownError === 'teardown');
+  const frozen = Object.freeze(new Error('frozen primary'));
+  await assert.rejects(preservePrimaryFailure(async () => { throw frozen; }, async () => { throw new Error('teardown'); }), error => error === frozen);
+  await assert.rejects(preservePrimaryFailure(async () => { throw 'primitive primary'; }, async () => { throw new Error('teardown'); }), error => error === 'primitive primary');
+});
+
+test('run discovery failures invalidate measured stages and artifacts bound errors', async () => {
+  const { executeRun } = await import('../benchmark-sets/realworld-api-v3/shared/lib/run.mjs');
+  const outputDir = await mkdtemp(join(tmpdir(), 'rw-discovery-'));
+  try {
+    await executeRun({ platform: 'supabase', phase: 'measure', trial: 1, outputDir, warmupMs: 0, stageMs: 1 }, {
+      adapter: { users: Array.from({ length: 50 }, (_, i) => ({ i })), fixture: {} },
+      correctness: async () => ({ findings: [{ passed: true }] }),
+      workload: async (_adapter, _config, options) => {
+        options.onMeasuredStart?.();
+        for (let i = 0; i < 150; i++) options.onSample?.({ error: new Error(`token=secret-${i} ${'x'.repeat(400)}`) });
+        options.onMeasuredEnd?.();
+        return { startedUsers: options.users.length, lostUsers: 0, stageFailed: false };
+      },
+      metricsFactory: () => ({ record() {}, finalize(_elapsed, counts) { return { ...passingStage(counts.requestedUsers), errorExamples: Array.from({ length: 150 }, (_, i) => `token=secret-${i} ${'x'.repeat(400)}`) }; } }),
+      collectResources: async () => ({ samples: [], valid: true, validityReasons: [] }),
+      containerDiscoveryError: new Error('compose discovery unavailable'),
+      evaluateCapacity: stages => ({ selectedCapacityUsers: 0, stages: stages.map(stage => ({ requestedUsers: stage.requestedUsers, invalid: true, passed: false })), reasons: [], saturation: false }),
+      nextStage: ({ measuredUsers }) => measuredUsers.length ? null : 5,
+      monotonic: (() => { let n = 0; return () => ++n; })(),
+    });
+    const raw = JSON.parse(readFileSync(join(outputDir, 'raw.json'), 'utf8'));
+    assert.match(raw.stages[0].validityReasons.join(' '), /compose discovery unavailable/);
+    assert.equal(raw.errors.length, 100);
+    assert.ok(raw.errors.every(error => error.length <= 300 && !/secret-/.test(error)));
+  } finally { await rm(outputDir, { recursive: true, force: true }); }
+});
+
+test('run argument orchestration preserves its primary failure when teardown also fails', async () => {
+  const { runFromArguments } = await import('../benchmark-sets/realworld-api-v3/shared/lib/run.mjs');
+  const outputDir = await mkdtemp(join(tmpdir(), 'rw-teardown-'));
+  const primary = Object.freeze(new Error('correctness primary'));
+  try {
+    await assert.rejects(runFromArguments(['neon', 'measure', '1', outputDir], {
+      loadAdapter: async () => ({ users: Array.from({ length: 50 }, () => ({})), fixture: {} }),
+      discoverContainers: async () => [],
+      correctness: async () => { throw primary; },
+      teardown: async () => { throw new Error('teardown secondary'); },
+    }), error => error === primary);
+  } finally { await rm(outputDir, { recursive: true, force: true }); }
+});
+
+test('administrative dispatch invokes exactly the requested platform handler', async () => {
+  const { dispatchAdmin } = await import('../benchmark-sets/realworld-api-v3/shared/lib/admin.mjs');
+  const calls = [];
+  await dispatchAdmin(['reset', 'neon', 'measure', '2', '/tmp/output'], {
+    loadAdmin: async platform => ({ reset: context => calls.push([platform, context]) }),
+  });
+  assert.deepEqual(calls, [['neon', { platform: 'neon', phase: 'measure', trial: 2, outputDir: '/tmp/output' }]]);
 });
 
 test('shared hook validates dispatch and installs an isolated Node 22 runtime', () => {
