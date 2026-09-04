@@ -11,7 +11,7 @@ Reproducible local Docker environments for comparing self-hosted backend-as-a-se
 - PocketBase
 - TrailBase
 
-The repository has two layers: `bin/baas` provisions and isolates the systems under test, while `bin/bench` scaffolds, validates, runs, and publishes benchmark cases. The framework is ready, and the `basic-js-v1` JavaScript SDK benchmark definitions are committed. No benchmark results are committed yet.
+The repository has two layers: `bin/baas` provisions and isolates the systems under test, while `bin/bench` scaffolds, validates, runs, and publishes benchmark cases. The framework, `basic-js-v1` JavaScript SDK benchmark definitions, and validated evidence are committed. See the [`basic-js-v1` result report](results/basic-js-v1/REPORT.md).
 
 A benchmark defines one shared methodology; each platform and access-path combination is a separate case. For example, REST API, database function, direct PostgreSQL, pooled ORM, and WASM-extension implementations belong in distinct cases under the same benchmark.
 
@@ -66,7 +66,7 @@ bin/bench run basic-js-v1 read-item-throughput pocketbase javascript-sdk
 bin/bench run basic-js-v1 write-throughput trailbase javascript-sdk
 ```
 
-Each case uses anonymous access, one long-lived client per virtual user, and sequential requests within each virtual user. The four loads (1, 10, 100, and 1,000 VUs) take 4 × (5 seconds warm-up + 3 × 15 seconds measured) = 200 seconds of timed load, or about 3.5 minutes per case including setup and other overhead. These are workload definitions only: no results or rankings are committed or published yet. Neon is excluded because its prepared self-hosted deployment exposes PostgreSQL protocol access but no reproducible official JavaScript-driver proxy.
+Each case uses anonymous access, one long-lived client per virtual user, and sequential requests within each virtual user. The four loads (1, 10, 100, and 1,000 VUs) take 4 × (5 seconds warm-up + 3 × 15 seconds measured) = 200 seconds of timed load, or about 3.5 minutes per case including setup and other overhead. Validated evidence and the [result report](results/basic-js-v1/REPORT.md) are published without cross-platform rankings. Neon is excluded because its prepared self-hosted deployment exposes PostgreSQL protocol access but no reproducible official JavaScript-driver proxy.
 
 ## Scaffold workflow
 
