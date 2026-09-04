@@ -1,6 +1,20 @@
 services:
+  wasm-install:
+    build:
+      context: ../..
+      dockerfile: benchmark-sets/basic-js-v2/shared/wasm-rust/Dockerfile
+      args:
+        RUST_IMAGE: ${TRAILBASE_WASM_RUST_IMAGE}
+        BUSYBOX_IMAGE: ${TRAILBASE_WASM_BUSYBOX_IMAGE}
+    command: [sh, -c, "mkdir -p /app/traildepot/wasm && cp /component.wasm /app/traildepot/wasm/baas-bench.wasm"]
+    volumes:
+      - data:/app/traildepot
+
   trailbase:
     image: trailbase/trailbase:${TRAILBASE_VERSION}
+    depends_on:
+      wasm-install:
+        condition: service_completed_successfully
     ports:
       - 4000:4000
     environment:

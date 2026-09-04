@@ -70,6 +70,16 @@ setup_supabase() {
     rm -f "$dir/docker-compose.yml.baas"
     printf '  storage-data:\n' >> "$dir/docker-compose.yml"
   fi
+  if grep -q -- '- 15432:5432' "$dir/docker-compose.yml"; then
+    sed -i.baas 's/- 15432:5432/- 127.0.0.1:15432:5432/' "$dir/docker-compose.yml"
+    rm -f "$dir/docker-compose.yml.baas"
+  elif ! grep -q '127.0.0.1:15432:5432' "$dir/docker-compose.yml"; then
+    sed -i.baas '/^  db:$/,/^  [a-z]/ { /^    restart: unless-stopped$/a\
+    ports:\
+      - 127.0.0.1:15432:5432
+}' "$dir/docker-compose.yml"
+    rm -f "$dir/docker-compose.yml.baas"
+  fi
   chmod 600 "$dir/.env"
 }
 
