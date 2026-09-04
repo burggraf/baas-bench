@@ -18,13 +18,7 @@ export function createDirectusAdmin({ sdk, endpoint = 'http://127.0.0.1:8055', r
   const stateDir = join(runtime, 'state');
   let client;
   async function connect() {
-    const anonymous = sdk.createDirectus(endpoint).with(sdk.rest({
-      onRequest(options) {
-        const headers = new Headers(options.headers);
-        headers.set('Cache-Control', 'no-store');
-        return { ...options, headers };
-      },
-    })).with(sdk.authentication('json'));
+    const anonymous = sdk.createDirectus(endpoint).with(sdk.rest()).with(sdk.authentication('json'));
     await anonymous.login({ email, password });
     anonymous.stopRefreshing();
     client = anonymous;
@@ -95,6 +89,18 @@ export function createDirectusAdmin({ sdk, endpoint = 'http://127.0.0.1:8055', r
     }
   }
   async function rows() { return request(sdk.readItems(collection, { fields: [...logicalFields, 'fixture_key'], sort: ['fixture_key'], limit: -1 }), 'row verification'); }
+  async function databaseValue(sql) {
+    const result = await run(join(root, 'bin/baas'), [
+      'compose', 'directus', 'exec', '-T', 'database', 'psql', '-U', 'directus', '-d', 'directus',
+      '-At', '-v', 'ON_ERROR_STOP=1', '-c', sql,
+    ]);
+    return result.stdout.trim();
+  }
+  async function measuredRowCount() {
+    const value = await databaseValue(`SELECT count(*) FROM "${collection}" WHERE fixture_key IS NULL`);
+    if (!/^\d+$/.test(value)) throw new Error('Directus measured row count is invalid');
+    return Number(value);
+  }
   async function verify() {
     const access = await publicAccess('public policy verification');
     if (!Array.isArray(access) || access.length !== 1 || !access[0]?.policy) throw new Error('Directus public policy is not unique');
@@ -108,7 +114,10 @@ export function createDirectusAdmin({ sdk, endpoint = 'http://127.0.0.1:8055', r
     if (!byName.created_at?.schema?.is_indexed || !byName.fixture_key?.schema?.is_unique || !byName.fixture_key?.schema?.is_indexed) throw new Error('Directus indexes or unique fixture key are invalid');
     return true;
   }
-  async function reset() { await request(sdk.deleteItems(collection, { filter: { fixture_key: { _null: true } } }), 'reset'); await verify();
+  async function reset() {
+    await databaseValue(`DELETE FROM "${collection}" WHERE fixture_key IS NULL`);
+    if (await measuredRowCount() !== 0) throw new Error('Directus reset did not remove measured rows');
+    await verify();
   }
   async function teardown() {
     let first;
@@ -130,8 +139,9 @@ export function createDirectusAdmin({ sdk, endpoint = 'http://127.0.0.1:8055', r
       return true;
     }
     if (context.operation === 'write') {
-      if (!context.result || context.result.id === undefined || context.result.id === null) throw new Error('Directus readiness write has no ID');
-      const row = await request(sdk.readItem(collection, context.result.id, { fields: [...logicalFields, 'fixture_key'] }), 'readiness write readback');
+      if (!context.result || !Number.isInteger(context.result.id) || context.result.id < 1) throw new Error('Directus readiness write has no ID');
+      const value = await databaseValue(`SELECT json_build_object('id', id, 'author', author, 'message', message, 'created_at', created_at, 'fixture_key', fixture_key) FROM "${collection}" WHERE id = ${context.result.id}`);
+      const row = value ? JSON.parse(value) : undefined;
       const expected = writeRecord(context);
       if (!row || row.fixture_key != null || row.author !== expected.author || row.message !== expected.message || !Number.isFinite(Date.parse(row.created_at))) throw new Error('Directus readiness write is invalid');
       return true;
@@ -147,8 +157,7 @@ export function createDirectusAdmin({ sdk, endpoint = 'http://127.0.0.1:8055', r
   }
   async function verifyStage(context) {
     await verify();
-    const all = await rows();
-    const writes = all.filter((row) => row.fixture_key == null).length;
+    const writes = await measuredRowCount();
     if (writes !== (context.operation === 'write' ? context.stage.completed : 0)) throw new Error('Directus stage write count is invalid');
     return true;
   }

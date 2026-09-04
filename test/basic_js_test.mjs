@@ -853,10 +853,9 @@ test('Directus admin verifies exact baseline, readiness, stage count, and cleans
   const baseline = Array.from({ length: 10000 }, (_, i) => ({ ...fixture(i + 1), id: i + 1 }));
   const calls = [];
   const commandCalls = [];
-  const restConfigs = [];
   const sdk = {};
   for (const name of ['readItem', 'readCollections', 'deleteCollection', 'createCollection', 'customEndpoint', 'readItems', 'readFieldsByCollection', 'createPermissions', 'readPermissions', 'createItems', 'deleteItems', 'deletePermission', 'deleteItem']) sdk[name] = (...args) => ({ name, args });
-  sdk.rest = (config) => { restConfigs.push(config); return 'rest'; };
+  sdk.rest = () => 'rest';
   sdk.authentication = () => 'auth';
   sdk.createDirectus = () => ({ with() { return this; }, async login() {}, stopRefreshing() { calls.push({ name: 'stopRefreshing' }); }, async request(command) {
     calls.push(command);
@@ -876,14 +875,17 @@ test('Directus admin verifies exact baseline, readiness, stage count, and cleans
     runtime,
     root: '/repo',
     password: 'secret',
-    run: async (command, args, options) => { commandCalls.push({ command, args, input: options.input }); return { stdout: '' }; },
+    run: async (command, args, options = {}) => {
+      commandCalls.push({ command, args, input: options.input });
+      const sql = args.at(-1);
+      if (typeof sql === 'string' && sql.includes('json_build_object')) {
+        return { stdout: `${JSON.stringify({ id: 10001, fixture_key: null, ...writeRecord({ trial: 1, load: 1, vu: 1, sequence: 0 }), created_at: new Date().toISOString() })}\n` };
+      }
+      if (typeof sql === 'string' && sql.includes('count(*)') && sql.includes('fixture_key IS NULL')) return { stdout: '0\n' };
+      return { stdout: '' };
+    },
   });
   await admin.setup();
-  assert.ok(restConfigs.length > 0);
-  const transformed = await restConfigs[0].onRequest({ headers: { Existing: 'kept' } });
-  const transformedHeaders = new Headers(transformed.headers);
-  assert.equal(transformedHeaders.get('existing'), 'kept');
-  assert.equal(transformedHeaders.get('cache-control'), 'no-store');
   const definition = calls.find((command) => command.name === 'createCollection').args[0];
   assert.deepEqual(definition.schema, {});
   assert.deepEqual(definition.fields.map((field) => field.field), ['id', 'author', 'message', 'created_at', 'fixture_key']);
@@ -894,14 +896,18 @@ test('Directus admin verifies exact baseline, readiness, stage count, and cleans
   ]);
   await admin.verifyReadiness({ operation: 'list', result: baseline.slice(-20).reverse().map(({ fixture_key, ...row }) => row) });
   await admin.verifyReadiness({ operation: 'write', trial: 1, load: 1, vu: 1, sequence: 0, result: { id: 10001 } });
+  await admin.reset();
   await admin.verifyStage({ operation: 'list', stage: { completed: 0 } });
   assert.ok(calls.some((command) => command.name === 'readFieldsByCollection'));
   assert.ok(calls.some((command) => command.name === 'stopRefreshing'));
   assert.ok(calls.some((command) => command.name === 'customEndpoint' && command.args[0].path === '/access'));
-  assert.equal(commandCalls.length, 1);
-  assert.equal(commandCalls[0].command, '/repo/bin/baas');
-  assert.deepEqual(commandCalls[0].args.slice(0, 6), ['compose', 'directus', 'exec', '-T', 'database', 'psql']);
-  assert.equal(commandCalls[0].input.trim().split('\n').length, 10_000);
+  const fixtureCopy = commandCalls.find(({ input }) => input?.includes('Guestbook message 00001'));
+  assert.equal(fixtureCopy.command, '/repo/bin/baas');
+  assert.deepEqual(fixtureCopy.args.slice(0, 6), ['compose', 'directus', 'exec', '-T', 'database', 'psql']);
+  assert.equal(fixtureCopy.input.trim().split('\n').length, 10_000);
+  assert.ok(commandCalls.some(({ args }) => args.at(-1)?.includes('json_build_object')));
+  assert.ok(commandCalls.some(({ args }) => args.at(-1) === 'DELETE FROM "bb_basic_js_v1_guestbook" WHERE fixture_key IS NULL'));
+  assert.ok(commandCalls.some(({ args }) => args.at(-1)?.includes('count(*)') && args.at(-1)?.includes('fixture_key IS NULL')));
   rmSync(runtime, { recursive: true, force: true });
 });
 
