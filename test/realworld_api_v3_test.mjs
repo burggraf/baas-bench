@@ -155,6 +155,32 @@ test('workflow and remote measurements are separate and reject boundary leakage'
   await assert.rejects(runWorkflow('dashboard', context), /boundary/);
 });
 
+test('metrics keep workflow and remote calls separate and use nearest-rank p95', async () => {
+  const { StageMetricsAccumulator } = await import('../benchmark-sets/realworld-api-v3/shared/lib/metrics.mjs');
+  const metrics = new StageMetricsAccumulator();
+  for (let elapsedMs = 1; elapsedMs <= 20; elapsedMs += 1) {
+    metrics.record({ type: 'workflow', name: 'dashboard', workflow: 'dashboard', operationClass: 'read', kind: 'read', elapsedMs, success: true });
+    metrics.record({ type: 'remote', name: 'dashboard', workflow: 'dashboard', operationClass: 'read', kind: 'read', elapsedMs: 1, success: true });
+  }
+  const stage = metrics.finalize(10, { requestedUsers: 5, achievedUsers: 5 });
+  assert.equal(stage.workflowTransactionsPerSecond, 2);
+  assert.equal(stage.remoteOperationsPerSecond, 2);
+  assert.equal(stage.operationClassMetrics.read.latencyP95Ms, 19);
+});
+
+test('capacity stages follow the approved doubling and bounded refinement', async () => {
+  const { nextCapacityStage } = await import('../benchmark-sets/realworld-api-v3/shared/lib/capacity.mjs');
+  assert.equal(nextCapacityStage({ measuredUsers: [] }), 5);
+  assert.equal(nextCapacityStage({ measuredUsers: [5] }), 10);
+  assert.equal(nextCapacityStage({ measuredUsers: [5, 10] }), 25);
+  assert.equal(nextCapacityStage({ measuredUsers: [5, 10, 25] }), 50);
+  assert.equal(nextCapacityStage({ measuredUsers: [5, 10, 25, 50] }), 100);
+  assert.equal(nextCapacityStage({ measuredUsers: [5, 10, 25, 50, 6_400] }), 10_000);
+  assert.equal(nextCapacityStage({ measuredUsers: [5, 10, 25, 50, 100], lowerPass: 50, upperFailure: 100, refinements: 0 }), 75);
+  assert.equal(nextCapacityStage({ measuredUsers: [5, 10, 25, 50, 51], lowerPass: 50, upperFailure: 51, refinements: 1 }), null);
+  assert.equal(nextCapacityStage({ measuredUsers: [5, 10, 25, 50, 75, 100], lowerPass: 50, upperFailure: 100, refinements: 4 }), null);
+});
+
 test('workload prepares outside measurement and closes each session once', async () => {
   const { runWorkload, SESSION_PREPARATION_CONCURRENCY } = await import('../benchmark-sets/realworld-api-v3/shared/lib/workload.mjs');
   assert.equal(SESSION_PREPARATION_CONCURRENCY, 10);
