@@ -101,6 +101,19 @@ EOF
     "$dir/docker-compose.yml"
   rm -f "$dir/docker-compose.yml.baas"
   chmod 600 "$file"
+
+  cert_dir="$RUNTIME/neon/proxy-certs"
+  cert="$cert_dir/localhost.crt"
+  key="$cert_dir/localhost.key"
+  mkdir -p "$cert_dir"
+  chmod 700 "$cert_dir"
+  if [ ! -f "$cert" ] || [ ! -f "$key" ]; then
+    umask 077
+    openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
+      -keyout "$key" -out "$cert" -subj '/CN=localhost' \
+      -addext 'subjectAltName=DNS:localhost' >/dev/null 2>&1
+  fi
+  chmod 600 "$cert" "$key"
 }
 
 setup_convex() {
@@ -229,7 +242,10 @@ run_compose() {
   shift
   dir=$(compose_dir "$service")
   env=$(compose_env "$service")
-  if [ -f "$env" ]; then
+  if [ "$service" = neon ]; then
+    docker compose -p "baas-$service" --project-directory "$dir" --env-file "$ROOT/versions.env" --env-file "$env" \
+      -f "$(compose_path "$service")" -f "$ROOT/services/neon/proxy.yml" "$@"
+  elif [ -f "$env" ]; then
     docker compose -p "baas-$service" --project-directory "$dir" --env-file "$ROOT/versions.env" --env-file "$env" -f "$(compose_path "$service")" "$@"
   else
     docker compose -p "baas-$service" --project-directory "$dir" --env-file "$ROOT/versions.env" -f "$(compose_path "$service")" "$@"
@@ -259,7 +275,12 @@ smoke_one() {
       key=$(grep '^SUPABASE_PUBLISHABLE_KEY=' "$RUNTIME/supabase/docker/.env" | cut -d= -f2-)
       curl -fsS -H "apikey: $key" http://localhost:8000/auth/v1/health >/dev/null
       ;;
-    neon) compose neon exec -T compute1 psql postgresql://cloud_admin:cloud_admin@localhost:55433/postgres -Atqc 'select 1' | grep -qx 1 ;;
+    neon)
+      curl -fsS --cacert "$RUNTIME/neon/proxy-certs/localhost.crt" -X POST \
+        -H 'Neon-Connection-String: postgresql://cloud_admin:cloud_admin@localhost:4444/postgres' \
+        -H 'Content-Type: application/json' --data '{"query":"SELECT 1","params":[]}' \
+        https://localhost:4444/sql >/dev/null
+      ;;
     convex) curl -fsS http://localhost:3210/version >/dev/null ;;
     appwrite) curl -fsS http://localhost:8080/v1/health/version >/dev/null ;;
     nhost) curl -fsS --resolve local.graphql.local.nhost.run:80:127.0.0.1 http://local.graphql.local.nhost.run/v1/version >/dev/null ;;

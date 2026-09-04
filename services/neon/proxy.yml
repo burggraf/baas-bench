@@ -1,0 +1,20 @@
+services:
+  proxy:
+    image: ${REPOSITORY:-ghcr.io/neondatabase}/neon:${NEON_IMAGE}
+    command:
+      - proxy
+      - -c
+      - /etc/neon/localhost.crt
+      - -k
+      - /etc/neon/localhost.key
+      - --auth-backend=postgres
+      - --auth-endpoint=postgresql://cloud_admin:cloud_admin@compute1:55433/postgres
+      - --wss=0.0.0.0:4444
+    ports:
+      - "127.0.0.1:4444:4444"
+    volumes:
+      - ../proxy-certs/localhost.crt:/etc/neon/localhost.crt:ro
+      - ../proxy-certs/localhost.key:/etc/neon/localhost.key:ro
+    depends_on:
+      compute_is_ready:
+        condition: service_completed_successfully
