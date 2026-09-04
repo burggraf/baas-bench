@@ -4,6 +4,22 @@ These explanations are hypotheses based on observed throughput, latency, and err
 
 Median figures below refer to the middle of three measured trials. Full independent trial data is in [REPORT.md](REPORT.md).
 
+## Case-by-case summary
+
+This table makes every included BaaS and access path explicit. Values are medians across three trials and are presented in the fixed case order—not as a ranking.
+
+| BaaS / path | List ops/s at 100 VUs | Item ops/s at 100 VUs | Write ops/s at 100 VUs | List / item / write error rate at 1,000 VUs |
+|---|---:|---:|---:|---:|
+| Neon direct PostgreSQL | 14,184 | 9,467 | 1,107 | 28.45% / 19.20% / 67.58% |
+| Supabase direct PostgreSQL | 9,098 | 13,183 | 7,219 | 30.68% / 12.93% / 20.46% |
+| Supabase Supavisor pooler | 11,946 | 17,799 | 9,168 | 44.54% / 51.67% / 53.57% |
+| Nhost direct PostgreSQL | 13,575 | 22,438 | 9,018 | 35.07% / 22.75% / 39.12% |
+| Directus direct PostgreSQL | 13,436 | 21,307 | 11,330 | 29.93% / 13.86% / 24.64% |
+| TrailBase Rust WASM extension | 3,685 | 4,598 | 3,526 | 0% / 0% / 0% |
+| PocketBase Go extension | 6,941 | 9,069 | 3,595 | 0% / 0% / 0% |
+
+Convex and Appwrite are not missing measurements: they were intentionally excluded because the prepared deployments do not expose a supported comparable database or server-extension path for this set.
+
 ## List reads
 
 ### Direct PostgreSQL paths
