@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { accessSync, constants, readFileSync } from 'node:fs';
+import { accessSync, constants, readFileSync, statSync } from 'node:fs';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 
 const setRoot = new URL('../benchmark-sets/realworld-api-v3/', import.meta.url);
@@ -213,6 +216,89 @@ test('operation errors are classified and credentials are redacted and bounded',
   const details = safeErrorDetails(new Error(`password=${secret} Bearer aaa.bbb.ccc ${'x'.repeat(500)}`), [secret]);
   assert.doesNotMatch(details.message, /credential-value|aaa\.bbb\.ccc/);
   assert.ok(details.message.length <= 300);
+});
+
+test('resources select compose project containers and sum docker stats', async () => {
+  const { discoverPlatformContainers, parseDockerStats } = await import('../benchmark-sets/realworld-api-v3/shared/lib/resources.mjs');
+  const calls = [];
+  const ids = await discoverPlatformContainers('supabase', async (command, args) => {
+    calls.push([command, args]);
+    return { stdout: 'aaaaaaaaaaaa\nbbbbbbbbbbbb\n', stderr: '' };
+  });
+  assert.deepEqual(calls, [['docker', ['compose', '-p', 'baas-supabase', 'ps', '-q']]]);
+  assert.deepEqual(ids, ['aaaaaaaaaaaa', 'bbbbbbbbbbbb']);
+  const stats = parseDockerStats('{"ID":"aaaaaaaaaaaa","CPUPerc":"12.5%","MemUsage":"1.5MiB / 2GiB"}\n{"ID":"bbbbbbbbbbbb","CPUPerc":"7.5%","MemUsage":"512KiB / 2GiB"}\n', new Set(ids));
+  assert.equal(stats.cpuPercent, 20);
+  assert.equal(stats.memoryBytes, 2 * 1024 * 1024);
+});
+
+test('resources sample runner CPU RSS and event-loop once per interval and detect overload', async () => {
+  const { collectResources, evaluateRunnerOverload } = await import('../benchmark-sets/realworld-api-v3/shared/lib/resources.mjs');
+  let cpuMicros = 0;
+  let rss = 100;
+  let now = 0;
+  let resets = 0;
+  const monitor = { enable() {}, disable() {}, reset() { resets++; }, percentile() { return 110_000_000; }, max: 260_000_000 };
+  const result = await collectResources({
+    platform: 'neon', containerIds: [], samples: 3, intervalMs: 1_000,
+    now: () => (now += 1_000), sleep: async () => {}, cpuUsage: () => ({ user: (cpuMicros += 950_000), system: 0 }),
+    memoryUsage: () => ({ rss: rss++ }), monitorFactory: () => monitor,
+    command: async () => ({ stdout: '', stderr: '' }),
+  });
+  assert.equal(result.samples.length, 3);
+  assert.equal(resets, 3);
+  assert.match(evaluateRunnerOverload(result.samples), /three consecutive/);
+});
+
+function passingStage(users) {
+  const metric = { attempted: 20, completed: 20, failed: 0, errorRate: 0, latencyP50Ms: 1, latencyP95Ms: 1, latencyP99Ms: 1, latencyMinMs: 1, latencyMaxMs: 1 };
+  return { requestedUsers: users, achievedUsers: users, elapsedSeconds: 1, workflowTransactionsPerSecond: users, remoteOperationsPerSecond: users * 2, readOperationsPerSecond: users, writeOperationsPerSecond: users, operationClassMetrics: { read: metric, write: metric, authSearch: metric }, valid: true, validityReasons: [], errorExamples: [] };
+}
+
+test('runner performs correctness before warm-up, keeps warm-up writes, and follows adaptive decisions', async () => {
+  const { executeRun } = await import('../benchmark-sets/realworld-api-v3/shared/lib/run.mjs');
+  const outputDir = await mkdtemp(join(tmpdir(), 'rw-runner-'));
+  const events = [];
+  try {
+    await executeRun({ platform: 'neon', phase: 'measure', trial: 1, outputDir, accessPath: 'sql-over-http', deviations: ['auth emulated'], warmupMs: 1, stageMs: 1 }, {
+      adapter: { users: Array.from({ length: 100 }, (_, i) => ({ i })), fixture: {} },
+      correctness: async () => { events.push('correctness'); return { findings: [{ passed: true }] }; },
+      workload: async (_adapter, _config, options) => {
+        const users = options.users.length;
+        events.push(users === 50 && !events.includes('stage:5') ? 'warmup-write' : `stage:${users}`);
+        options.onMeasuredStart?.(); options.onSample?.({}); options.onMeasuredEnd?.();
+        return { startedUsers: users, lostUsers: 0, stageFailed: false };
+      },
+      metricsFactory: () => ({ record() {}, finalize(_elapsed, counts) { return passingStage(counts.requestedUsers); } }),
+      collectResources: async () => ({ samples: [], valid: true, validityReasons: [] }),
+      evaluateCapacity: stages => ({ selectedCapacityUsers: stages.at(-1).requestedUsers, stages: stages.map(stage => ({ requestedUsers: stage.requestedUsers, passed: true, invalid: false, reasons: [] })), reasons: [], saturation: false }),
+      nextStage: ({ measuredUsers }) => [5, 10, 25][measuredUsers.length] ?? null,
+      monotonic: (() => { let n = 0; return () => ++n * 1000; })(),
+    });
+    assert.deepEqual(events, ['correctness', 'warmup-write', 'stage:5', 'stage:10', 'stage:25']);
+    assert.equal(events.filter(event => event === 'correctness').length, 1);
+    const raw = JSON.parse(readFileSync(join(outputDir, 'raw.json'), 'utf8'));
+    assert.equal(statSync(outputDir).mode & 0o777, 0o700);
+    assert.equal(statSync(join(outputDir, 'raw.json')).mode & 0o777, 0o600);
+    assert.equal(statSync(join(outputDir, 'summary.json')).mode & 0o777, 0o600);
+    assert.deepEqual(raw.stages.map(stage => stage.requestedUsers), [5, 10, 25]);
+    assert.ok(Array.isArray(raw.resources));
+    assert.equal(raw.accessPath, 'sql-over-http');
+    assert.deepEqual(raw.deviations, ['auth emulated']);
+  } finally { await rm(outputDir, { recursive: true, force: true }); }
+});
+
+test('summary contains every fixed numeric metric and zeroes without a passing stage', async () => {
+  const { summarize, FIXED_METRICS } = await import('../benchmark-sets/realworld-api-v3/shared/lib/summary.mjs');
+  const summary = summarize([], { selectedCapacityUsers: 0, stages: [], saturation: false });
+  assert.deepEqual(Object.keys(summary.metrics).sort(), [...FIXED_METRICS].sort());
+  assert.ok(Object.values(summary.metrics).every(value => typeof value === 'number' && value === 0));
+});
+
+test('runner overload invalidates attribution and primary failure survives teardown failure', async () => {
+  const { preservePrimaryFailure } = await import('../benchmark-sets/realworld-api-v3/shared/lib/run.mjs');
+  const primary = new Error('primary');
+  await assert.rejects(preservePrimaryFailure(async () => { throw primary; }, async () => { throw new Error('teardown'); }), error => error === primary && error.teardownError === 'teardown');
 });
 
 test('shared hook validates dispatch and installs an isolated Node 22 runtime', () => {
