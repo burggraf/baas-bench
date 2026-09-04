@@ -47,8 +47,10 @@ sparse_checkout() {
   mkdir -p "$dest"
   git -C "$dest" init -q
   git -C "$dest" remote add origin "https://github.com/$repo.git"
-  git -C "$dest" sparse-checkout init --cone
-  git -C "$dest" sparse-checkout set "$path"
+  if [ "$path" != . ]; then
+    git -C "$dest" sparse-checkout init --cone
+    git -C "$dest" sparse-checkout set "$path"
+  fi
   git -C "$dest" fetch -q --depth 1 origin "$ref"
   git -C "$dest" checkout -q --detach FETCH_HEAD
   printf '%s\n' "$ref" > "$dest/.baas-ref"
@@ -84,7 +86,16 @@ setup_supabase() {
 }
 
 setup_neon() {
-  sparse_checkout neon neondatabase/neon "$NEON_REF" docker-compose
+  if [ -f "$RUNTIME/neon/.baas-ref" ] && [ ! -f "$RUNTIME/neon/Dockerfile" ]; then
+    rm -f "$RUNTIME/neon/.baas-ref"
+  fi
+  sparse_checkout neon neondatabase/neon "$NEON_REF" .
+  sed -i.baas 's/^ENV CARGO_FEATURES="default"$/ENV CARGO_FEATURES="default,testing"/' "$RUNTIME/neon/Dockerfile"
+  rm -f "$RUNTIME/neon/Dockerfile.baas"
+  grep -q '^ENV CARGO_FEATURES="default,testing"$' "$RUNTIME/neon/Dockerfile" || {
+    echo "failed to enable the Neon proxy testing feature" >&2
+    exit 1
+  }
   dir="$RUNTIME/neon/docker-compose"
   file="$dir/.env"
   if [ ! -f "$file" ]; then

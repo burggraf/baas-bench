@@ -24,6 +24,7 @@ trailbase'
 actual=$($BAAS list) || fail "list command failed"
 [ "$actual" = "$expected" ] || fail "unexpected service list"
 grep -q '^NHOST_TRAEFIK_IMAGE=traefik:v3\.6\.1@sha256:' "$ROOT/versions.env" || fail "Nhost Traefik compatibility image is not pinned"
+grep -q '^NEON_BUILD_TOOLS_TAG=pinned@sha256:' "$ROOT/versions.env" || fail "Neon proxy build tools image is not pinned"
 grep -q 'ADMIN_EMAIL: admin@example.com' "$ROOT/services/directus/compose.yml" || fail "Directus bootstrap email is invalid"
 
 if "$BAAS" setup unknown >/dev/null 2>&1; then
@@ -121,11 +122,13 @@ dashboard_line=$(grep -n ' up -d --build --no-deps dashboard$' "$BAAS_TEST_LOG" 
 
 mkdir -p "$BAAS_RUNTIME_DIR/neon/docker-compose"
 printf '%s\n' "$NEON_REF" > "$BAAS_RUNTIME_DIR/neon/.baas-ref"
+printf '%s\n' 'ENV CARGO_FEATURES="default"' > "$BAAS_RUNTIME_DIR/neon/Dockerfile"
 printf '%s\n' 'services: {}' > "$BAAS_RUNTIME_DIR/neon/docker-compose/docker-compose.yml"
 : > "$BAAS_TEST_LOG"
 "$BAAS" setup neon >/dev/null
 "$BAAS" setup neon >/dev/null
 neon_compose="$BAAS_RUNTIME_DIR/neon/docker-compose/docker-compose.yml"
+grep -q '^ENV CARGO_FEATURES="default,testing"$' "$BAAS_RUNTIME_DIR/neon/Dockerfile" || fail "Neon proxy build does not enable its PostgreSQL auth backend"
 grep -q "docker compose .* -f $neon_compose -f $ROOT/services/neon/proxy.yml config --quiet" "$BAAS_TEST_LOG" || fail "Neon proxy overlay missing from Compose command"
 [ "$(grep -c '^openssl req ' "$BAAS_TEST_LOG")" -eq 1 ] || fail "Neon TLS certificate was not generated exactly once"
 grep -q '^openssl req .*subjectAltName=DNS:localhost' "$BAAS_TEST_LOG" || fail "Neon TLS certificate is missing localhost SAN"
@@ -141,7 +144,10 @@ grep -q 'curl .*Neon-Connection-String: postgresql://cloud_admin:cloud_admin@loc
 grep -q 'curl .*--data .*SELECT 1' "$BAAS_TEST_LOG" || fail "Neon SQL-over-HTTP smoke query is invalid"
 
 grep -q '^  proxy:$' "$ROOT/services/neon/proxy.yml" || fail "Neon proxy service missing"
-grep -q 'image: ${REPOSITORY:-ghcr.io/neondatabase}/neon:${NEON_IMAGE}' "$ROOT/services/neon/proxy.yml" || fail "Neon proxy does not use the pinned official image"
+grep -q 'context: \.\.' "$ROOT/services/neon/proxy.yml" || fail "Neon proxy is not built from the pinned official source"
+grep -q 'dockerfile: Dockerfile' "$ROOT/services/neon/proxy.yml" || fail "Neon proxy does not use the official Dockerfile"
+grep -q 'TAG: ${NEON_BUILD_TOOLS_TAG}' "$ROOT/services/neon/proxy.yml" || fail "Neon proxy build does not use pinned official build tools"
+grep -q 'GIT_VERSION: ${NEON_REF}' "$ROOT/services/neon/proxy.yml" || fail "Neon proxy build does not identify the pinned source"
 grep -q -- '--auth-backend=postgres' "$ROOT/services/neon/proxy.yml" || fail "Neon proxy PostgreSQL auth backend missing"
 grep -q -- '--auth-endpoint=postgresql://cloud_admin:cloud_admin@compute1:55433/postgres' "$ROOT/services/neon/proxy.yml" || fail "Neon proxy compute endpoint missing"
 grep -q '127.0.0.1:4444:4444' "$ROOT/services/neon/proxy.yml" || fail "Neon proxy port is not localhost-only"
