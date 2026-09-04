@@ -302,7 +302,12 @@ test('runner performs correctness before warm-up, keeps warm-up writes, and foll
       },
       metricsFactory: () => ({ record() {}, finalize(_elapsed, counts) { return passingStage(counts.requestedUsers); } }),
       collectResources: async () => ({ samples: Array.from({ length: 3 }, () => ({ runner: { cpuPercent: 95 }, eventLoop: { p99Ms: 0, maxMs: 0 } })), valid: true, validityReasons: [] }),
-      evaluateCapacity: stages => ({ selectedCapacityUsers: stages.at(-1).requestedUsers, stages: stages.map(stage => ({ requestedUsers: stage.requestedUsers, passed: true, invalid: false, reasons: [] })), reasons: [], saturation: false }),
+      evaluateCapacity: (stages, config) => {
+        assert.equal(config.slos.read.p95Ms, 500);
+        assert.equal(config.slos.write.p95Ms, 750);
+        assert.equal(config.slos.authSearch.p95Ms, 1_000);
+        return { selectedCapacityUsers: stages.at(-1).requestedUsers, stages: stages.map(stage => ({ requestedUsers: stage.requestedUsers, passed: true, invalid: false, reasons: [] })), reasons: [], saturation: false };
+      },
       nextStage: ({ measuredUsers }) => [5, 10, 25][measuredUsers.length] ?? null,
       monotonic: (() => { let n = 0; return () => ++n * 1000; })(),
     });
@@ -368,13 +373,21 @@ test('run argument orchestration preserves its primary failure when teardown als
   const { runFromArguments } = await import('../benchmark-sets/realworld-api-v3/shared/lib/run.mjs');
   const outputDir = await mkdtemp(join(tmpdir(), 'rw-teardown-'));
   const primary = Object.freeze(new Error('correctness primary'));
+  const events = [];
   try {
     await assert.rejects(runFromArguments(['neon', 'measure', '1', outputDir], {
-      loadAdapter: async () => ({ users: Array.from({ length: 50 }, () => ({})), fixture: {} }),
+      loadBackend: async platform => {
+        events.push(`backend:${platform}`);
+        return {
+          async correctnessFixture() { events.push('fixture'); return {}; },
+          async virtualUsers(count) { events.push(`users:${count}`); return Array.from({ length: 50 }, () => ({})); },
+        };
+      },
       discoverContainers: async () => [],
       correctness: async () => { throw primary; },
       teardown: async () => { throw new Error('teardown secondary'); },
     }), error => error === primary);
+    assert.deepEqual(events, ['backend:neon', 'fixture', 'users:10000']);
   } finally { await rm(outputDir, { recursive: true, force: true }); }
 });
 

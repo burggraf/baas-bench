@@ -12,7 +12,7 @@ const PLATFORMS = new Set(['supabase', 'convex', 'appwrite', 'nhost', 'directus'
 const DEFAULT_CONFIG = Object.freeze({
   seed: 42, stageSeconds: 300, timeoutMs: 5_000, thinkTimeMs: { min: 1_000, max: 5_000 },
   weights: { dashboard: 20, taskList: 25, taskDetail: 15, createTask: 10, updateTask: 12, addComment: 10, search: 5, profileUpdate: 1, signIn: 2 },
-  slos: { read: { p95Ms: 500, maxErrorRate: 0.01 }, write: { p95Ms: 1_000, maxErrorRate: 0.01 }, authSearch: { p95Ms: 1_000, maxErrorRate: 0.01 } },
+  slos: { read: { p95Ms: 500, maxErrorRate: 0.01 }, write: { p95Ms: 750, maxErrorRate: 0.01 }, authSearch: { p95Ms: 1_000, maxErrorRate: 0.01 } },
 });
 
 function parseArguments(args) {
@@ -58,8 +58,11 @@ export async function executeRun(context, dependencies) {
   await mkdir(context.outputDir, { recursive: true, mode: 0o700 });
   await chmod(context.outputDir, 0o700);
 
-  const adapter = dependencies.adapter;
-  if (!adapter || !Array.isArray(adapter.users) || !adapter.fixture) throw new Error('adapter did not provide fixture and users');
+  const backend = dependencies.backend ?? dependencies.adapter;
+  if (!backend) throw new Error('backend is unavailable');
+  const fixture = dependencies.fixture ?? backend.fixture ?? await backend.correctnessFixture?.();
+  const users = dependencies.users ?? backend.users ?? await backend.virtualUsers?.(10_000);
+  if (!fixture || !Array.isArray(users)) throw new Error('backend did not provide fixture and users');
   const config = { ...DEFAULT_CONFIG, ...dependencies.config, stageSeconds: stageMs / 1_000 };
   const correctnessFn = dependencies.correctness ?? runCorrectness;
   const workloadFn = dependencies.workload ?? runWorkload;
@@ -67,12 +70,12 @@ export async function executeRun(context, dependencies) {
   const evaluate = dependencies.evaluateCapacity ?? evaluateCapacity;
   const chooseNext = dependencies.nextStage ?? nextCapacityStage;
   const monotonic = dependencies.monotonic ?? (() => performance.now());
-  const correctness = await correctnessFn(adapter, adapter.fixture);
+  const correctness = await correctnessFn(backend, fixture);
   if (correctness.aborted || correctness.findings?.some(finding => !finding.passed)) throw new Error('correctness checks failed');
-  if (adapter.users.length < 50) throw new Error('adapter returned fewer than 50 virtual users');
+  if (users.length < 50) throw new Error('backend returned fewer than 50 virtual users');
 
   // Deliberately do not reset after this write-capable warm-up: its state remains for measured stages.
-  const warmup = await workloadFn(adapter, config, { users: adapter.users.slice(0, 50), durationMs: warmupMs, graceMs: config.timeoutMs });
+  const warmup = await workloadFn(backend, config, { users: users.slice(0, 50), durationMs: warmupMs, graceMs: config.timeoutMs });
   if (warmup.stageFailed || warmup.failedWorkflowCount) throw new Error('warm-up failed');
 
   const stages = [];
@@ -86,17 +89,17 @@ export async function executeRun(context, dependencies) {
   for (;;) {
     if (upperFailure !== undefined && lowerPass === undefined) break;
     const refining = lowerPass !== undefined && upperFailure !== undefined;
-    const requestedUsers = chooseNext({ measuredUsers, lowerPass, upperFailure, refinements, maxUsers: adapter.users.length });
+    const requestedUsers = chooseNext({ measuredUsers, lowerPass, upperFailure, refinements, maxUsers: users.length });
     if (requestedUsers === null) break;
-    if (!Number.isSafeInteger(requestedUsers) || requestedUsers < 1 || requestedUsers > adapter.users.length || measuredUsers.includes(requestedUsers)) throw new Error('invalid adaptive capacity decision');
+    if (!Number.isSafeInteger(requestedUsers) || requestedUsers < 1 || requestedUsers > users.length || measuredUsers.includes(requestedUsers)) throw new Error('invalid adaptive capacity decision');
     const accumulator = (dependencies.metricsFactory ?? (options => new StageMetricsAccumulator(options)))({ maxErrorExamples: 100 });
     let start;
     let end;
     let resourcePromise;
     const resourceSamples = Math.max(1, Math.ceil(stageMs / 1_000));
     const containerIds = dependencies.containerIds ?? [];
-    const result = await workloadFn(adapter, config, {
-      users: adapter.users.slice(0, requestedUsers), durationMs: stageMs, graceMs: config.timeoutMs,
+    const result = await workloadFn(backend, config, {
+      users: users.slice(0, requestedUsers), durationMs: stageMs, graceMs: config.timeoutMs,
       onSample: sample => accumulator.record(sample),
       onMeasuredStart: async () => { start = monotonic(); resourcePromise = resourcesFn({ platform: context.platform, containerIds, samples: resourceSamples, intervalMs: 1_000 }); },
       onMeasuredEnd: async () => { end = monotonic(); },
@@ -122,7 +125,7 @@ export async function executeRun(context, dependencies) {
     if (refining) refinements++;
   }
 
-  const raw = { schemaVersion: 1, platform: context.platform, trial: context.trial, accessPath: context.accessPath ?? adapter.accessPath ?? 'unknown', deviations: [...(context.deviations ?? adapter.deviations ?? [])], correctness, warmup: { users: 50, durationMs: warmupMs, writesReset: false }, stages, resources, capacity, errors: safeErrors(failures) };
+  const raw = { schemaVersion: 1, platform: context.platform, trial: context.trial, accessPath: context.accessPath ?? backend.accessPath ?? 'unknown', deviations: [...(context.deviations ?? backend.deviations ?? [])], correctness, warmup: { users: 50, durationMs: warmupMs, writesReset: false }, stages, resources, capacity, errors: safeErrors(failures) };
   await writeFile(join(context.outputDir, 'raw.json'), `${JSON.stringify(raw, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
   await writeFile(join(context.outputDir, 'summary.json'), `${JSON.stringify(summarize(stages, capacity), null, 2)}\n`, { mode: 0o600, flag: 'wx' });
   return raw;
@@ -130,14 +133,14 @@ export async function executeRun(context, dependencies) {
 
 export async function runFromArguments(args, dependencies = {}) {
   const context = parseArguments(args);
-  const loadAdapter = dependencies.loadAdapter ?? (platform => import(`./adapters/${platform}.mjs`).then(module => module.createAdapter()));
-  const adapter = await loadAdapter(context.platform);
+  const loadBackend = dependencies.loadBackend ?? (platform => import(`./adapters/${platform}.mjs`).then(module => module.createBackend(dependencies.backendDependencies)));
+  const backend = await loadBackend(context.platform);
   let ids = [];
   let containerDiscoveryError;
   try { ids = await (dependencies.discoverContainers ?? discoverPlatformContainers)(context.platform); }
   catch (error) { containerDiscoveryError = error; }
   return preservePrimaryFailure(
-    () => executeRun({ ...context, accessPath: adapter.accessPath, deviations: adapter.deviations }, { ...dependencies, adapter, containerIds: ids, containerDiscoveryError }),
+    () => executeRun({ ...context, accessPath: backend.accessPath, deviations: backend.deviations }, { ...dependencies, backend, containerIds: ids, containerDiscoveryError }),
     () => dependencies.teardown?.(context) ?? Promise.resolve(),
   );
 }
