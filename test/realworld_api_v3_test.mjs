@@ -391,6 +391,71 @@ test('run argument orchestration preserves its primary failure when teardown als
   } finally { await rm(outputDir, { recursive: true, force: true }); }
 });
 
+test('postgres admin schema provides tenant RLS, workload indexes, activity, reset, and app auth', async () => {
+  const {
+    APPLICATION_TABLES, CREATE_FIXTURE_STATE_SQL, RESET_FIXTURE_STATE_SQL,
+    exactCountSql, loadSchemaText,
+  } = await import('../benchmark-sets/realworld-api-v3/shared/lib/admin/postgres.mjs');
+  assert.deepEqual(APPLICATION_TABLES, ['organizations', 'users', 'memberships', 'projects', 'tasks', 'comments', 'activities']);
+  const schema = await loadSchemaText();
+  const publicTables = [...schema.matchAll(/create table public\.(\w+)/gi)].map(match => match[1]);
+  assert.deepEqual(publicTables.sort(), [...APPLICATION_TABLES].sort());
+  for (const table of APPLICATION_TABLES) assert.match(schema, new RegExp(`alter table public\\.${table} enable row level security`, 'i'));
+  assert.match(schema, /references public\.users\(id\)/i);
+  assert.match(schema, /foreign key \(project_id, organization_id\) references public\.projects/i);
+  assert.match(schema, /foreign key \(task_id, project_id, organization_id\) references public\.tasks/i);
+  for (const index of ['memberships_user_idx', 'projects_organization_idx', 'tasks_project_idx', 'tasks_assignee_idx', 'tasks_title_idx', 'comments_task_idx', 'activities_organization_idx']) {
+    assert.match(schema, new RegExp(`create index ${index}`, 'i'));
+  }
+  assert.match(schema, /request\.jwt\.claim\.sub/);
+  assert.match(schema, /x-hasura-user-id/);
+  assert.match(schema, /app\.user_id/);
+  assert.match(schema, /is_manager\(organization_id\)/);
+  assert.match(schema, /create trigger tasks_activity/i);
+  assert.match(schema, /create trigger comments_activity/i);
+  assert.match(schema, /create table benchmark_auth\.passwords/i);
+  assert.match(schema, /create table benchmark_auth\.sessions/i);
+  assert.match(schema, /security definer[\s\S]*benchmark_auth\.sign_in/i);
+  assert.match(schema, /security definer[\s\S]*benchmark_auth\.validate_session/i);
+  assert.match(schema, /security definer[\s\S]*benchmark_auth\.sign_out/i);
+  assert.doesNotMatch(schema, /auth\.uid\(|auth\.users|create role|alter role/i);
+  assert.match(CREATE_FIXTURE_STATE_SQL, /realworld-api-v3-baseline-v1/);
+  assert.match(RESET_FIXTURE_STATE_SQL, /realworld-api-v3-baseline-v1/);
+  assert.match(RESET_FIXTURE_STATE_SQL, /truncate table/i);
+  assert.match(exactCountSql(), /union all/i);
+});
+
+test('postgres admin streams escaped bounded COPY and verifies every exact count', async () => {
+  const {
+    copyDataset, encodeCopyRow, verifyExactCounts,
+  } = await import('../benchmark-sets/realworld-api-v3/shared/lib/admin/postgres.mjs');
+  assert.equal(encodeCopyRow(['back\\slash', 'a\tb', 'a\nb', 'a\rb', null]), 'back\\\\slash\ta\\tb\ta\\nb\ta\\rb\t\\N\n');
+  const calls = [];
+  const records = (async function* () {
+    yield { entity: 'user', records: [
+      { id: 'u1', email: 'a@example.test', displayName: 'A', createdAt: '2020-01-01', updatedAt: '2020-01-02' },
+      { id: 'u2', email: 'b@example.test', displayName: null, createdAt: '2020-01-01', updatedAt: '2020-01-02' },
+    ] };
+  }());
+  await copyDataset({
+    batches: records, maxBatchSize: 2,
+    copy: async ({ table, columns, data }) => calls.push({ table, columns, data }),
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].table, 'users');
+  assert.match(calls[0].data, /\\N/);
+  await assert.rejects(() => copyDataset({ batches: (async function* () { yield { entity: 'user', records: [{}, {}, {}] }; }()), maxBatchSize: 2, copy: async () => {} }), /batch exceeds/);
+  await assert.rejects(() => copyDataset({ batches: (async function* () { yield { entity: 'intruder', records: [{}] }; }()), copy: async () => {} }), /unsupported entity/);
+
+  const { DATASET_COUNTS } = await import('../benchmark-sets/realworld-api-v3/shared/lib/dataset.mjs');
+  const exact = Object.entries(DATASET_COUNTS).map(([table, count]) => ({ table, count: String(count) }));
+  await verifyExactCounts(async (_sql, values) => { assert.deepEqual(values, []); return exact; });
+  await assert.rejects(verifyExactCounts(async () => exact.map((row, index) => index ? row : { ...row, count: String(Number(row.count) - 1) })), /organizations.*expected/i);
+  await assert.rejects(verifyExactCounts(async () => exact.map((row, index) => index ? row : { ...row, count: String(Number(row.count) + 1) })), /organizations.*expected/i);
+  await assert.rejects(verifyExactCounts(async () => exact.slice(1)), /organizations.*missing/i);
+  await assert.rejects(verifyExactCounts(async () => [...exact, { table: 'intruder', count: '0' }]), /unexpected table/i);
+});
+
 test('administrative dispatch invokes exactly the requested platform handler', async () => {
   const { dispatchAdmin } = await import('../benchmark-sets/realworld-api-v3/shared/lib/admin.mjs');
   const calls = [];
