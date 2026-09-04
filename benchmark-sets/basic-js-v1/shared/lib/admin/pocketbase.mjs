@@ -129,10 +129,14 @@ export function createPocketBaseAdmin({ PocketBase, run = runCommand, root, runt
     }
   }
 
-  async function readBaseline(expectedWrites = 0) {
+  async function readBaseline(expectedWrites) {
     const counts = await runSql(`SELECT count(*), count(fixture_key), sum(CASE WHEN fixture_key IS NULL THEN 1 ELSE 0 END) FROM "${collection}"`);
     const countRow = counts.rows?.[0];
-    if (!countRow || Number(countRow[0]) !== 10_000 + expectedWrites || Number(countRow[1]) !== 10_000 || Number(countRow[2]) !== expectedWrites) {
+    const total = Number(countRow?.[0]);
+    const baseline = Number(countRow?.[1]);
+    const writes = Number(countRow?.[2]);
+    if (!Number.isInteger(total) || baseline !== 10_000 || writes !== total - 10_000 ||
+        (expectedWrites !== undefined && writes !== expectedWrites)) {
       throw new Error('PocketBase baseline counts are invalid');
     }
 
@@ -207,7 +211,7 @@ export function createPocketBaseAdmin({ PocketBase, run = runCommand, root, runt
     await (await connect()).collections.create(definition);
     await verifySchema();
     await insertFixtures();
-    const ids = await readBaseline();
+    const ids = await readBaseline(0);
     await saveJson(idsPath, ids);
   }
 
@@ -232,7 +236,7 @@ export function createPocketBaseAdmin({ PocketBase, run = runCommand, root, runt
 
     async reset() {
       await runSql(`DELETE FROM "${collection}" WHERE fixture_key IS NULL`);
-      await readBaseline();
+      await readBaseline(0);
     },
 
     teardown,

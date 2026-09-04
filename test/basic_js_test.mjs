@@ -1010,6 +1010,7 @@ test('PocketBase admin provisions current fields, chunked SQL, exact state, and 
   const collectionCalls = [];
   let definition;
   let collectionExists = false;
+  let measuredRows = 0;
   const credentials = { email: 'basic-js-v1@localhost.invalid', password: 'not-logged-secret' };
   const baselinePage = (offset) => Array.from({ length: 1000 }, (_, index) => {
     const expected = fixture(offset + index + 1);
@@ -1046,7 +1047,7 @@ test('PocketBase admin provisions current fields, chunked SQL, exact state, and 
             const expected = writeRecord({ trial: 1, load: 1, vu: 0, sequence: 0 });
             return { rows: [[expected.author, expected.message, new Date().toISOString(), null]] };
           }
-          if (/SELECT count\(\*\),/.test(query)) return { rows: [['10000', '10000', '0']] };
+          if (/SELECT count\(\*\),/.test(query)) return { rows: [[String(10_000 + measuredRows), '10000', String(measuredRows)]] };
           return { rows: [] };
         },
       };
@@ -1084,6 +1085,9 @@ test('PocketBase admin provisions current fields, chunked SQL, exact state, and 
     }) });
     await admin.verifyReadiness({ operation: 'write', result: { id: 'created-id' }, trial: 1, load: 1, vu: 0, sequence: 0 });
     await admin.cleanupReadiness({ result: { id: 'created-id' } });
+    measuredRows = 5;
+    await admin.verify();
+    measuredRows = 0;
     await admin.verifyStage({ operation: 'list', stage: { completed: 3 } });
     await admin.reset();
     await admin.teardown();
@@ -1241,6 +1245,7 @@ test('TrailBase admin preserves config and supports setup, teardown, then setup 
   let pendingDrop = false;
   let migrationRecorded = false;
   let fallbackCreates = 0;
+  let measuredTrailBaseRows = 0;
   let migrationFile;
   const commands = [];
   const adminQueries = [];
@@ -1256,7 +1261,7 @@ test('TrailBase admin preserves config and supports setup, teardown, then setup 
     if (/FROM "_schema_history"/.test(query)) return { rows: [[wrap(migrationRecorded ? 1 : 0)]] };
     if (/FROM sqlite_schema WHERE type = 'table'/.test(query)) return { rows: tableExists ? [[wrap(1)]] : [] };
     if (/SELECT fixture_key, id, author, message, created_at/.test(query)) return { rows: baselineRows() };
-    if (/SELECT count\(\*\), count\(fixture_key\)/.test(query)) return { rows: [[wrap(10000), wrap(10000), wrap(0)]] };
+    if (/SELECT count\(\*\), count\(fixture_key\)/.test(query)) return { rows: [[wrap(10_000 + measuredTrailBaseRows), wrap(10_000), wrap(measuredTrailBaseRows)]] };
     if (/SELECT count\(\*\) FROM "bb_basic_js_v1_guestbook" WHERE fixture_key IS NULL/.test(query)) return { rows: [[wrap(0)]] };
     if (/SELECT sql FROM sqlite_schema/.test(query)) return { rows: [[wrap(migrationSql)], [wrap('CREATE INDEX idx_bb_guestbook_created_at ON bb_basic_js_v1_guestbook (created_at DESC)')]] };
     if (/^CREATE TABLE/m.test(query)) { tableExists = true; fallbackCreates += 1; }
@@ -1281,6 +1286,9 @@ test('TrailBase admin preserves config and supports setup, teardown, then setup 
       assert.equal(name, 'bb_basic_js_v1_guestbook');
       return {
         async list() {
+          if (measuredTrailBaseRows > 0) {
+            return { records: Array.from({ length: 20 }, (_, index) => ({ id: 20 - index, author: 'bench-vu-1', message: `measured-${index}`, created_at: new Date().toISOString() })) };
+          }
           return { records: Array.from({ length: 20 }, (_, index) => {
             const { fixture_key: _fixtureKey, ...record } = fixture(10000 - index);
             return { ...record, id: 10000 - index };
@@ -1334,6 +1342,9 @@ test('TrailBase admin preserves config and supports setup, teardown, then setup 
     assert.ok(migrationWrite);
     assert.match(migrationWrite.args[7], /set -C/);
     assert.ok(adminQueries.some((query) => query.startsWith('INSERT INTO "bb_basic_js_v1_guestbook"')));
+    measuredTrailBaseRows = 20;
+    await admin.verify({ operation: 'write' });
+    measuredTrailBaseRows = 0;
     await admin.teardown();
     assert.equal(config, unrelatedConfig);
     assert.equal(tableExists, false);

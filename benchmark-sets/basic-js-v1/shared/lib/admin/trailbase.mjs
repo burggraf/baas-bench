@@ -311,14 +311,15 @@ export function createTrailBaseAdmin({
     });
   }
 
-  async function verify({ allowWrites = false } = {}) {
+  async function verify({ allowWrites, operation } = {}) {
+    const permitMeasuredWrites = allowWrites ?? operation === 'write';
     await verifySchema();
     const counts = await query(`SELECT count(*), count(fixture_key), sum(CASE WHEN fixture_key IS NULL THEN 1 ELSE 0 END) FROM "${apiName}"`);
     if (counts.length !== 1 || counts[0][1] !== 10_000 || counts[0][0] < 10_000 || counts[0][2] !== counts[0][0] - 10_000) {
       throw new Error('TrailBase benchmark row counts are invalid');
     }
     const ids = await readBaseline();
-    await verifyRecordApi(ids, allowWrites);
+    await verifyRecordApi(ids, permitMeasuredWrites);
     return true;
   }
 
