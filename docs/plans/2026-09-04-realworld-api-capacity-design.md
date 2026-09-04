@@ -153,7 +153,7 @@ Implementation is test-driven:
 1. Dependency-light fake-adapter tests cover deterministic counts, workflow selection, think time, timing, SLO selection, adaptive refinement, and failure preservation.
 2. Shell contract tests exercise all case hooks with fake `docker`, `bin/baas`, SDK/admin commands, and clocks; tests never start real stacks.
 3. Adapter mapping tests cover response normalization, authorization behavior, and material platform deviations.
-4. Neon environment tests verify that the repository-owned image build compiles the official pinned proxy with Cargo feature `testing`, receives immutable source/build/runtime inputs, and that smoke/readiness checks use SQL over HTTP. These regression tests use fake commands and do not run Docker.
+4. Neon environment tests verify that the repository-owned Dockerfile configures the official pinned proxy Cargo build with feature `testing`, that Compose resolves immutable source/build/runtime inputs, and that smoke/readiness checks use SQL over HTTP. These regression tests inspect configuration with fake commands; they do not compile the proxy or run Docker.
 5. All eight cases pass `bin/bench validate all` and the repository-required syntax, regression, and whitespace checks.
 
 Real-stack diagnostics are explicitly separate and cannot be described as publishable comparison evidence.

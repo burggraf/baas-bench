@@ -24,7 +24,9 @@ trailbase'
 actual=$($BAAS list) || fail "list command failed"
 [ "$actual" = "$expected" ] || fail "unexpected service list"
 grep -q '^NHOST_TRAEFIK_IMAGE=traefik:v3\.6\.1@sha256:' "$ROOT/versions.env" || fail "Nhost Traefik compatibility image is not pinned"
-grep -q '^NEON_BUILD_TOOLS_IMAGE=ghcr.io/neondatabase/build-tools:pinned@sha256:' "$ROOT/versions.env" || fail "Neon proxy build tools image is not pinned"
+grep -Eq '^NEON_BUILD_TOOLS_IMAGE=ghcr\.io/neondatabase/build-tools:pinned@sha256:[0-9a-f]{64}$' "$ROOT/versions.env" || fail "Neon proxy build tools image is not fully pinned"
+grep -Eq '^NEON_IMAGE=[^[:space:]@]+@sha256:[0-9a-f]{64}$' "$ROOT/versions.env" || fail "Neon proxy runtime image is not fully pinned"
+grep -Eq '^NEON_REF=[0-9a-f]{40}$' "$ROOT/versions.env" || fail "Neon source ref is not an immutable commit"
 grep -q 'ADMIN_EMAIL: admin@example.com' "$ROOT/services/directus/compose.yml" || fail "Directus bootstrap email is invalid"
 
 if "$BAAS" setup unknown >/dev/null 2>&1; then
@@ -39,6 +41,27 @@ if [ -n "${NEON_SOURCE_DIR:-}" ] || [ -n "${NEON_PROXY_DOCKERFILE:-}" ]; then
   echo "neon-build-inputs source=${NEON_SOURCE_DIR:-} dockerfile=${NEON_PROXY_DOCKERFILE:-}" >> "$BAAS_TEST_LOG"
 fi
 case "$*" in *' exec '*) printf '%s\n' 1;; esac
+compose_env_files=
+neon_overlay=false
+compose_config=false
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --env-file) compose_env_files="$compose_env_files $2"; shift 2 ;;
+    */services/neon/proxy.yml) neon_overlay=true; shift ;;
+    config) compose_config=true; shift ;;
+    *) shift ;;
+  esac
+done
+if [ "$neon_overlay" = true ] && [ "$compose_config" = true ]; then
+  (
+    set -a
+    for compose_env_file in $compose_env_files; do
+      # Test fixtures contain shell-compatible Compose environment assignments.
+      . "$compose_env_file"
+    done
+    printf '%s\n' "neon-resolved-build-args build_tools=$NEON_BUILD_TOOLS_IMAGE runtime=${REPOSITORY:-ghcr.io/neondatabase}/neon:$NEON_IMAGE ref=$NEON_REF" >> "$BAAS_TEST_LOG"
+  )
+fi
 exit 0
 EOF
 cat > "$TMP/bin/curl" <<'EOF'
@@ -133,6 +156,7 @@ printf '%s\n' 'services: {}' > "$BAAS_RUNTIME_DIR/neon/docker-compose/docker-com
 neon_compose="$BAAS_RUNTIME_DIR/neon/docker-compose/docker-compose.yml"
 grep -q "docker compose .* -f $neon_compose -f $ROOT/services/neon/proxy.yml config --quiet" "$BAAS_TEST_LOG" || fail "Neon proxy overlay missing from Compose command"
 grep -q "^neon-build-inputs source=$BAAS_RUNTIME_DIR/neon dockerfile=$ROOT/services/neon/proxy.Dockerfile$" "$BAAS_TEST_LOG" || fail "Neon Compose did not receive repository-owned source and Dockerfile inputs"
+grep -Fqx "neon-resolved-build-args build_tools=$NEON_BUILD_TOOLS_IMAGE runtime=ghcr.io/neondatabase/neon:$NEON_IMAGE ref=$NEON_REF" "$BAAS_TEST_LOG" || fail "Neon Compose did not resolve the pinned build arguments"
 [ "$(grep -c '^openssl req ' "$BAAS_TEST_LOG")" -eq 1 ] || fail "Neon TLS certificate was not generated exactly once"
 grep -q '^openssl req .*subjectAltName=DNS:localhost' "$BAAS_TEST_LOG" || fail "Neon TLS certificate is missing localhost SAN"
 [ "$(ls -ld "$BAAS_RUNTIME_DIR/neon/proxy-certs" | cut -c2-10)" = 'rwx------' ] || fail "Neon TLS directory is not private"
@@ -152,9 +176,8 @@ grep -q 'dockerfile: ${NEON_PROXY_DOCKERFILE}' "$ROOT/services/neon/proxy.yml" |
 grep -q 'NEON_BUILD_TOOLS_IMAGE: ${NEON_BUILD_TOOLS_IMAGE}' "$ROOT/services/neon/proxy.yml" || fail "Neon proxy build does not receive pinned official build tools"
 grep -q 'NEON_RUNTIME_IMAGE: ${REPOSITORY:-ghcr.io/neondatabase}/neon:${NEON_IMAGE}' "$ROOT/services/neon/proxy.yml" || fail "Neon proxy build does not receive the pinned official runtime"
 grep -q 'NEON_REF: ${NEON_REF}' "$ROOT/services/neon/proxy.yml" || fail "Neon proxy build does not identify the pinned source"
-grep -q '^NEON_BUILD_TOOLS_IMAGE=ghcr.io/neondatabase/build-tools:pinned@sha256:' "$ROOT/versions.env" || fail "Neon proxy build tools image is not fully pinned"
 grep -q '^FROM ${NEON_BUILD_TOOLS_IMAGE} AS build$' "$ROOT/services/neon/proxy.Dockerfile" || fail "Neon proxy Dockerfile does not use the pinned build image input"
-grep -q 'cargo build --locked --release --package proxy --bin proxy --features testing' "$ROOT/services/neon/proxy.Dockerfile" || fail "Neon proxy Dockerfile does not compile the official proxy with the testing feature"
+grep -q '^RUN cargo build --locked --release --package proxy --bin proxy --features testing$' "$ROOT/services/neon/proxy.Dockerfile" || fail "Neon proxy Dockerfile does not configure the official proxy build with the testing feature"
 grep -q '^FROM ${NEON_RUNTIME_IMAGE}$' "$ROOT/services/neon/proxy.Dockerfile" || fail "Neon proxy Dockerfile does not use the pinned official runtime input"
 [ "$(grep -c '^COPY --from=build ' "$ROOT/services/neon/proxy.Dockerfile")" -eq 1 ] || fail "Neon proxy runtime must copy only one build artifact"
 grep -q '/target/release/proxy /usr/local/bin/proxy$' "$ROOT/services/neon/proxy.Dockerfile" || fail "Neon proxy runtime does not copy the compiled official binary"
