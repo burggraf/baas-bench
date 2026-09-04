@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "status": "complete",
+  "debug": false,
+  "dirty": false,
+  "run_id": "20260904T164738Z-basic-js-v2-read-item-throughput-nhost-direct-postgres-70337",
+  "set": "basic-js-v2",
+  "benchmark": "read-item-throughput",
+  "platform": "nhost",
+  "variant": "direct-postgres",
+  "commit": "90007aeab3c5fd338fac665b3f6d0efba546a02a",
+  "started_at": "2026-09-04T16:47:38Z",
+  "finished_at": "2026-09-04T16:53:48Z",
+  "arguments": [
+    "run",
+    "basic-js-v2",
+    "read-item-throughput",
+    "nhost",
+    "direct-postgres"
+  ],
+  "definitions_sha256": "061d4cf8061ff4745ba07c8e04a71087532e75230ca47c204c197832a50364d2",
+  "warmup_trials": 1,
+  "measured_trials": 3,
+  "lifecycle": {
+    "start": "complete",
+    "setup": "complete",
+    "teardown": "complete",
+    "stop": "complete"
+  }
+}

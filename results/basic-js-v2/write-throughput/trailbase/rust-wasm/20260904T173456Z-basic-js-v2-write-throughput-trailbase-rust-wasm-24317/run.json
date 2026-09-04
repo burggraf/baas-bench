@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "status": "complete",
+  "debug": false,
+  "dirty": false,
+  "run_id": "20260904T173456Z-basic-js-v2-write-throughput-trailbase-rust-wasm-24317",
+  "set": "basic-js-v2",
+  "benchmark": "write-throughput",
+  "platform": "trailbase",
+  "variant": "rust-wasm",
+  "commit": "90007aeab3c5fd338fac665b3f6d0efba546a02a",
+  "started_at": "2026-09-04T17:34:56Z",
+  "finished_at": "2026-09-04T17:39:26Z",
+  "arguments": [
+    "run",
+    "basic-js-v2",
+    "write-throughput",
+    "trailbase",
+    "rust-wasm"
+  ],
+  "definitions_sha256": "b88e259a5f7328809fa10dfae076eb68315667b2772ee0facbce7c9369734daa",
+  "warmup_trials": 1,
+  "measured_trials": 3,
+  "lifecycle": {
+    "start": "complete",
+    "setup": "complete",
+    "teardown": "complete",
+    "stop": "complete"
+  }
+}

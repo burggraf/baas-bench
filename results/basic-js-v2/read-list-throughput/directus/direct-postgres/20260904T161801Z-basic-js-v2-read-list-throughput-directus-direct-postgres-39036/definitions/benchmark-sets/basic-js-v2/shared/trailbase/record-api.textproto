@@ -1,0 +1,9 @@
+# baas-bench basic-js-v2 begin
+record_apis: [{
+  name: "bb_basic_js_v2_guestbook"
+  table_name: "bb_basic_js_v2_guestbook"
+  acl_world: [READ, CREATE]
+  excluded_columns: ["fixture_key"]
+  create_access_rule: "_REQ_.created_at IS NULL"
+}]
+# baas-bench basic-js-v2 end
