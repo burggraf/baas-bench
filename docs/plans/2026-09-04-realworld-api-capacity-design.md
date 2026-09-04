@@ -22,7 +22,7 @@ The benchmark has one case per platform:
 - TrailBase through its official JavaScript SDK;
 - Neon through `@neondatabase/serverless` and Neon's official SQL-over-HTTP proxy.
 
-The first seven cases use native platform authentication and authorization. Neon's pinned upstream image contains the official proxy binary, which accepts SQL at `/sql`; the repository will add it to the prepared Compose topology and configure the driver through `neonConfig.fetchEndpoint`. The proxy is an HTTP SQL transport, not a complete BaaS data/auth API. Neon therefore uses app-owned PostgreSQL authentication and tenant-authorization functions. Its case metadata, README, methodology, and result report must identify this material deviation and must not present the access paths as strictly apples-to-apples. The optional Neon REST broker is excluded because its upstream development setup requires replacing a stub dependency and external authentication-provider configuration rather than providing a reproducible turnkey self-hosted service.
+The first seven cases use native platform authentication and authorization. Neon's PostgreSQL auth backend is gated behind the official proxy crate's `testing` Cargo feature and is unavailable in the pinned default runtime binary. The repository will therefore build only the proxy package and binary from the immutable `NEON_REF` checkout with `--features testing`, using an immutable official Neon build-tools image, and copy that binary into the pinned official `NEON_IMAGE` runtime base. A repository-owned Compose overlay adds this image to the prepared topology and configures the driver through `neonConfig.fetchEndpoint`. The proxy is an HTTP SQL transport, not a complete BaaS data/auth API. Neon therefore uses app-owned PostgreSQL authentication and tenant-authorization functions. Its case metadata, README, methodology, and result report must identify this material deviation and must not present the access paths as strictly apples-to-apples. The optional Neon REST broker is excluded because its upstream development setup requires replacing a stub dependency and external authentication-provider configuration rather than providing a reproducible turnkey self-hosted service.
 
 ## Architecture
 
@@ -153,7 +153,7 @@ Implementation is test-driven:
 1. Dependency-light fake-adapter tests cover deterministic counts, workflow selection, think time, timing, SLO selection, adaptive refinement, and failure preservation.
 2. Shell contract tests exercise all case hooks with fake `docker`, `bin/baas`, SDK/admin commands, and clocks; tests never start real stacks.
 3. Adapter mapping tests cover response normalization, authorization behavior, and material platform deviations.
-4. Neon environment tests verify that the generated Compose topology includes the pinned official proxy and that smoke/readiness checks use SQL over HTTP.
+4. Neon environment tests verify that the repository-owned image build compiles the official pinned proxy with Cargo feature `testing`, receives immutable source/build/runtime inputs, and that smoke/readiness checks use SQL over HTTP. These regression tests use fake commands and do not run Docker.
 5. All eight cases pass `bin/bench validate all` and the repository-required syntax, regression, and whitespace checks.
 
 Real-stack diagnostics are explicitly separate and cannot be described as publishable comparison evidence.

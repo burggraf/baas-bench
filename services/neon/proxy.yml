@@ -1,11 +1,12 @@
 services:
   proxy:
     build:
-      context: ..
-      dockerfile: Dockerfile
+      context: ${NEON_SOURCE_DIR}
+      dockerfile: ${NEON_PROXY_DOCKERFILE}
       args:
-        TAG: ${NEON_BUILD_TOOLS_TAG}
-        GIT_VERSION: ${NEON_REF}
+        NEON_BUILD_TOOLS_IMAGE: ${NEON_BUILD_TOOLS_IMAGE}
+        NEON_RUNTIME_IMAGE: ${REPOSITORY:-ghcr.io/neondatabase}/neon:${NEON_IMAGE}
+        NEON_REF: ${NEON_REF}
     image: baas-neon-proxy:${NEON_REF}
     command:
       - proxy

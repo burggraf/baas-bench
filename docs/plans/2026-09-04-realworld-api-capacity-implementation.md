@@ -313,38 +313,45 @@ git commit -m "Add adaptive capacity run orchestration"
 ### Task 7: Add Neon's official SQL-over-HTTP proxy to the environment
 
 **Files:**
+- Create: `services/neon/proxy.Dockerfile`
 - Create: `services/neon/proxy.yml`
+- Modify: `versions.env`
 - Modify: `bin/baas`
 - Modify: `test/baas_test.sh`
+- Modify: the approved design and implementation documents
+
+**Approved revision:** Upstream verification established that `--auth-backend=postgres` is cfg-gated behind the official proxy crate's Cargo feature `testing`; the proxy binary in the pinned default `NEON_IMAGE` cannot run this mode. Build the official source at immutable `NEON_REF` instead of requiring an unchanged `NEON_IMAGE` binary. Use a digest-pinned official Neon build-tools image and use the pinned official `NEON_IMAGE` as the final runtime base.
 
 **Step 1: Write failing shell regression coverage**
 
-Extend fake commands to assert:
+Extend fake-command coverage (without invoking Docker) to assert:
 
 - Neon Compose commands include both upstream `docker-compose.yml` and `services/neon/proxy.yml`;
+- Compose receives the pinned checkout path, repository-owned Dockerfile, full build-tools image pin, `NEON_REF`, and pinned runtime image;
+- the Dockerfile builds `--package proxy --bin proxy --features testing` and copies only that binary into the runtime image;
 - setup generates a private localhost TLS key/certificate under `.runtime/neon/proxy-certs` only when absent;
-- the overlay uses `${NEON_IMAGE}`, the upstream `proxy` binary, `--auth-backend=postgres`, compute service endpoint, and port `127.0.0.1:4444:4444`;
+- the proxy uses `--auth-backend=postgres`, the compute service endpoint, and port `127.0.0.1:4444:4444`;
 - Neon smoke sends `POST /sql` with `Neon-Connection-String` and the generated CA certificate.
 
 **Step 2: Verify failure**
 
 Run: `sh test/baas_test.sh`  
-Expected: FAIL because no proxy overlay is used.
+Expected: FAIL because the source/build inputs and repository-owned Dockerfile are absent.
 
-**Step 3: Implement the overlay and minimal Compose special case**
+**Step 3: Implement the minimum source build and Compose special case**
 
-Add one `proxy` service using the already pinned `${NEON_IMAGE}`. Mount the generated certificate/key read-only, depend on `compute_is_ready`, and run the documented official proxy command. In `run_compose`, append the second `-f` only for Neon. Generate a SAN certificate for `localhost` with `openssl`; do not disable TLS verification. Change Neon smoke from direct `psql` to a minimal `SELECT 1` HTTP request.
+Ensure setup materializes the complete official checkout at `NEON_REF`. Add a small multi-stage `proxy.Dockerfile`: compile only the official proxy package/bin with `cargo build --locked --release --features testing` in the pinned official build-tools image, then copy only the resulting binary into the pinned `NEON_IMAGE` runtime base. Do not patch or duplicate Neon's full Dockerfile. Pass the checkout and repository Dockerfile paths to Compose only for Neon. Retain the readonly TLS mounts, `compute_is_ready` dependency, PostgreSQL auth command, and localhost-only port. Generate a SAN certificate for `localhost` with `openssl`; do not disable TLS verification. Keep the `SELECT 1` SQL-over-HTTPS smoke request.
 
 **Step 4: Run shell tests**
 
-Run: `sh -n bin/baas test/baas_test.sh && sh test/baas_test.sh`  
+Run: `sh -n bin/baas test/baas_test.sh && sh test/baas_test.sh && git diff --check`
 Expected: PASS without starting Docker.
 
 **Step 5: Commit**
 
 ```sh
-git add services/neon/proxy.yml bin/baas test/baas_test.sh
-git commit -m "Expose Neon SQL through official HTTP proxy"
+git add services/neon/proxy.Dockerfile services/neon/proxy.yml versions.env bin/baas test/baas_test.sh docs/plans/2026-09-04-realworld-api-capacity-design.md docs/plans/2026-09-04-realworld-api-capacity-implementation.md
+git commit -m "Build pinned Neon proxy with PostgreSQL auth"
 ```
 
 ### Task 8: Implement the shared PostgreSQL schema helper

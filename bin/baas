@@ -86,16 +86,10 @@ setup_supabase() {
 }
 
 setup_neon() {
-  if [ -f "$RUNTIME/neon/.baas-ref" ] && [ ! -f "$RUNTIME/neon/Dockerfile" ]; then
+  if [ -f "$RUNTIME/neon/.baas-ref" ] && [ ! -f "$RUNTIME/neon/proxy/Cargo.toml" ]; then
     rm -f "$RUNTIME/neon/.baas-ref"
   fi
   sparse_checkout neon neondatabase/neon "$NEON_REF" .
-  sed -i.baas 's/^ENV CARGO_FEATURES="default"$/ENV CARGO_FEATURES="default,testing"/' "$RUNTIME/neon/Dockerfile"
-  rm -f "$RUNTIME/neon/Dockerfile.baas"
-  grep -q '^ENV CARGO_FEATURES="default,testing"$' "$RUNTIME/neon/Dockerfile" || {
-    echo "failed to enable the Neon proxy testing feature" >&2
-    exit 1
-  }
   dir="$RUNTIME/neon/docker-compose"
   file="$dir/.env"
   if [ ! -f "$file" ]; then
@@ -254,8 +248,9 @@ run_compose() {
   dir=$(compose_dir "$service")
   env=$(compose_env "$service")
   if [ "$service" = neon ]; then
-    docker compose -p "baas-$service" --project-directory "$dir" --env-file "$ROOT/versions.env" --env-file "$env" \
-      -f "$(compose_path "$service")" -f "$ROOT/services/neon/proxy.yml" "$@"
+    NEON_SOURCE_DIR="$RUNTIME/neon" NEON_PROXY_DOCKERFILE="$ROOT/services/neon/proxy.Dockerfile" \
+      docker compose -p "baas-$service" --project-directory "$dir" --env-file "$ROOT/versions.env" --env-file "$env" \
+        -f "$(compose_path "$service")" -f "$ROOT/services/neon/proxy.yml" "$@"
   elif [ -f "$env" ]; then
     docker compose -p "baas-$service" --project-directory "$dir" --env-file "$ROOT/versions.env" --env-file "$env" -f "$(compose_path "$service")" "$@"
   else
