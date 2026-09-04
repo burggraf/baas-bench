@@ -89,7 +89,7 @@ export function createDirectusAdmin({ sdk, endpoint = 'http://127.0.0.1:8055', r
       throw new Error('Directus basic permission rules are invalid');
     }
   }
-  async function rows() { return request(sdk.readItems(collection, { fields: [...logicalFields, 'fixture_key'], sort: ['fixture_key'], limit: -1 }), 'row verification'); }
+  async function rows() { return request(sdk.readItems(collection, { fields: [...logicalFields, 'fixture_key'], filter: { fixture_key: { _nnull: true } }, sort: ['fixture_key'], limit: -1 }), 'row verification'); }
   async function databaseValue(sql) {
     const result = await run(join(root, 'bin/baas'), [
       'compose', 'directus', 'exec', '-T', 'database', 'psql', '-U', 'directus', '-d', 'directus',

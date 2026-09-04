@@ -24,6 +24,7 @@ test('database-path cases cover supported direct and extension topologies', asyn
   assert.match(readFileSync(new URL('../../bin/baas', setRoot), 'utf8'), /127\.0\.0\.1:15432:5432/);
   const directusAdmin = readFileSync(new URL('shared/lib/admin/directus.mjs', setRoot), 'utf8');
   assert.match(directusAdmin, /ALTER TABLE.*created_at.*SET DEFAULT now\(\)/s);
+  assert.match(directusAdmin, /filter: \{ fixture_key: \{ _nnull: true \} \}/);
   const wasm = readFileSync(new URL('shared/wasm-rust/src/lib.rs', setRoot), 'utf8');
   const trailbaseAdmin = readFileSync(new URL('shared/lib/admin/trailbase.mjs', setRoot), 'utf8');
   assert.match(trailbaseAdmin, /async function removeDeploymentArtifacts/);
