@@ -51,6 +51,7 @@ export function createDirectusAdmin({ sdk, endpoint = 'http://127.0.0.1:8055', r
       { field: 'fixture_key', type: 'integer', meta: { hidden: true }, schema: { is_nullable: true, is_unique: true, is_indexed: true } },
     ];
     await request(sdk.createCollection({ collection, schema: {}, fields: definitions, meta: { icon: 'book' } }), 'collection creation');
+    await databaseValue(`ALTER TABLE "${collection}" ALTER COLUMN created_at SET DEFAULT now()`);
     const access = await publicAccess('public policy lookup');
     if (!Array.isArray(access) || access.length !== 1 || !access[0]?.policy) throw new Error('Directus public policy discovery was not unique');
     const policy = access[0].policy;
@@ -112,6 +113,8 @@ export function createDirectusAdmin({ sdk, endpoint = 'http://127.0.0.1:8055', r
     const fields = await request(sdk.readFieldsByCollection(collection), 'field verification');
     const byName = Object.fromEntries(fields.map((field) => [field.field, field]));
     if (!byName.created_at?.schema?.is_indexed || !byName.fixture_key?.schema?.is_unique || !byName.fixture_key?.schema?.is_indexed) throw new Error('Directus indexes or unique fixture key are invalid');
+    const createdDefault = await databaseValue(`SELECT column_default FROM information_schema.columns WHERE table_schema = 'public' AND table_name = '${collection}' AND column_name = 'created_at'`);
+    if (createdDefault !== 'now()') throw new Error('Directus created_at database default is invalid');
     return true;
   }
   async function reset() {
