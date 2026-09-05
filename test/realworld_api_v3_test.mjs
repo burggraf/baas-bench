@@ -886,6 +886,29 @@ test('PocketBase migration and admin expose collection lifecycle', async () => {
   assert.match(migration, /organizations|tasks|comments|activities/);
 });
 
+test('TrailBase adapter uses the official record client with isolated auth sessions', async () => {
+  const { createTrailBaseAdapter } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/trailbase.mjs');
+  const calls = [];
+  const client = { auth: { async login(value) { calls.push(['login', value]); return { user: { id: 'usr' }, token: 'token' }; }, async refresh() {}, async logout() { calls.push(['logout']); } }, records(name) { return { async list(options) { calls.push(['list', name, options]); return { records: [], totalCount: 0 }; }, async read(id) { calls.push(['read', name, id]); return { id, organization_id: 'org', project_id: 'prj', creator_id: 'usr', title: 't', description: 'd', status: 'todo', priority: 'low', created_at: '2025-01-01', updated_at: '2025-01-01' }; }, async create(data) { calls.push(['create', name, data]); return { id: 'new', ...data }; }, async update(id, data) { return { id, ...data }; } }; } };
+  const adapter = createTrailBaseAdapter({ initClient: () => client, client });
+  const session = await adapter.createSession({ email: 'u@example.test', password: 'pw' });
+  assert.equal((await session.getProfile()).id, 'usr');
+  await session.listTasks({ organizationId: 'org', projectId: 'prj', page: 0, pageSize: 10 });
+  assert.ok(calls.some(call => call[0] === 'login'));
+  assert.ok(calls.some(call => call[0] === 'list' && call[2].pagination.limit === 10));
+  await session.close();
+});
+
+test('TrailBase migration, config, and admin expose record APIs', async () => {
+  const { createTrailBaseAdmin } = await import('../benchmark-sets/realworld-api-v3/shared/lib/admin/trailbase.mjs');
+  const { readFileSync } = await import('node:fs');
+  const migration = readFileSync(new URL('../benchmark-sets/realworld-api-v3/shared/trailbase/migration.sql', import.meta.url), 'utf8');
+  const config = readFileSync(new URL('../benchmark-sets/realworld-api-v3/shared/trailbase/config.textproto', import.meta.url), 'utf8');
+  assert.equal(typeof createTrailBaseAdmin, 'function');
+  assert.match(migration, /organizations|tasks|comments|activities/);
+  assert.match(config, /record_apis/);
+});
+
 test('administrative dispatch invokes exactly the requested platform handler', async () => {
   const { dispatchAdmin } = await import('../benchmark-sets/realworld-api-v3/shared/lib/admin.mjs');
   const calls = [];
