@@ -712,6 +712,56 @@ test('postgres admin parameterized administrative transports preserve SQL, value
   ]) await assert.rejects(invoke, error => error === failure);
 });
 
+test('Neon adapter uses SQL-over-HTTP transactions for authenticated tenant operations', async () => {
+  const { createNeonAdapter } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/neon.mjs');
+  const calls = [];
+  const sql = (strings, ...values) => ({ text: strings.reduce((out, part, index) => out + part + (index < values.length ? `$${index + 1}` : ''), ''), values });
+  sql.query = async (text, values, options) => {
+    calls.push({ type: 'query', text, values, options });
+    if (/sign_in/i.test(text)) return [{ token: 'neon-session-token-123456' }];
+    if (/validate_session/i.test(text)) return [{ user_id: 'usrv3' }];
+    return [];
+  };
+  sql.transaction = async (queries, options) => {
+    calls.push({ type: 'transaction', queries, options });
+    const data = queries[1];
+    if (/from public\.users/i.test(data.text)) return [[{ user_id: 'usrv3' }], [{ id: 'usrv3', email: 'user@example.test', display_name: 'User', created_at: '2025-01-01', updated_at: '2025-01-01' }]];
+    return [[{ user_id: 'usrv3' }], []];
+  };
+  const backend = createNeonAdapter({ sql, timeoutMs: 1000 });
+  const session = await backend.createSession({ email: 'user@example.test', password: 'secret' });
+  assert.equal(backend.accessPath, 'sql-over-http');
+  assert.equal((await session.getProfile()).id, 'usrv3');
+  assert.ok(calls.some(call => call.type === 'transaction' && /validate_session/.test(call.queries[0].text)));
+  assert.deepEqual(calls.find(call => call.type === 'query').values, ['user@example.test', 'secret']);
+  await session.signOut();
+});
+
+test('Neon adapter exposes the complete session workflow contract and parameterizes input', async () => {
+  const { createNeonAdapter } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/neon.mjs');
+  const sql = (strings, ...values) => ({ text: strings.join('?'), values });
+  sql.query = async text => /sign_in/i.test(text) ? [{ token: 'neon-session-token-123456' }] : /validate_session/i.test(text) ? [{ user_id: 'u' }] : [];
+  sql.transaction = async () => [[{ user_id: 'u' }], []];
+  const adapter = createNeonAdapter({ sql });
+  const session = await adapter.createSession({ email: "a' OR 1=1 --", password: 'p$1' });
+  for (const method of ['dashboard', 'listTasks', 'getTask', 'createTask', 'updateTask', 'addComment', 'updateComment', 'searchTasks', 'updateMembershipRole', 'updateProfile', 'getProfile', 'refreshSession', 'signOut', 'cancelPending', 'close']) assert.equal(typeof session[method], 'function', method);
+  const fixture = adapter.correctnessFixture();
+  assert.equal(fixture.member.organizationId, fixture.organizationId);
+  assert.equal(fixture.admin.organizationId, fixture.organizationId);
+});
+
+test('Neon SQL admin transport preserves parameterized requests and restrictive config', async () => {
+  const { createNeonSql, createNeonAdmin } = await import('../benchmark-sets/realworld-api-v3/shared/lib/admin/neon.mjs');
+  const calls = [];
+  const counts = [{ table: 'organizations', count: '1600' }, { table: 'users', count: '16000' }, { table: 'memberships', count: '16000' }, { table: 'projects', count: '8000' }, { table: 'tasks', count: '160000' }, { table: 'comments', count: '479200' }, { table: 'activities', count: '319200' }];
+  const sql = { query: async (text, values, options) => { calls.push({ text, values, options }); return /count\(\*\)/i.test(text) ? counts : [{ ok: true }]; } };
+  const transport = createNeonSql({ sql });
+  assert.deepEqual(await transport.query('SELECT $1', ['value']), [{ ok: true }]);
+  assert.deepEqual(calls[0].values, ['value']);
+  assert.equal(await createNeonAdmin({ sql, runtime: '/tmp/neon-v3-test' }).verify(), true);
+  assert.match(calls[1].text, /count\(\*\)/i);
+});
+
 test('administrative dispatch invokes exactly the requested platform handler', async () => {
   const { dispatchAdmin } = await import('../benchmark-sets/realworld-api-v3/shared/lib/admin.mjs');
   const calls = [];
