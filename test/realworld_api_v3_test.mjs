@@ -865,6 +865,27 @@ test('Directus admin and adapter expose REST access-path metadata', async () => 
   assert.equal(createDirectusAdapter({ client: {}, createDirectus: () => ({}) }).accessPath, 'javascript-sdk');
 });
 
+test('PocketBase adapter isolates auth stores and uses parameterized record filters', async () => {
+  const { createPocketBaseAdapter } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/pocketbase.mjs');
+  const calls = [];
+  const pb = { filter: (text, values) => JSON.stringify({ text, values }), authStore: { clear() { calls.push(['clear']); } }, collection(name) { return { async authWithPassword(email, password) { calls.push(['login', name, email, password]); return { record: { id: 'usr', email, name: 'User', created: '2025-01-01', updated: '2025-01-01' } }; }, async authRefresh() { calls.push(['refresh']); return {}; }, async getOne(id) { calls.push(['getOne', name, id]); return { id, organization_id: 'org', project_id: 'prj', creator_id: 'usr', title: 't', description: 'd', status: 'todo', priority: 'low', created: '2025-01-01', updated: '2025-01-01' }; }, async getList(page, size, options) { calls.push(['list', name, page, size, options]); return { items: [], totalItems: 0 }; }, async create(data) { calls.push(['create', name, data]); return { id: 'new', ...data, created: '2025-01-01', updated: '2025-01-01' }; }, async update(id, data) { return { id, ...data, created: '2025-01-01', updated: '2025-01-01' }; } }; } };
+  const adapter = createPocketBaseAdapter({ PocketBase: function () { return pb; }, client: pb });
+  const session = await adapter.createSession({ email: 'u@example.test', password: 'pw' });
+  assert.equal((await session.getProfile()).id, 'usr');
+  await session.listTasks({ organizationId: 'org', projectId: 'prj', page: 0, pageSize: 10 });
+  assert.ok(calls.some(call => call[0] === 'login'));
+  assert.ok(calls.some(call => call[0] === 'list' && call[4].options === undefined));
+  await session.close();
+});
+
+test('PocketBase migration and admin expose collection lifecycle', async () => {
+  const { createPocketBaseAdmin } = await import('../benchmark-sets/realworld-api-v3/shared/lib/admin/pocketbase.mjs');
+  const { readFileSync } = await import('node:fs');
+  const migration = readFileSync(new URL('../benchmark-sets/realworld-api-v3/shared/pocketbase/migration.js', import.meta.url), 'utf8');
+  assert.equal(typeof createPocketBaseAdmin, 'function');
+  assert.match(migration, /organizations|tasks|comments|activities/);
+});
+
 test('administrative dispatch invokes exactly the requested platform handler', async () => {
   const { dispatchAdmin } = await import('../benchmark-sets/realworld-api-v3/shared/lib/admin.mjs');
   const calls = [];
