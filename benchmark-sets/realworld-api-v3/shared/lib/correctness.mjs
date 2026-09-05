@@ -29,9 +29,9 @@ function safeStatus(error) {
 export function classifyOperationError(error) {
     if (error instanceof BenchmarkOperationError)
         return error.classification;
-    if (errorField(error, "status") === "401")
+    if (errorField(error, "status") === "401" || errorField(error, "code") === "401")
         return "authentication";
-    if (errorField(error, "status") === "403" || errorField(error, "status") === "404")
+    if (errorField(error, "status") === "403" || errorField(error, "status") === "404" || errorField(error, "code") === "403" || errorField(error, "code") === "404")
         return "authorization";
     if (errorField(error, "status") === "408" || errorField(error, "code") === "timeout")
         return "timeout";
@@ -217,7 +217,7 @@ export async function runCorrectness(backend, fixture) {
                 passed: false,
                 classification,
                 message: "check failed",
-                evidence: safeStatus(error) ? `status:${safeStatus(error)}` : undefined,
+                evidence: safeStatus(error) ? `status:${safeStatus(error)}` : (errorField(error, "code") ? `code:${errorField(error, "code")}` : undefined),
             });
             if (classification === "backend_health") {
                 aborted = true;
