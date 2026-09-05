@@ -190,12 +190,33 @@ test('Supabase .env key lookup parses LF and CRLF files', async () => {
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
+test('Supabase correctness fixture supplies every authenticated role and membership identity', async () => {
+  const { createSupabaseAdapter } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/supabase.mjs');
+  const fixture = createSupabaseAdapter({ client: {} }).correctnessFixture();
+  for (const role of ['owner', 'member', 'admin', 'outsider']) {
+    assert.equal(typeof fixture[role]?.email, 'string', `${role} credentials`);
+    assert.equal(typeof fixture[role]?.password, 'string', `${role} password`);
+  }
+  for (const key of ['memberMembershipId', 'adminMembershipId', 'ownerMembershipId', 'memberUserId']) assert.match(fixture[key], /^memv3|^usrv3/);
+  assert.notEqual(fixture.memberMembershipId, fixture.ownerMembershipId);
+  assert.notEqual(fixture.adminMembershipId, fixture.ownerMembershipId);
+  assert.notEqual(fixture.memberMembershipId, fixture.adminMembershipId);
+});
+
+test('Supabase reset preserves native auth metadata and clears sessions', async () => {
+  const { RESET_FIXTURE_STATE_SQL } = await import('../benchmark-sets/realworld-api-v3/shared/lib/admin/postgres.mjs');
+  assert.match(RESET_FIXTURE_STATE_SQL, /auth\.users/i);
+  assert.match(RESET_FIXTURE_STATE_SQL, /raw_user_meta_data/i);
+  assert.match(RESET_FIXTURE_STATE_SQL, /auth\.sessions/i);
+});
+
 test('Supabase adapter maps auth sessions and profile rows without admin APIs', async () => {
   const { createSupabaseAdapter } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/supabase.mjs');
   let authArgCount;
   const auth = { signInWithPassword: async function (_credentials) { authArgCount = arguments.length; return { data: { session: { access_token: 'token' } }, error: null }; }, getUser: async () => ({ data: { user: { id: 'usr', email: 'u@example.test', user_metadata: { display_name: 'User' }, created_at: '2025-01-01', updated_at: '2025-01-01' } }, error: null }), signOut: async () => ({ error: null }) };
   const queryBuilder = { select() { return this; }, eq() { return this; }, order() { return this; }, range() { return Promise.resolve({ data: [], count: 0, error: null }); }, insert() { return this; }, update() { return this; }, single() { return Promise.resolve({ data: null, error: null }); } };
-  const adapter = createSupabaseAdapter({ client: { auth, from() { return queryBuilder; } } });
+  const client = { auth, from() { return queryBuilder; } };
+  const adapter = createSupabaseAdapter({ client, sdkCreateClient: () => client });
   const signal = new AbortController().signal;
   const session = await adapter.createSession({ email: 'u@example.test', password: 'secret' }, { signal, timeoutMs: 1000 });
   assert.equal(authArgCount, 1);
@@ -209,7 +230,8 @@ test('Supabase session timeout is per request, not session-wide', async () => {
   const { createSupabaseAdapter } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/supabase.mjs');
   const user = { id: 'usr', email: 'u@example.test', user_metadata: { display_name: 'User' }, created_at: '2025-01-01', updated_at: '2025-01-01' };
   const auth = { signInWithPassword: async () => ({ data: { session: { access_token: 'token' } }, error: null }), getUser: async () => ({ data: { user }, error: null }) };
-  const adapter = createSupabaseAdapter({ client: { auth }, timeoutMs: 30 });
+  const client = { auth };
+  const adapter = createSupabaseAdapter({ client, sdkCreateClient: () => client, timeoutMs: 30 });
   const session = await adapter.createSession({ email: user.email, password: 'secret' }, { timeoutMs: 5 });
   await new Promise(resolve => setTimeout(resolve, 10));
   assert.equal((await session.getProfile()).id, 'usr');

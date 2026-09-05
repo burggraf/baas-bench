@@ -18,6 +18,19 @@ const mapActivity = row => ({ id: row.id, organizationId: row.organization_id, p
 function ensure(error) { if (error) throw new Error(error.message || 'Supabase request failed'); }
 function pageArgs(value) { const page = value.page ?? 0; const pageSize = value.pageSize ?? 20; if (!Number.isSafeInteger(page) || page < 0 || !Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 100) throw new Error('invalid page'); return [page, pageSize]; }
 function checkTenant(row, organizationId, projectId) { if (!row || row.organization_id !== organizationId || (projectId && row.project_id !== projectId)) throw new Error('Supabase tenant boundary violation'); }
+function abortableFetch(signalRef, timeoutMs) {
+  const baseFetch = globalThis.fetch;
+  if (typeof baseFetch !== 'function') throw new Error('global fetch is unavailable');
+  return async (input, init = {}) => {
+    const controller = new AbortController();
+    const parent = signalRef.signal;
+    const abort = () => controller.abort(parent.reason ?? new Error('Supabase request aborted'));
+    if (parent.aborted) abort(); else parent.addEventListener('abort', abort, { once: true });
+    const timer = timeoutMs === undefined ? undefined : setTimeout(() => controller.abort(new Error('Supabase request timed out')), timeoutMs);
+    try { return await baseFetch(input, { ...init, signal: controller.signal }); }
+    finally { clearTimeout(timer); parent.removeEventListener('abort', abort); }
+  };
+}
 
 export function createSupabaseAdapter({ client, sdkCreateClient, url, key, timeoutMs = 30_000 } = {}) {
   async function request(action, signal, requestTimeoutMs = timeoutMs) {
@@ -26,54 +39,81 @@ export function createSupabaseAdapter({ client, sdkCreateClient, url, key, timeo
       let timer;
       const pending = Promise.resolve(action);
       const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Supabase request timed out')), requestTimeoutMs); });
+      let onAbort;
       const cancelled = signal && new Promise((_, reject) => {
-        if (signal.aborted) reject(signal.reason ?? new Error('Supabase request aborted'));
-        else signal.addEventListener('abort', () => reject(signal.reason ?? new Error('Supabase request aborted')), { once: true });
+        onAbort = () => reject(signal.reason ?? new Error('Supabase request aborted'));
+        if (signal.aborted) onAbort(); else signal.addEventListener('abort', onAbort, { once: true });
       });
       try {
         const result = await Promise.race(cancelled ? [pending, timeout, cancelled] : [pending, timeout]);
         ensure(result?.error);
         return result;
-      } finally { clearTimeout(timer); }
+      } finally { clearTimeout(timer); if (onAbort) signal.removeEventListener('abort', onAbort); }
     });
   }
   async function query(table, fields, configure, signal) { const builder = configure((client ?? {}).from(table).select(fields, { count: 'exact' })); return request(builder, signal); }
-  function makeSession(authClient, options = {}, sessionAdapter = adapter, userId) {
-    const session = { cancelPending() { session.controller.abort(); }, close() { session.cancelPending(); } };
+  function makeSession(authClient, options = {}, sessionAdapter = adapter, userId, signalRef = { signal: undefined }) {
+    const session = { cancelPending() { session.controller.abort(); }, async close() { try { await session.signOut(); } finally { session.cancelPending(); externalAbort && options.signal?.removeEventListener('abort', externalAbort); } } };
     session.controller = new AbortController();
-    if (options.signal) { if (options.signal.aborted) session.controller.abort(options.signal.reason); else options.signal.addEventListener('abort', () => session.controller.abort(options.signal.reason), { once: true }); }
+    const externalAbort = options.signal ? () => session.controller.abort(options.signal.reason) : undefined;
+    if (options.signal) { if (options.signal.aborted) session.controller.abort(options.signal.reason); else options.signal.addEventListener('abort', externalAbort, { once: true }); }
+    signalRef.signal = session.controller.signal;
     const call = async (action, args = {}) => {
       const controller = new AbortController();
       const onAbort = () => controller.abort(session.controller.signal.reason);
       if (session.controller.signal.aborted) controller.abort(session.controller.signal.reason);
       else session.controller.signal.addEventListener('abort', onAbort, { once: true });
+      const previousSignal = signalRef.signal;
+      signalRef.signal = controller.signal;
       const timer = options.timeoutMs === undefined ? undefined : setTimeout(() => controller.abort(new Error('Supabase request timed out')), options.timeoutMs);
       try { return await action({ ...args, signal: controller.signal }); }
-      finally { clearTimeout(timer); session.controller.signal.removeEventListener('abort', onAbort); }
+      finally { clearTimeout(timer); signalRef.signal = previousSignal; session.controller.signal.removeEventListener('abort', onAbort); }
     };
     session.refreshSession = () => call(({ signal }) => request(authClient.auth.refreshSession(), signal, options.timeoutMs));
     session.refresh = session.refreshSession;
     session.signOut = () => call(({ signal }) => request(authClient.auth.signOut(), signal, options.timeoutMs));
-    session.getProfile = () => call(async ({ signal }) => { const result = await request(authClient.auth.getUser(), signal, options.timeoutMs); const user = result.data?.user; if (!user) throw new Error('malformed Supabase user'); session.userId = user.id; return mapUser(user); });
+    session.getProfile = () => call(async ({ signal }) => { const result = await request(authClient.auth.getUser(), signal, options.timeoutMs); const user = result.data?.user; if (!user) throw new Error('malformed Supabase user'); return mapUser(user); });
     session.userId = userId;
-    for (const name of ['dashboard', 'listTasks', 'getTask', 'createTask', 'updateTask', 'addComment', 'updateComment', 'searchTasks', 'updateMembershipRole', 'updateProfile']) session[name] = (args = {}) => call(callArgs => sessionAdapter[name]({ ...args, ...(name === 'createTask' ? { creatorId: session.userId } : {}), ...(name === 'addComment' ? { authorId: session.userId } : {}), signal: callArgs.signal }));
+    for (const name of ['dashboard', 'listTasks', 'getTask', 'createTask', 'updateTask', 'addComment', 'updateComment', 'searchTasks', 'updateMembershipRole', 'updateProfile']) session[name] = (args = {}) => call(callArgs => sessionAdapter[name]({ ...args, ...(name === 'createTask' ? { creatorId: session.userId } : {}), ...(name === 'addComment' ? { authorId: session.userId } : {}), ...(name === 'updateProfile' ? { userId: session.userId } : {}), signal: callArgs.signal }));
     return session;
   }
   async function createSession(credentials, options = {}) {
     const controller = new AbortController();
-    const requestOptions = { signal: options.signal ?? controller.signal, ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }) };
-    if (options.signal) { if (options.signal.aborted) controller.abort(options.signal.reason); else options.signal.addEventListener('abort', () => controller.abort(options.signal.reason), { once: true }); }
-    const authClient = sdkCreateClient ? sdkCreateClient(url, key, { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false } }) : client ?? { auth: {} };
-    const result = await request(authClient.auth.signInWithPassword(credentials), controller.signal, options.timeoutMs);
+    let externalAbort;
+    if (options.signal) { externalAbort = () => controller.abort(options.signal.reason); if (options.signal.aborted) externalAbort(); else options.signal.addEventListener('abort', externalAbort, { once: true }); }
+    if (!sdkCreateClient) throw new Error('isolated Supabase client factory is required for sessions');
+    const signalRef = { signal: controller.signal };
+    const authClient = sdkCreateClient(url, key, { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false }, global: { fetch: abortableFetch(signalRef, options.timeoutMs) } });
+    let result;
+    try { result = await request(authClient.auth.signInWithPassword(credentials), controller.signal, options.timeoutMs); }
+    finally { if (externalAbort) options.signal.removeEventListener('abort', externalAbort); }
     if (!result.data?.session) throw new Error('malformed Supabase session');
     const sessionAdapter = authClient === client ? adapter : createSupabaseAdapter({ client: authClient, timeoutMs });
     const authId = result.data.session.user?.id;
     const userId = authId && sessionAdapter.getUserByAuthSubject ? await sessionAdapter.getUserByAuthSubject(authId) : authId;
-    const session = makeSession(authClient, options, sessionAdapter, userId); session.accessToken = result.data.session.access_token; return session;
+    const session = makeSession(authClient, options, sessionAdapter, userId, signalRef); session.accessToken = result.data.session.access_token; return session;
   }
   const adapter = { createSession,
     virtualUsers(count = 10_000, seed = 42) { return buildVirtualUserSpecs(count, seed); },
-    correctnessFixture() { const owner = buildVirtualUserSpecs(1, 42)[0]; return { owner: owner.credentials, organizationId: owner.organizationId, projectId: owner.projectId, taskId: owner.taskId, commentId: owner.commentId, memberMembershipId: 'memv3' + '00000000000' }; },
+    correctnessFixture() {
+      const specs = buildVirtualUserSpecs(3_201, 42);
+      const owner = specs[0];
+      const outsider = specs[1];
+      const admin = specs[1_600];
+      const member = specs[3_200];
+      const context = { organizationId: owner.organizationId, projectId: owner.projectId, taskId: owner.taskId, commentId: owner.commentId };
+      return {
+        ...context,
+        owner: owner.credentials,
+        member: { ...member.credentials, ...context },
+        admin: { ...admin.credentials, ...context },
+        outsider: outsider.credentials,
+        memberMembershipId: 'memv3' + (3_200).toString(36).padStart(11, '0'),
+        adminMembershipId: 'memv3' + (1_600).toString(36).padStart(11, '0'),
+        ownerMembershipId: 'memv3' + '00000000000',
+        memberUserId: member.credentials.email.match(/user-(usrv3[0-9a-z]+)/)?.[1],
+      };
+    },
   };
   adapter.dashboard = async ({ organizationId, projectId, activityPage = { page: 0, pageSize: 20 }, signal }) => {
     if (!organizationId) throw new Error('tenant context is required');
@@ -103,7 +143,7 @@ export function createSupabaseAdapter({ client, sdkCreateClient, url, key, timeo
   adapter.addComment = async ({ organizationId, projectId, taskId, authorId, body, signal }) => { const result = await request(client.from('comments').insert({ organization_id: organizationId, project_id: projectId, task_id: taskId, author_id: authorId, body }).select(commentFields).single(), signal); checkTenant(result.data, organizationId, projectId); return mapComment(result.data); };
   adapter.updateComment = async ({ organizationId, projectId, taskId, commentId, body, signal }) => { const result = await request(client.from('comments').update({ body }).eq('id', commentId).eq('organization_id', organizationId).eq('project_id', projectId).eq('task_id', taskId).select(commentFields).single(), signal); checkTenant(result.data, organizationId, projectId); return mapComment(result.data); };
   adapter.updateMembershipRole = async ({ organizationId, membershipId, role, signal }) => { const result = await request(client.from('memberships').update({ role }).eq('organization_id', organizationId).eq('id', membershipId).select('id,organization_id,user_id,role,created_at').single(), signal); if (!result.data || result.data.organization_id !== organizationId) throw new Error('Supabase tenant boundary violation'); return result.data; };
-  adapter.updateProfile = async ({ displayName, signal }) => { const result = await request(client.auth.updateUser({ data: { display_name: displayName } }), signal); return mapUser(result.data?.user); };
+  adapter.updateProfile = async ({ displayName, userId, signal }) => { const result = await request(client.auth.updateUser({ data: { display_name: displayName } }), signal); const appUser = await request(client.from('users').update({ display_name: displayName }).eq('id', userId).select(userFields).single(), signal); return mapUser(appUser.data ?? result.data?.user); };
   adapter.signOut = async () => { if (client) await request(client.auth.signOut()); };
   adapter.getProfile = async () => makeSession(client).getProfile();
   return adapter;
