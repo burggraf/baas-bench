@@ -14,6 +14,12 @@ function text(relative, root = setRoot) {
   return readFileSync(new URL(relative, root), 'utf8');
 }
 
+test('command transport forwards stdin to administrative processes', async () => {
+  const { runCommand } = await import('../benchmark-sets/realworld-api-v3/shared/lib/command.mjs');
+  const result = await runCommand(process.execPath, ['-e', 'process.stdin.pipe(process.stdout)'], { input: 'migration-payload', timeoutMs: 5_000 });
+  assert.equal(result.stdout, 'migration-payload');
+});
+
 test('real-world API capacity scaffold declares its lifecycle and metrics', () => {
   assert.match(text('set.conf'), /^id=realworld-api-v3$/m);
   assert.doesNotMatch(text('README.md'), /TODO/);
@@ -889,7 +895,7 @@ test('PocketBase migration and admin expose collection lifecycle', async () => {
 test('TrailBase adapter uses the official record client with isolated auth sessions', async () => {
   const { createTrailBaseAdapter } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/trailbase.mjs');
   const calls = [];
-  const client = { auth: { async login(value) { calls.push(['login', value]); return { user: { id: 'usr' }, token: 'token' }; }, async refresh() {}, async logout() { calls.push(['logout']); } }, records(name) { return { async list(options) { calls.push(['list', name, options]); return { records: [], totalCount: 0 }; }, async read(id) { calls.push(['read', name, id]); return { id, organization_id: 'org', project_id: 'prj', creator_id: 'usr', title: 't', description: 'd', status: 'todo', priority: 'low', created_at: '2025-01-01', updated_at: '2025-01-01' }; }, async create(data) { calls.push(['create', name, data]); return { id: 'new', ...data }; }, async update(id, data) { return { id, ...data }; } }; } };
+  const client = { auth: { async login(value) { calls.push(['login', value]); return { user: { id: 'usr' }, token: 'token' }; }, async refresh() {}, async logout() { calls.push(['logout']); } }, records(name) { return { async list(options) { calls.push(['list', name, options]); return { records: name === 'users' ? [{ id: 'usr', email: 'u@example.test' }] : [], totalCount: 0 }; }, async read(id) { calls.push(['read', name, id]); return { id, organization_id: 'org', project_id: 'prj', creator_id: 'usr', title: 't', description: 'd', status: 'todo', priority: 'low', created_at: '2025-01-01', updated_at: '2025-01-01' }; }, async create(data) { calls.push(['create', name, data]); return { id: 'new', ...data }; }, async update(id, data) { return { id, ...data }; } }; } };
   const adapter = createTrailBaseAdapter({ initClient: () => client, client });
   const session = await adapter.createSession({ email: 'u@example.test', password: 'pw' });
   assert.equal((await session.getProfile()).id, 'usr');

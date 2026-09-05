@@ -1,9 +1,8 @@
-record_apis: [
-  { name: "users", table_name: "users", acl_authenticated: [READ, UPDATE], read_access_rule: "_USER_.id != ''" },
-  { name: "organizations", table_name: "organizations", acl_authenticated: [READ], read_access_rule: "_USER_.id != ''" },
-  { name: "memberships", table_name: "memberships", acl_authenticated: [READ, UPDATE], read_access_rule: "_USER_.id != ''" },
-  { name: "projects", table_name: "projects", acl_authenticated: [READ, CREATE, UPDATE], read_access_rule: "_USER_.id != ''" },
-  { name: "tasks", table_name: "tasks", acl_authenticated: [READ, CREATE, UPDATE], read_access_rule: "_USER_.id != ''" },
-  { name: "comments", table_name: "comments", acl_authenticated: [READ, CREATE, UPDATE], read_access_rule: "_USER_.id != ''" },
-  { name: "activities", table_name: "activities", acl_authenticated: [READ], read_access_rule: "_USER_.id != ''" }
-]
+# baas-bench realworld-api-v3
+record_apis: [{ name: "users" table_name: "users" acl_authenticated: [READ, UPDATE] read_access_rule: "_USER_.id IS NOT NULL" }]
+record_apis: [{ name: "organizations" table_name: "organizations" acl_authenticated: [READ] read_access_rule: "_USER_.id IS NOT NULL" }]
+record_apis: [{ name: "memberships" table_name: "memberships" acl_authenticated: [READ, UPDATE] read_access_rule: "_USER_.id IS NOT NULL" }]
+record_apis: [{ name: "projects" table_name: "projects" acl_authenticated: [READ, CREATE, UPDATE] read_access_rule: "_USER_.id IS NOT NULL" }]
+record_apis: [{ name: "tasks" table_name: "tasks" acl_authenticated: [READ, CREATE, UPDATE] read_access_rule: "_USER_.id IS NOT NULL" }]
+record_apis: [{ name: "comments" table_name: "comments" acl_authenticated: [READ, CREATE, UPDATE] read_access_rule: "_USER_.id IS NOT NULL" }]
+record_apis: [{ name: "activities" table_name: "activities" acl_authenticated: [READ] read_access_rule: "_USER_.id IS NOT NULL" }]

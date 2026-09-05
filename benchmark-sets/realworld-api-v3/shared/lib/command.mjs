@@ -9,9 +9,10 @@ export function runCommand(command, args = [], options = {}) {
   const timeout = options.timeoutMs ?? 5_000;
   if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 60_000) throw new Error('invalid command timeout');
   return new Promise((resolve, reject) => {
-    execFile(command, args, { timeout, maxBuffer: 1024 * 1024, encoding: 'utf8', env: options.env }, (error, stdout, stderr) => {
+    const child = execFile(command, args, { timeout, maxBuffer: 1024 * 1024, encoding: 'utf8', env: options.env }, (error, stdout, stderr) => {
       if (error) return reject(new Error(`${command} command failed`));
       resolve({ stdout: String(stdout), stderr: String(stderr) });
     });
+    if (options.input !== undefined) child.stdin.end(String(options.input));
   });
 }
