@@ -144,7 +144,11 @@ ${snapshotTables}
 CREATE TABLE benchmark_fixture.passwords AS TABLE benchmark_auth.passwords;
 DO $$ BEGIN
   IF to_regclass('auth.users') IS NOT NULL THEN
-    EXECUTE 'CREATE TABLE benchmark_fixture.auth_users AS SELECT id, email, raw_user_meta_data FROM auth.users WHERE email LIKE ''user-%@example.test''';
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'auth' AND table_name = 'users' AND column_name = 'raw_user_meta_data') THEN
+      EXECUTE 'CREATE TABLE benchmark_fixture.auth_users AS SELECT id, email, raw_user_meta_data FROM auth.users WHERE email LIKE ''user-%@example.test''';
+    ELSE
+      EXECUTE 'CREATE TABLE benchmark_fixture.auth_users AS SELECT id, email FROM auth.users WHERE email LIKE ''user-%@example.test''';
+    END IF;
   END IF;
 END $$;
 COMMIT;
@@ -163,7 +167,9 @@ INSERT INTO benchmark_auth.passwords SELECT * FROM benchmark_fixture.passwords;
 TRUNCATE TABLE benchmark_auth.sessions;
 DO $$ BEGIN
   IF to_regclass('auth.users') IS NOT NULL AND to_regclass('benchmark_fixture.auth_users') IS NOT NULL THEN
-    EXECUTE 'UPDATE auth.users AS u SET raw_user_meta_data = b.raw_user_meta_data FROM benchmark_fixture.auth_users AS b WHERE u.id = b.id';
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'auth' AND table_name = 'users' AND column_name = 'raw_user_meta_data') AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'benchmark_fixture' AND table_name = 'auth_users' AND column_name = 'raw_user_meta_data') THEN
+      EXECUTE 'UPDATE auth.users AS u SET raw_user_meta_data = b.raw_user_meta_data FROM benchmark_fixture.auth_users AS b WHERE u.id = b.id';
+    END IF;
     IF to_regclass('auth.sessions') IS NOT NULL THEN
       EXECUTE 'DELETE FROM auth.sessions WHERE user_id IN (SELECT id FROM benchmark_fixture.auth_users)';
     END IF;
