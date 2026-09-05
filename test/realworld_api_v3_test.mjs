@@ -909,6 +909,23 @@ test('TrailBase migration, config, and admin expose record APIs', async () => {
   assert.match(config, /record_apis/);
 });
 
+test('all real-world adapters and administrative modules expose the shared lifecycle contract', async () => {
+  const modules = Object.fromEntries(await Promise.all(platforms.map(async platform => [platform, {
+    adapter: await import(`../benchmark-sets/realworld-api-v3/shared/lib/adapters/${platform}.mjs`),
+    admin: await import(`../benchmark-sets/realworld-api-v3/shared/lib/admin/${platform}.mjs`),
+  }])));
+  for (const platform of platforms) {
+    assert.equal(typeof modules[platform].adapter.createBackend, 'function', `${platform} backend factory`);
+    assert.equal(typeof modules[platform].admin.setup, 'function', `${platform} setup`);
+    assert.equal(typeof modules[platform].admin.verify, 'function', `${platform} verify`);
+    assert.equal(typeof modules[platform].admin.reset, 'function', `${platform} reset`);
+    assert.equal(typeof modules[platform].admin.teardown, 'function', `${platform} teardown`);
+    assert.doesNotMatch(text(`benchmarks/project-management-capacity/cases/${platform}/${platform === 'neon' ? 'javascript-sql-http' : 'javascript-sdk'}/README.md`), /scaffold|deferred|TODO/i);
+  }
+  assert.doesNotMatch(text('README.md'), /scaffold|deferred|TODO/i);
+  assert.doesNotMatch(text('METHODOLOGY.md', benchmarkRoot), /deferred|TODO/i);
+});
+
 test('administrative dispatch invokes exactly the requested platform handler', async () => {
   const { dispatchAdmin } = await import('../benchmark-sets/realworld-api-v3/shared/lib/admin.mjs');
   const calls = [];

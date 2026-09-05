@@ -1,5 +1,5 @@
 # Supabase project-management capacity
 
-This case is the lifecycle scaffold for the authenticated project-management capacity workload through `postgrest` using `@supabase/supabase-js@2.115.0` on Node.js 22 or newer. The five hooks delegate to the set-level dispatcher; workload, administration, fixture, correctness, and telemetry behavior is intentionally deferred.
+This case runs authenticated project-management workflows through `@supabase/supabase-js@2.115.0` on Node.js 22 or newer. Each virtual user uses an isolated Supabase client with native email/password Auth; PostgreSQL schema, RLS policies, indexes, deterministic fixture loading, and reset are administrative.
 
-No benchmark result can be produced by this scaffold. Platform-specific topology, authentication, authorization, indexes, tuning, and deviations must be documented when the adapter is implemented.
+Measured operations use Auth and PostgREST only. Tenant predicates, stable ordering, filters, exact pagination counts, mutations, activity triggers, profile updates, refresh, sign-out, request cancellation, and timeout handling are normalized by the adapter into the shared workflow contract.
