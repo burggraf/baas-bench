@@ -72,7 +72,14 @@ export function createSupabaseAdapter({ client, sdkCreateClient, url, key, timeo
     session.refreshSession = () => call(({ signal }) => request(authClient.auth.refreshSession(), signal, options.timeoutMs));
     session.refresh = session.refreshSession;
     session.signOut = () => call(({ signal }) => request(authClient.auth.signOut(), signal, options.timeoutMs));
-    session.getProfile = () => call(async ({ signal }) => { const result = await request(authClient.auth.getUser(), signal, options.timeoutMs); const user = result.data?.user; if (!user) throw new Error('malformed Supabase user'); return mapUser(user); });
+    session.getProfile = () => call(async ({ signal }) => {
+      const result = await request(authClient.auth.getUser(), signal, options.timeoutMs);
+      const user = result.data?.user;
+      if (!user) throw new Error('malformed Supabase user');
+      const appUserId = sessionAdapter.getUserByAuthSubject ? await sessionAdapter.getUserByAuthSubject(user.id, signal) : session.userId ?? user.id;
+      session.userId = appUserId;
+      return sessionAdapter.getUser ? sessionAdapter.getUser(appUserId, signal) : { ...mapUser(user), id: appUserId };
+    });
     session.userId = userId;
     for (const name of ['dashboard', 'listTasks', 'getTask', 'createTask', 'updateTask', 'addComment', 'updateComment', 'searchTasks', 'updateMembershipRole', 'updateProfile']) session[name] = (args = {}) => call(callArgs => sessionAdapter[name]({ ...args, ...(name === 'createTask' ? { creatorId: session.userId } : {}), ...(name === 'addComment' ? { authorId: session.userId } : {}), ...(name === 'updateProfile' ? { userId: session.userId } : {}), signal: callArgs.signal }));
     return session;

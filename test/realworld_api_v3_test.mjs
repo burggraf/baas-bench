@@ -215,13 +215,13 @@ test('Supabase adapter maps auth sessions and profile rows without admin APIs', 
   let authArgCount;
   const auth = { signInWithPassword: async function (_credentials) { authArgCount = arguments.length; return { data: { session: { access_token: 'token' } }, error: null }; }, getUser: async () => ({ data: { user: { id: 'usr', email: 'u@example.test', user_metadata: { display_name: 'User' }, created_at: '2025-01-01', updated_at: '2025-01-01' } }, error: null }), signOut: async () => ({ error: null }) };
   const queryBuilder = { select() { return this; }, eq() { return this; }, order() { return this; }, range() { return Promise.resolve({ data: [], count: 0, error: null }); }, insert() { return this; }, update() { return this; }, single() { return Promise.resolve({ data: null, error: null }); } };
-  const client = { auth, from() { return queryBuilder; } };
+  const client = { auth, from(table) { return table === 'users' ? { ...queryBuilder, single: async () => ({ data: { id: 'app-user', auth_subject: 'usr', email: 'u@example.test', display_name: 'User', created_at: '2025-01-01', updated_at: '2025-01-01' }, error: null }) } : queryBuilder; } };
   const adapter = createSupabaseAdapter({ client, sdkCreateClient: () => client });
   const signal = new AbortController().signal;
   const session = await adapter.createSession({ email: 'u@example.test', password: 'secret' }, { signal, timeoutMs: 1000 });
   assert.equal(authArgCount, 1);
   for (const method of ['dashboard', 'listTasks', 'getTask', 'createTask', 'updateTask', 'addComment', 'updateComment', 'searchTasks', 'updateMembershipRole', 'getProfile', 'updateProfile', 'signOut', 'cancelPending', 'close']) assert.equal(typeof session[method], 'function', method);
-  assert.equal((await session.getProfile()).id, 'usr');
+  assert.equal((await session.getProfile()).id, 'app-user');
   assert.deepEqual(await session.listTasks({ organizationId: 'org', projectId: 'prj', page: 0, pageSize: 10 }), { items: [], page: 0, pageSize: 10, total: 0, hasNext: false });
   await session.signOut();
 });
@@ -230,7 +230,8 @@ test('Supabase session timeout is per request, not session-wide', async () => {
   const { createSupabaseAdapter } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/supabase.mjs');
   const user = { id: 'usr', email: 'u@example.test', user_metadata: { display_name: 'User' }, created_at: '2025-01-01', updated_at: '2025-01-01' };
   const auth = { signInWithPassword: async () => ({ data: { session: { access_token: 'token' } }, error: null }), getUser: async () => ({ data: { user }, error: null }) };
-  const client = { auth };
+  const userQuery = { select() { return this; }, eq() { return this; }, single: async () => ({ data: { id: 'usr', auth_subject: 'usr', email: user.email, display_name: 'User', created_at: user.created_at, updated_at: user.updated_at }, error: null }) };
+  const client = { auth, from() { return userQuery; } };
   const adapter = createSupabaseAdapter({ client, sdkCreateClient: () => client, timeoutMs: 30 });
   const session = await adapter.createSession({ email: user.email, password: 'secret' }, { timeoutMs: 5 });
   await new Promise(resolve => setTimeout(resolve, 10));
