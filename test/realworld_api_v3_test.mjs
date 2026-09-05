@@ -437,14 +437,44 @@ test('postgres admin schema provides tenant RLS, workload indexes, activity, res
   assert.match(schema, /create policy memberships_manager_write[\s\S]*?for update[\s\S]*?is_manager/i);
   assert.match(schema, /create policy tasks_member_insert[\s\S]*?creator_id = benchmark_private\.current_user_id/i);
   assert.match(schema, /create policy comments_member_insert[\s\S]*?author_id = benchmark_private\.current_user_id/i);
+  const expectedPolicyCommands = [
+    ['users_peer_read', 'users', 'select', 'using ( id = benchmark_private.current_user_id() or exists'],
+    ['users_self_write', 'users', 'update', 'using (id = benchmark_private.current_user_id())', 'with check (id = benchmark_private.current_user_id())'],
+    ['organizations_member_read', 'organizations', 'select', 'using (benchmark_private.is_member(id))'],
+    ['memberships_member_read', 'memberships', 'select', 'using (benchmark_private.is_member(organization_id))'],
+    ['memberships_manager_write', 'memberships', 'update', 'using (benchmark_private.is_manager(organization_id))', 'with check (benchmark_private.is_manager(organization_id))'],
+    ['projects_member_read', 'projects', 'select', 'using (benchmark_private.is_member(organization_id))'],
+    ['projects_manager_write', 'projects', 'all', 'using (benchmark_private.is_manager(organization_id))', 'with check (benchmark_private.is_manager(organization_id))'],
+    ['tasks_member_read', 'tasks', 'select', 'using (benchmark_private.is_member(benchmark_private.task_organization(tasks)))'],
+    ['tasks_member_insert', 'tasks', 'insert', 'with check (', 'creator_id = benchmark_private.current_user_id()'],
+    ['tasks_member_update', 'tasks', 'update', 'using (benchmark_private.is_member(benchmark_private.task_organization(tasks)))', 'with check (benchmark_private.is_member(benchmark_private.task_organization(tasks)))'],
+    ['tasks_member_delete', 'tasks', 'delete', 'using (benchmark_private.is_member(benchmark_private.task_organization(tasks)))'],
+    ['comments_member_read', 'comments', 'select', 'using (benchmark_private.is_member(benchmark_private.comment_organization(comments)))'],
+    ['comments_member_insert', 'comments', 'insert', 'with check (', 'author_id = benchmark_private.current_user_id()'],
+    ['comments_member_update', 'comments', 'update', 'using (', 'with check (benchmark_private.is_member(benchmark_private.comment_organization(comments)))'],
+    ['comments_member_delete', 'comments', 'delete', 'using (', 'benchmark_private.is_manager(benchmark_private.comment_organization(comments))'],
+    ['activities_member_read', 'activities', 'select', 'using (benchmark_private.is_member(organization_id))'],
+    ['activities_actor_insert', 'activities', 'insert', 'with check (', 'actor_id = benchmark_private.current_user_id()'],
+  ];
+  const policyStatements = [...schema.matchAll(/create policy [\s\S]*?;/gi)].map(match => match[0].toLowerCase().replaceAll(/\s+/g, ' '));
+  assert.equal(policyStatements.length, expectedPolicyCommands.length, 'every application policy is declared exactly once');
+  for (const [name, table, command, ...predicates] of expectedPolicyCommands) {
+    const statement = policyStatements.find(value => value.includes(`create policy ${name} on public.${table} for ${command}`));
+    assert.ok(statement, `${name} complete policy command`);
+    for (const predicate of predicates) assert.ok(statement.includes(predicate), `${name} predicate ${predicate}`);
+  }
   assert.match(schema, /create trigger tasks_activity after insert or update/i);
   assert.match(schema, /create trigger comments_activity after insert or update/i);
-  const activity = schema.match(/create function benchmark_private\.log_workflow_activity[\s\S]*?create trigger tasks_activity/i)?.[0] ?? '';
+  const activity = schema.match(/create function benchmark_private\.log_workflow_activity[\s\S]*?\$\$;/i)?.[0] ?? '';
   assert.match(activity, /app_user text := benchmark_private\.current_user_id/);
+  assert.match(activity, /if tg_table_name = 'comments'[\s\S]*?task_id := new\.task_id/i);
+  assert.match(activity, /else[\s\S]*?task_id := new\.id[\s\S]*?project_id := new\.project_id/i);
   assert.match(activity, /organization_id/);
   assert.match(activity, /actor_id/);
-  assert.match(activity, /case when tg_table_name = 'comments'/i);
-  assert.match(activity, /subject_id/);
+  assert.match(activity, /values \(pg_catalog\.substr[\s\S]*?organization_id, project_id, app_user/i);
+  assert.match(activity, /tg_table_name = 'comments'[\s\S]*?tg_op = 'INSERT' then 'commented' else 'comment_updated'/i);
+  assert.match(activity, /tg_table_name = 'comments'[\s\S]*?else case when tg_op = 'INSERT' then 'created' else 'updated'/i);
+  assert.match(activity, /'task', task_id, pg_catalog\.clock_timestamp\(\)/i);
   assert.match(schema, /create table benchmark_auth\.passwords/i);
   assert.match(schema, /create table benchmark_auth\.sessions/i);
   assert.match(schema, /create schema if not exists benchmark_extensions/i);
@@ -471,19 +501,31 @@ test('postgres admin schema provides tenant RLS, workload indexes, activity, res
   assert.doesNotMatch(schema, /auth\.uid\(|auth\.users|create role|alter role/i);
   assert.match(CREATE_FIXTURE_STATE_SQL, /realworld-api-v3-baseline-v1/);
   assert.match(RESET_FIXTURE_STATE_SQL, /realworld-api-v3-baseline-v1/);
-  assert.match(RESET_FIXTURE_STATE_SQL, /truncate table public\.activities, public\.comments, public\.tasks, public\.projects, public\.memberships, public\.organizations, public\.users cascade/i);
-  for (const table of ['users', 'organizations', 'memberships', 'projects', 'tasks', 'comments', 'activities']) {
-    assert.match(RESET_FIXTURE_STATE_SQL, new RegExp(`insert into public\\.${table} select \\* from benchmark_fixture\\.${table}`, 'i'));
+  const truncateAt = RESET_FIXTURE_STATE_SQL.search(/truncate table public\.activities, public\.comments, public\.tasks, public\.projects, public\.memberships, public\.organizations, public\.users cascade/i);
+  assert.ok(truncateAt >= 0, 'reset truncates all application tables');
+  const restoreOrder = ['users', 'organizations', 'memberships', 'projects', 'tasks', 'comments', 'activities'];
+  let previous = truncateAt;
+  for (const table of restoreOrder) {
+    const at = RESET_FIXTURE_STATE_SQL.search(new RegExp(`insert into public\\.${table} select \\* from benchmark_fixture\\.${table}`, 'i'));
+    assert.ok(at > previous, `${table} restore follows dependency-safe order`);
+    previous = at;
   }
-  assert.match(RESET_FIXTURE_STATE_SQL, /insert into benchmark_auth\.passwords select \* from benchmark_fixture\.passwords/i);
-  assert.match(RESET_FIXTURE_STATE_SQL, /truncate table benchmark_auth\.sessions/i);
-  const signIn = schema.match(/create function benchmark_auth\.sign_in[\s\S]*?\$\$;/i)?.[0] ?? '';
-  assert.match(signIn, /crypt\(login_password, p\.password_hash\)/i);
-  assert.match(signIn, /invalid credentials/i);
-  const validateSession = schema.match(/create function benchmark_auth\.validate_session[\s\S]*?\$\$;/i)?.[0] ?? '';
-  const signOut = schema.match(/create function benchmark_auth\.sign_out[\s\S]*?\$\$;/i)?.[0] ?? '';
-  assert.match(validateSession, /expires_at > (?:pg_catalog\.)?clock_timestamp/i);
-  assert.match(signOut, /delete from benchmark_auth\.sessions/i);
+  const passwordsAt = RESET_FIXTURE_STATE_SQL.search(/insert into benchmark_auth\.passwords select \* from benchmark_fixture\.passwords/i);
+  const sessionsAt = RESET_FIXTURE_STATE_SQL.search(/truncate table benchmark_auth\.sessions/i);
+  assert.ok(passwordsAt > previous, 'password state restores after application rows');
+  assert.ok(sessionsAt > passwordsAt, 'sessions clear after password restore');
+  const extractFunction = name => schema.match(new RegExp(`create function ${name.replace('.', '[.]')}\\([^)]*\\)[\\s\\S]*?\\$\\$;`, 'i'))?.[0] ?? '';
+  const signIn = extractFunction('benchmark_auth.sign_in');
+  const validateSession = extractFunction('benchmark_auth.validate_session');
+  const signOut = extractFunction('benchmark_auth.sign_out');
+  assert.match(signIn, /where u\.email = login_email[\s\S]*?p\.password_hash = benchmark_extensions\.crypt\(login_password, p\.password_hash\)/i);
+  assert.match(signIn, /if app_user is null then raise exception 'invalid credentials'/i);
+  assert.match(signIn, /token := pg_catalog\.encode\(benchmark_extensions\.gen_random_bytes\(32\), 'hex'\)/i);
+  assert.match(signIn, /insert into benchmark_auth\.sessions[\s\S]*?benchmark_extensions\.digest\(token, 'sha256'\)/i);
+  assert.match(validateSession, /where s\.token_hash = pg_catalog\.encode\(benchmark_extensions\.digest\(session_token, 'sha256'\), 'hex'\)/i);
+  assert.match(validateSession, /and s\.expires_at > (?:pg_catalog\.)?clock_timestamp\(\)/i);
+  assert.match(validateSession, /if app_user is null then raise exception 'invalid session'/i);
+  assert.match(signOut, /delete from benchmark_auth\.sessions[\s\S]*?token_hash = pg_catalog\.encode\(benchmark_extensions\.digest\(session_token, 'sha256'\), 'hex'\)/i);
   assert.match(signIn, /set_config\('app\.user_id', app_user, true\)/i);
   assert.match(validateSession, /set_config\('app\.user_id', app_user, true\)/i);
   assert.match(signOut, /set_config\('app\.user_id', '', true\)/i);
