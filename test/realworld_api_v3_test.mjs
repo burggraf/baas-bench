@@ -177,9 +177,13 @@ test('Supabase adapter maps PostgREST rows and enforces tenant-bound pagination'
 
 test('Supabase adapter maps auth sessions and profile rows without admin APIs', async () => {
   const { createSupabaseAdapter } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/supabase.mjs');
-  const auth = { signInWithPassword: async () => ({ data: { session: { access_token: 'token' } }, error: null }), getUser: async () => ({ data: { user: { id: 'usr', email: 'u@example.test', user_metadata: { display_name: 'User' }, created_at: '2025-01-01', updated_at: '2025-01-01' } }, error: null }), signOut: async () => ({ error: null }) };
+  let authOptions;
+  const auth = { signInWithPassword: async (_credentials, options) => { authOptions = options; return { data: { session: { access_token: 'token' } }, error: null }; }, getUser: async () => ({ data: { user: { id: 'usr', email: 'u@example.test', user_metadata: { display_name: 'User' }, created_at: '2025-01-01', updated_at: '2025-01-01' } }, error: null }), signOut: async () => ({ error: null }) };
   const adapter = createSupabaseAdapter({ client: { auth } });
-  const session = await adapter.createSession({ email: 'u@example.test', password: 'secret' });
+  const signal = new AbortController().signal;
+  const session = await adapter.createSession({ email: 'u@example.test', password: 'secret' }, { signal, timeoutMs: 1000 });
+  assert.equal(authOptions.signal, signal);
+  for (const method of ['dashboard', 'listTasks', 'getTask', 'createTask', 'updateTask', 'addComment', 'updateComment', 'searchTasks', 'updateMembershipRole', 'getProfile', 'updateProfile', 'signOut', 'cancelPending', 'close']) assert.equal(typeof session[method], 'function', method);
   assert.equal((await session.getProfile()).id, 'usr');
   await session.signOut();
 });
