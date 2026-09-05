@@ -122,6 +122,34 @@ test('dataset IDs, roles, references, and virtual-user contexts are stable', asy
   assert.throws(() => buildVirtualUserSpecs(16_001, 42), /exceed/);
 });
 
+test('Supabase adapter maps PostgREST rows and enforces tenant-bound pagination', async () => {
+  const { createSupabaseAdapter } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/supabase.mjs');
+  const calls = [];
+  const builder = {
+    select(fields) { calls.push(['select', fields]); return this; },
+    eq(field, value) { calls.push(['eq', field, value]); return this; },
+    order(field, options) { calls.push(['order', field, options]); return this; },
+    range(from, to) { calls.push(['range', from, to]); return Promise.resolve({ data: [{ id: 'tsk', organization_id: 'org', project_id: 'prj', creator_id: 'usr', assignee_id: null, title: 't', description: 'd', status: 'todo', priority: 'low', due_date: null, created_at: '2025-01-01T00:00:00Z', updated_at: '2025-01-01T00:00:00Z' }], count: 1, error: null }); },
+  };
+  const client = { from(table) { calls.push(['from', table]); return builder; } };
+  const adapter = createSupabaseAdapter({ client, timeoutMs: 1000 });
+  const page = await adapter.listTasks({ organizationId: 'org', projectId: 'prj', page: 0, pageSize: 10 });
+  assert.equal(page.items[0].projectId, 'prj');
+  assert.equal(page.total, 1);
+  assert.ok(calls.some(call => call[0] === 'eq' && call[1] === 'organization_id' && call[2] === 'org'));
+  assert.ok(calls.some(call => call[0] === 'order' && call[1] === 'created_at'));
+  await assert.rejects(adapter.listTasks({ organizationId: 'org', projectId: 'foreign', page: 0, pageSize: 10 }), /tenant|boundary/i);
+});
+
+test('Supabase adapter maps auth sessions and profile rows without admin APIs', async () => {
+  const { createSupabaseAdapter } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/supabase.mjs');
+  const auth = { signInWithPassword: async () => ({ data: { session: { access_token: 'token' } }, error: null }), getUser: async () => ({ data: { user: { id: 'usr', email: 'u@example.test', user_metadata: { display_name: 'User' }, created_at: '2025-01-01', updated_at: '2025-01-01' } }, error: null }), signOut: async () => ({ error: null }) };
+  const adapter = createSupabaseAdapter({ client: { auth } });
+  const session = await adapter.createSession({ email: 'u@example.test', password: 'secret' });
+  assert.equal((await session.getProfile()).id, 'usr');
+  await session.signOut();
+});
+
 test('workflow selection follows the approved application mix', async () => {
   const { selectWorkflow } = await import('../benchmark-sets/realworld-api-v3/shared/lib/workflows.mjs');
   const weights = { dashboard: 20, taskList: 25, taskDetail: 15, createTask: 10, updateTask: 12, addComment: 10, search: 5, profileUpdate: 1, signIn: 2 };
