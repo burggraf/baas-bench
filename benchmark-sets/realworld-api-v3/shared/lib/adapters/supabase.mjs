@@ -1,6 +1,7 @@
 import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { measureRemoteCall } from '../measurement.mjs';
+import { buildVirtualUserSpecs } from '../dataset.mjs';
 export async function readKey(path, name) { const text = await readFile(path, 'utf8'); const line = text.split(/\r?\n/).find(value => value.startsWith(`${name}=`)); if (!line) throw new Error(`missing ${name}`); return line.slice(name.length + 1); }
 
 // Verified @supabase/supabase-js API (pinned runtime): createClient(url, key, options),
@@ -36,7 +37,7 @@ export function createSupabaseAdapter({ client, sdkCreateClient, url, key, timeo
       } finally { clearTimeout(timer); }
     });
   }
-  async function query(table, fields, configure, signal) { const builder = configure((client ?? {}).from(table).select(fields)); return request(builder, signal); }
+  async function query(table, fields, configure, signal) { const builder = configure((client ?? {}).from(table).select(fields, { count: 'exact' })); return request(builder, signal); }
   function makeSession(authClient, options = {}, sessionAdapter = adapter, userId) {
     const session = { cancelPending() { session.controller.abort(); }, close() { session.cancelPending(); } };
     session.controller = new AbortController();
@@ -50,7 +51,8 @@ export function createSupabaseAdapter({ client, sdkCreateClient, url, key, timeo
       try { return await action({ ...args, signal: controller.signal }); }
       finally { clearTimeout(timer); session.controller.signal.removeEventListener('abort', onAbort); }
     };
-    session.refresh = () => call(({ signal }) => request(authClient.auth.refreshSession(), signal, options.timeoutMs));
+    session.refreshSession = () => call(({ signal }) => request(authClient.auth.refreshSession(), signal, options.timeoutMs));
+    session.refresh = session.refreshSession;
     session.signOut = () => call(({ signal }) => request(authClient.auth.signOut(), signal, options.timeoutMs));
     session.getProfile = () => call(async ({ signal }) => { const result = await request(authClient.auth.getUser(), signal, options.timeoutMs); const user = result.data?.user; if (!user) throw new Error('malformed Supabase user'); session.userId = user.id; return mapUser(user); });
     session.userId = userId;
@@ -65,9 +67,14 @@ export function createSupabaseAdapter({ client, sdkCreateClient, url, key, timeo
     const result = await request(authClient.auth.signInWithPassword(credentials), controller.signal, options.timeoutMs);
     if (!result.data?.session) throw new Error('malformed Supabase session');
     const sessionAdapter = authClient === client ? adapter : createSupabaseAdapter({ client: authClient, timeoutMs });
-    const session = makeSession(authClient, options, sessionAdapter, result.data.session.user?.id); session.accessToken = result.data.session.access_token; return session;
+    const authId = result.data.session.user?.id;
+    const userId = authId && sessionAdapter.getUserByAuthSubject ? await sessionAdapter.getUserByAuthSubject(authId) : authId;
+    const session = makeSession(authClient, options, sessionAdapter, userId); session.accessToken = result.data.session.access_token; return session;
   }
-  const adapter = { createSession };
+  const adapter = { createSession,
+    virtualUsers(count = 10_000, seed = 42) { return buildVirtualUserSpecs(count, seed); },
+    correctnessFixture() { const owner = buildVirtualUserSpecs(1, 42)[0]; return { owner: owner.credentials, organizationId: owner.organizationId, projectId: owner.projectId, taskId: owner.taskId, commentId: owner.commentId, memberMembershipId: 'memv3' + '00000000000' }; },
+  };
   adapter.dashboard = async ({ organizationId, projectId, activityPage = { page: 0, pageSize: 20 }, signal }) => {
     if (!organizationId) throw new Error('tenant context is required');
     const [orgResult, projectResult, activityResult] = await Promise.all([
@@ -88,6 +95,7 @@ export function createSupabaseAdapter({ client, sdkCreateClient, url, key, timeo
   };
   adapter.getTask = async ({ organizationId, projectId, taskId, signal }) => { const result = await query('tasks', taskFields, q => q.eq('id', taskId).eq('organization_id', organizationId).eq('project_id', projectId).single(), signal); checkTenant(result.data, organizationId, projectId); const comments = await adapter.listComments({ organizationId, projectId, taskId, page: 0, pageSize: 20, signal }); return { task: mapTask(result.data), creator: await adapter.getUser(result.data.creator_id, signal), assignee: result.data.assignee_id ? await adapter.getUser(result.data.assignee_id, signal) : null, comments }; };
   adapter.listComments = async ({ organizationId, projectId, taskId, page = 0, pageSize = 20, signal }) => { const [p, size] = pageArgs({ page, pageSize }); const result = await query('comments', commentFields, q => q.eq('organization_id', organizationId).eq('project_id', projectId).eq('task_id', taskId).order('created_at', { ascending: true }).order('id', { ascending: true }).range(p * size, p * size + size - 1), signal); const rows = result.data ?? []; rows.forEach(row => checkTenant(row, organizationId, projectId)); return { items: rows.map(mapComment), page: p, pageSize: size, total: result.count ?? rows.length, hasNext: (result.count ?? rows.length) > (p + 1) * size }; };
+  adapter.getUserByAuthSubject = async (authSubject, signal) => { const result = await query('users', userFields, q => q.eq('auth_subject', authSubject).single(), signal); if (!result.data?.id) throw new Error('malformed Supabase identity mapping'); return result.data.id; };
   adapter.getUser = async (id, signal) => { const result = await query('users', userFields, q => q.eq('id', id).single(), signal); if (!result.data?.id) throw new Error('malformed Supabase user response'); return mapUser(result.data); };
   adapter.searchTasks = async ({ organizationId, projectId, query: term, page = 0, pageSize = 20, signal }) => { const [p, size] = pageArgs({ page, pageSize }); const result = await query('tasks', taskFields, q => q.eq('organization_id', organizationId).eq('project_id', projectId).ilike('title', `%${String(term ?? '').replaceAll('%', '\\%')}%`).order('created_at', { ascending: true }).order('id', { ascending: true }).range(p * size, p * size + size - 1), signal); const rows = result.data ?? []; rows.forEach(row => checkTenant(row, organizationId, projectId)); return { items: rows.map(mapTask), page: p, pageSize: size, total: result.count ?? rows.length, hasNext: (result.count ?? rows.length) > (p + 1) * size }; };
   adapter.createTask = async ({ organizationId, projectId, creatorId, title, description, priority = 'medium', signal }) => { const result = await request(client.from('tasks').insert({ organization_id: organizationId, project_id: projectId, creator_id: creatorId, title, description, priority }).select(taskFields).single(), signal); checkTenant(result.data, organizationId, projectId); return mapTask(result.data); };
@@ -101,6 +109,6 @@ export function createSupabaseAdapter({ client, sdkCreateClient, url, key, timeo
   return adapter;
 }
 let defaultAdapter;
-async function getDefaultAdapter() { if (!defaultAdapter) { const [{ createClient }, key] = await Promise.all([import('@supabase/supabase-js'), readKey(join(process.env.BAAS_BENCH_RUNTIME || join(process.env.BAAS_BENCH_ROOT || '.', '.runtime'), 'supabase/docker/.env'), 'SUPABASE_PUBLISHABLE_KEY')]); const url = process.env.SUPABASE_URL || 'http://127.0.0.1:8000'; defaultAdapter = createSupabaseAdapter({ client: createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false } }) }); } return defaultAdapter; }
+async function getDefaultAdapter() { if (!defaultAdapter) { const [{ createClient }, key] = await Promise.all([import('@supabase/supabase-js'), readKey(join(process.env.BAAS_RUNTIME_DIR || join(process.env.BAAS_BENCH_ROOT || '.', '.runtime'), 'supabase/docker/.env'), 'SUPABASE_PUBLISHABLE_KEY')]); const url = process.env.SUPABASE_URL || 'http://127.0.0.1:8000'; defaultAdapter = createSupabaseAdapter({ client: createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false } }), sdkCreateClient: createClient, url, key }); } return defaultAdapter; }
 export async function createSession(credentials, options) { return (await getDefaultAdapter()).createSession(credentials, options); }
 export function createBackend(options = {}) { return options.client ? createSupabaseAdapter(options) : getDefaultAdapter(); }

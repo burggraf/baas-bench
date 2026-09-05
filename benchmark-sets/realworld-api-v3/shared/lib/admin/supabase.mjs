@@ -12,7 +12,7 @@ export function createSupabaseAdmin({ run = runCommand, root, runtime, seed = 42
   async function psql(sql, args = []) { return run(command, [...psqlArgs, ...args], { input: sql, timeoutMs: 60_000 }); }
   async function query(sql) { const result = await psql(sql, ['-At']); return result.stdout; }
   async function verify() { await verifyExactCounts(async sql => (await query(sql)).trim().split('\n').filter(Boolean).map(line => { const [table, row_count] = line.split('\t'); return { table, row_count }; })); }
-  async function teardown() { await psql('DROP SCHEMA IF EXISTS benchmark_fixture CASCADE; DROP SCHEMA IF EXISTS benchmark_auth CASCADE; DROP TABLE IF EXISTS public.activities, public.comments, public.tasks, public.projects, public.memberships, public.organizations, public.users CASCADE; DROP SCHEMA IF EXISTS benchmark_private CASCADE; DROP SCHEMA IF EXISTS benchmark_extensions CASCADE;'); }
+  async function teardown() { await psql("DO $$ BEGIN IF to_regclass('auth.sessions') IS NOT NULL THEN DELETE FROM auth.sessions WHERE user_id IN (SELECT id FROM auth.users WHERE email LIKE 'user-%@example.test'); END IF; IF to_regclass('auth.users') IS NOT NULL THEN DELETE FROM auth.users WHERE email LIKE 'user-%@example.test'; END IF; END $$; DROP SCHEMA IF EXISTS benchmark_fixture CASCADE; DROP SCHEMA IF EXISTS benchmark_auth CASCADE; DROP TABLE IF EXISTS public.activities, public.comments, public.tasks, public.projects, public.memberships, public.organizations, public.users CASCADE; DROP SCHEMA IF EXISTS benchmark_private CASCADE; DROP SCHEMA IF EXISTS benchmark_extensions CASCADE;"); }
   return {
     async setup() {
       try {
