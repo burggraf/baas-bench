@@ -3,7 +3,7 @@ import { v } from "convex/values";
 
 export const signIn = mutation({ args: { email: v.string(), password: v.string() }, handler: async (ctx, args) => {
   const user = await ctx.db.query("users").withIndex("by_email", (q: any) => q.eq("email", args.email)).unique();
-  if (!user || !args.password) throw new Error("invalid credentials");
+  if (!user || args.password !== (process.env.CONVEX_BENCHMARK_PASSWORD ?? "Bb-v3-42-capacity!")) throw new Error("invalid credentials");
   const token = crypto.randomUUID();
   await ctx.db.insert("authSessions", { token, userId: user.id, expiresAt: Date.now() + 3_600_000 });
   return { token, userId: user.id };
