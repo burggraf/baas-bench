@@ -1,5 +1,7 @@
 # Appwrite project-management capacity
 
-This case is the lifecycle scaffold for the authenticated project-management capacity workload through `tablesdb` using `appwrite@26.2.0` on Node.js 22 or newer. The five hooks delegate to the set-level dispatcher; workload, administration, fixture, correctness, and telemetry behavior is intentionally deferred.
+This case runs the authenticated project-management workload through Appwrite's official JavaScript `Account` and `TablesDB` SDKs on Node.js 22 or newer. Administrative provisioning and deterministic fixture loading use the server SDK outside measurement; each virtual user receives an isolated client and Account session.
 
-No benchmark result can be produced by this scaffold. Platform-specific topology, authentication, authorization, indexes, tuning, and deviations must be documented when the adapter is implemented.
+TablesDB rows are tenant-filtered by organization/project/task fields and returned through the shared normalized contract. Email/password sessions, refresh, sign-out, profile updates, pagination, search, and mutations are measured through the SDK. SDK calls that lack native abort options are bounded by the adapter timeout and invalidate unresolved requests.
+
+Appwrite's TablesDB row/permission model and native Account service are the case's declared access path; schema setup and permission configuration remain outside measured operations.

@@ -793,6 +793,58 @@ test('Convex assets declare tenant authorization, indexes, and bounded lifecycle
   assert.deepEqual(admin.deployArgs, ['deploy', '--typecheck', 'disable']);
 });
 
+test('Appwrite adapter isolates Account and TablesDB sessions and normalizes rows', async () => {
+  const { createAppwriteAdapter } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/appwrite.mjs');
+  const calls = [];
+  const api = {
+    Client: class { setEndpoint() { return this; } setProject() { return this; } },
+    Account: class { async createEmailPasswordSession(value) { calls.push(['signIn', value]); return { $id: 'session' }; } async get() { calls.push(['get']); return { $id: 'usr', email: 'u@example.test', name: 'User', registration: '2025-01-01', $updatedAt: '2025-01-01' }; } async deleteSession(value) { calls.push(['signOut', value]); } },
+    TablesDB: class { async listRows(value) { calls.push(['list', value]); return { rows: [], total: 0 }; } },
+    Query: { equal: (field, value) => `equal(${field},${value})`, orderAsc: field => `asc(${field})`, limit: value => `limit(${value})`, offset: value => `offset(${value})` },
+  };
+  const adapter = createAppwriteAdapter({ ...api, endpoint: 'http://appwrite/v1', projectId: 'p', databaseId: 'db', tableIds: { tasks: 'tasks' } });
+  const session = await adapter.createSession({ email: 'u@example.test', password: 'pw' });
+  assert.equal((await session.getProfile()).id, 'usr');
+  await session.listTasks({ organizationId: 'org', projectId: 'prj', page: 0, pageSize: 10 });
+  assert.ok(calls.some(call => call[0] === 'signIn'));
+  assert.ok(calls.some(call => call[0] === 'list' && call[1].databaseId === 'db'));
+  await session.close();
+});
+
+test('Appwrite admin and adapter declare TablesDB access-path metadata', async () => {
+  const { createAppwriteAdmin } = await import('../benchmark-sets/realworld-api-v3/shared/lib/admin/appwrite.mjs');
+  const { createAppwriteAdapter } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/appwrite.mjs');
+  assert.equal(typeof createAppwriteAdmin, 'function');
+  assert.equal(createAppwriteAdapter({ Client: class {}, Account: class {}, TablesDB: class {}, api: {}, databaseId: 'db' }).accessPath, 'javascript-sdk');
+});
+
+test('Nhost adapter uses native auth and parameterized GraphQL requests', async () => {
+  const { createNhostAdapter } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/nhost.mjs');
+  const calls = [];
+  const client = {
+    auth: {
+      signInEmailPassword: async value => { calls.push(['signIn', value]); return { body: { session: { accessToken: 'jwt', refreshToken: 'refresh', user: { id: 'usr', email: 'u@example.test', displayName: 'User', createdAt: '2025-01-01', updatedAt: '2025-01-01' } } } }; },
+      refreshSession: async () => ({ body: { session: { accessToken: 'jwt2', refreshToken: 'refresh2' } } }),
+      signOut: async () => { calls.push(['signOut']); },
+    },
+    graphql: { request: async value => { calls.push(['graphql', value]); return { body: { data: value.query.includes('listTasks') ? { tasks: [], tasksAggregate: { aggregate: { count: 0 } } } : { users: [{ id: 'usr', email: 'u@example.test', displayName: 'User', createdAt: '2025-01-01', updatedAt: '2025-01-01' }] } } }; } },
+  };
+  const adapter = createNhostAdapter({ createClient: () => client, client });
+  const session = await adapter.createSession({ email: 'u@example.test', password: 'pw' });
+  assert.equal((await session.getProfile()).id, 'usr');
+  await session.listTasks({ organizationId: 'org', projectId: 'prj', page: 0, pageSize: 10 });
+  assert.ok(calls.some(call => call[0] === 'signIn'));
+  assert.ok(calls.some(call => call[0] === 'graphql' && call[1].variables.organizationId === 'org'));
+  await session.close();
+});
+
+test('Nhost admin and adapter expose the Hasura GraphQL access path', async () => {
+  const { createNhostAdmin } = await import('../benchmark-sets/realworld-api-v3/shared/lib/admin/nhost.mjs');
+  const { createNhostAdapter } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/nhost.mjs');
+  assert.equal(typeof createNhostAdmin, 'function');
+  assert.equal(createNhostAdapter({ createClient: () => ({}) }).accessPath, 'graphql');
+});
+
 test('administrative dispatch invokes exactly the requested platform handler', async () => {
   const { dispatchAdmin } = await import('../benchmark-sets/realworld-api-v3/shared/lib/admin.mjs');
   const calls = [];

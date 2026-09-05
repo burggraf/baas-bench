@@ -1,0 +1,67 @@
+import { buildVirtualUserSpecs } from '../dataset.mjs';
+import { measureRemoteCall } from '../measurement.mjs';
+
+const mapUser = row => ({ id: row.id ?? row.$id, email: row.email, displayName: row.displayName ?? row.name, createdAt: row.createdAt ?? row.$createdAt, updatedAt: row.updatedAt ?? row.$updatedAt });
+const mapTask = row => ({ id: row.id ?? row.$id, organizationId: row.organizationId, projectId: row.projectId, creatorId: row.creatorId, assigneeId: row.assigneeId ?? null, title: row.title, description: row.description, status: row.status, priority: row.priority, dueDate: row.dueDate ?? null, createdAt: row.createdAt ?? row.$createdAt, updatedAt: row.updatedAt ?? row.$updatedAt });
+const mapComment = row => ({ id: row.id ?? row.$id, organizationId: row.organizationId, projectId: row.projectId, taskId: row.taskId, authorId: row.authorId, body: row.body, createdAt: row.createdAt ?? row.$createdAt, updatedAt: row.updatedAt ?? row.$updatedAt });
+const mapActivity = row => ({ id: row.id ?? row.$id, organizationId: row.organizationId, projectId: row.projectId ?? null, actorId: row.actorId, action: row.action, subjectType: row.subjectType, subjectId: row.subjectId, createdAt: row.createdAt ?? row.$createdAt });
+function pageArgs(page = 0, pageSize = 20) { if (!Number.isSafeInteger(page) || page < 0 || !Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 100) throw new Error('invalid page'); return [page, pageSize]; }
+
+export function createAppwriteAdapter({ Client, Account, TablesDB, Query = {}, ID = { unique: () => 'unique' }, endpoint = process.env.APPWRITE_URL || 'http://127.0.0.1:8080/v1', projectId = process.env.APPWRITE_PROJECT_ID || 'realworld-api-v3', databaseId = process.env.APPWRITE_DATABASE_ID || 'realworld-api-v3', tableIds = {}, timeoutMs = 30_000 } = {}) {
+  if (typeof Client !== 'function' || typeof Account !== 'function' || typeof TablesDB !== 'function') throw new TypeError('Appwrite SDK constructors are required');
+  const tables = { users: 'users', organizations: 'organizations', memberships: 'memberships', projects: 'projects', tasks: 'tasks', comments: 'comments', activities: 'activities', ...tableIds };
+  function buildClient() { const client = new Client().setEndpoint(endpoint).setProject(projectId); return { client, account: new Account(client), tablesDB: new TablesDB(client) }; }
+  async function remote(operation, signal, limit = timeoutMs) {
+    return measureRemoteCall(async () => {
+      let timerId;
+      const timer = new Promise((_, reject) => { timerId = setTimeout(() => reject(new Error('Appwrite request timed out')), limit); });
+      let onAbort;
+      const cancelled = signal && new Promise((_, reject) => { onAbort = () => reject(signal.reason ?? new Error('Appwrite request aborted')); if (signal.aborted) onAbort(); else signal.addEventListener('abort', onAbort, { once: true }); });
+      try { return await Promise.race(cancelled ? [operation, timer, cancelled] : [operation, timer]); } finally { clearTimeout(timerId); if (onAbort) signal.removeEventListener('abort', onAbort); }
+    });
+  }
+  function queriesFor(filters, page, pageSize) {
+    const queries = [];
+    for (const [field, value] of Object.entries(filters)) if (value !== undefined && value !== null) queries.push(typeof Query.equal === 'function' ? Query.equal(field, value) : `equal(${field},${value})`);
+    if (typeof Query.orderAsc === 'function') queries.push(Query.orderAsc('createdAt'), Query.orderAsc('$id')); else queries.push('orderAsc(createdAt)', 'orderAsc($id)');
+    if (typeof Query.limit === 'function') queries.push(Query.limit(pageSize), Query.offset(page * pageSize)); else queries.push(`limit(${pageSize})`, `offset(${page * pageSize})`);
+    return queries;
+  }
+  async function list(tablesDB, name, filters, page, pageSize, signal) { return remote(tablesDB.listRows({ databaseId, tableId: tables[name], queries: queriesFor(filters, page, pageSize), total: true }), signal); }
+  function makeSession(resources, options = {}) {
+    const session = { ...resources, controller: new AbortController(), timeoutMs: options.timeoutMs ?? timeoutMs, userId: undefined };
+    let externalAbort;
+    if (options.signal) { externalAbort = () => session.controller.abort(options.signal.reason); if (options.signal.aborted) externalAbort(); else options.signal.addEventListener('abort', externalAbort, { once: true }); }
+    const call = (operation, signal) => { const controller = new AbortController(); const abort = () => controller.abort(session.controller.signal.reason); const external = () => controller.abort(signal.reason); if (session.controller.signal.aborted) abort(); else session.controller.signal.addEventListener('abort', abort, { once: true }); if (signal?.aborted) external(); else signal?.addEventListener('abort', external, { once: true }); return Promise.resolve().then(() => operation(controller.signal)).finally(() => { session.controller.signal.removeEventListener('abort', abort); signal?.removeEventListener('abort', external); }); };
+    session.cancelPending = () => session.controller.abort(new Error('Appwrite session cancelled'));
+    session.close = async () => { try { await session.signOut(); } finally { session.cancelPending(); if (externalAbort) options.signal.removeEventListener('abort', externalAbort); } };
+    session.getProfile = () => call(async signal => { const row = await remote(session.account.get(), signal, session.timeoutMs); session.userId = row.$id; return mapUser(row); });
+    session.refreshSession = () => call(async signal => { await remote(session.account.updateSession({ sessionId: 'current' }), signal, session.timeoutMs); return session; }); session.refresh = session.refreshSession;
+    session.signOut = () => call(() => remote(session.account.deleteSession({ sessionId: 'current' }), undefined, session.timeoutMs), undefined);
+    const methods = ['dashboard', 'listTasks', 'getTask', 'createTask', 'updateTask', 'addComment', 'updateComment', 'searchTasks', 'updateMembershipRole', 'updateProfile'];
+    for (const name of methods) session[name] = args => call(signal => adapter[name]({ ...args, ...(name === 'createTask' ? { creatorId: session.userId } : {}), ...(name === 'addComment' ? { authorId: session.userId } : {}), session, signal }), args?.signal);
+    return session;
+  }
+  const adapter = {
+    accessPath: 'javascript-sdk', deviations: ['Appwrite TablesDB rows and Account sessions are measured through the official JavaScript SDK; schema provisioning uses the Appwrite administration API.'],
+    virtualUsers(count = 10_000, seed = 42) { return buildVirtualUserSpecs(count, seed); },
+    correctnessFixture() { const specs = buildVirtualUserSpecs(3_201, 42); const owner = specs[0], outsider = specs[1], admin = specs[1_600], member = specs[3_200]; return { organizationId: owner.organizationId, projectId: owner.projectId, taskId: owner.taskId, commentId: owner.commentId, owner: owner.credentials, member: { ...member.credentials, organizationId: owner.organizationId, projectId: owner.projectId, taskId: owner.taskId, commentId: owner.commentId }, admin: { ...admin.credentials, organizationId: owner.organizationId, projectId: owner.projectId, taskId: owner.taskId, commentId: owner.commentId }, outsider: outsider.credentials, memberMembershipId: 'memv3' + (3_200).toString(36).padStart(11, '0'), adminMembershipId: 'memv3' + (1_600).toString(36).padStart(11, '0'), ownerMembershipId: 'memv3' + '00000000000', memberUserId: member.credentials.email.match(/user-(usrv3[0-9a-z]+)/)?.[1] }; },
+    async createSession(credentials, options = {}) { const resources = buildClient(); await remote(resources.account.createEmailPasswordSession(credentials), options.signal, options.timeoutMs ?? timeoutMs); return makeSession(resources, options); },
+  };
+  adapter.dashboard = async ({ organizationId, projectId, activityPage = { page: 0, pageSize: 20 }, session, signal }) => { const [org, projects, activities] = await Promise.all([session.tablesDB.getRow({ databaseId, tableId: tables.organizations, rowId: organizationId }), list(session.tablesDB, 'projects', { organizationId }, 0, 100, signal), list(session.tablesDB, 'activities', { organizationId, projectId }, activityPage.page, activityPage.pageSize, signal)]); if (!org || (org.organizationId && org.organizationId !== organizationId)) throw new Error('Appwrite tenant boundary violation'); return { organization: { id: org.id ?? org.$id, name: org.name, ownerId: org.ownerId, createdAt: org.createdAt ?? org.$createdAt }, projects: (projects.rows ?? []).map(row => ({ ...row, id: row.id ?? row.$id })), recentActivity: (activities.rows ?? []).map(mapActivity) }; };
+  adapter.listTasks = async ({ organizationId, projectId, status, assigneeId, page = 0, pageSize = 20, session, signal }) => { const [p, size] = pageArgs(page, pageSize); const result = await list(session.tablesDB, 'tasks', { organizationId, projectId, status, assigneeId }, p, size, signal); return { items: (result.rows ?? []).map(mapTask), page: p, pageSize: size, total: result.total ?? result.rows?.length ?? 0, hasNext: (result.total ?? 0) > (p + 1) * size }; };
+  adapter.getTask = async ({ organizationId, projectId, taskId, session, signal }) => { const row = await remote(session.tablesDB.getRow({ databaseId, tableId: tables.tasks, rowId: taskId }), signal, session.timeoutMs); if (row.organizationId !== organizationId || row.projectId !== projectId) throw new Error('Appwrite tenant boundary violation'); const comments = await adapter.listComments({ organizationId, projectId, taskId, page: 0, pageSize: 20, session, signal }); return { task: mapTask(row), creator: mapUser(await remote(session.tablesDB.getRow({ databaseId, tableId: tables.users, rowId: row.creatorId }), signal, session.timeoutMs)), assignee: row.assigneeId ? mapUser(await remote(session.tablesDB.getRow({ databaseId, tableId: tables.users, rowId: row.assigneeId }), signal, session.timeoutMs)) : null, comments }; };
+  adapter.listComments = async ({ organizationId, projectId, taskId, page = 0, pageSize = 20, session, signal }) => { const [p, size] = pageArgs(page, pageSize); const result = await list(session.tablesDB, 'comments', { organizationId, projectId, taskId }, p, size, signal); return { items: (result.rows ?? []).map(mapComment), page: p, pageSize: size, total: result.total ?? result.rows?.length ?? 0, hasNext: (result.total ?? 0) > (p + 1) * size }; };
+  adapter.searchTasks = async ({ organizationId, projectId, query, page = 0, pageSize = 20, session, signal }) => { const [p, size] = pageArgs(page, pageSize); const filters = { organizationId, projectId }; const queries = queriesFor(filters, p, size); queries.push(typeof Query.search === 'function' ? Query.search('title', query) : `search(title,${query})`); const result = await remote(session.tablesDB.listRows({ databaseId, tableId: tables.tasks, queries, total: true }), signal, session.timeoutMs); return { items: (result.rows ?? []).map(mapTask), page: p, pageSize: size, total: result.total ?? result.rows?.length ?? 0, hasNext: (result.total ?? 0) > (p + 1) * size }; };
+  adapter.createTask = async ({ organizationId, projectId, title, description, priority = 'medium', session, signal }) => mapTask(await remote(session.tablesDB.createRow({ databaseId, tableId: tables.tasks, rowId: ID.unique(), data: { organizationId, projectId, title, description, priority, status: 'todo', creatorId: session.userId, assigneeId: null } }), signal, session.timeoutMs));
+  adapter.updateTask = async ({ organizationId, projectId, taskId, session, signal, ...changes }) => mapTask(await remote(session.tablesDB.updateRow({ databaseId, tableId: tables.tasks, rowId: taskId, data: Object.fromEntries(Object.entries(changes).filter(([key]) => ['title', 'description', 'status', 'priority', 'dueDate'].includes(key))) }), signal, session.timeoutMs));
+  adapter.addComment = async ({ organizationId, projectId, taskId, body, session, signal }) => mapComment(await remote(session.tablesDB.createRow({ databaseId, tableId: tables.comments, rowId: ID.unique(), data: { organizationId, projectId, taskId, authorId: session.userId, body } }), signal, session.timeoutMs));
+  adapter.updateComment = async ({ commentId, body, session, signal }) => mapComment(await remote(session.tablesDB.updateRow({ databaseId, tableId: tables.comments, rowId: commentId, data: { body } }), signal, session.timeoutMs));
+  adapter.updateMembershipRole = async ({ membershipId, role, session, signal }) => remote(session.tablesDB.updateRow({ databaseId, tableId: tables.memberships, rowId: membershipId, data: { role } }), signal, session.timeoutMs);
+  adapter.updateProfile = async ({ displayName, session, signal }) => mapUser(await remote(session.account.updateName({ name: displayName }), signal, session.timeoutMs));
+  return adapter;
+}
+let defaultAdapter;
+async function getDefaultAdapter() { if (!defaultAdapter) { const sdk = await import('appwrite'); defaultAdapter = createAppwriteAdapter({ ...sdk, endpoint: process.env.APPWRITE_URL, projectId: process.env.APPWRITE_PROJECT_ID, databaseId: process.env.APPWRITE_DATABASE_ID }); } return defaultAdapter; }
+export async function createSession(credentials, options) { return (await getDefaultAdapter()).createSession(credentials, options); }
+export function createBackend(options = {}) { return options.Client ? createAppwriteAdapter(options) : getDefaultAdapter(); }
