@@ -1,5 +1,7 @@
 # Directus project-management capacity
 
-This case is the lifecycle scaffold for the authenticated project-management capacity workload through `rest` using `@directus/sdk@25.0.1` on Node.js 22 or newer. The five hooks delegate to the set-level dispatcher; workload, administration, fixture, correctness, and telemetry behavior is intentionally deferred.
+This case runs authenticated project-management workflows through `@directus/sdk@25.0.1` REST and authentication services on Node.js 22 or newer. Each virtual user has an isolated Directus client and native password session; collection, field, relation, permission, index, and fixture setup happen administratively outside measurement.
 
-No benchmark result can be produced by this scaffold. Platform-specific topology, authentication, authorization, indexes, tuning, and deviations must be documented when the adapter is implemented.
+All measured list, search, item, and mutation requests carry organization/project/task filters and stable created-time/ID ordering. The adapter normalizes Directus REST rows into the shared contract and bounds SDK calls with per-request cancellation timeouts.
+
+Directus REST plus native user sessions are the declared access path for this case.

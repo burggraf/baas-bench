@@ -845,6 +845,26 @@ test('Nhost admin and adapter expose the Hasura GraphQL access path', async () =
   assert.equal(createNhostAdapter({ createClient: () => ({}) }).accessPath, 'graphql');
 });
 
+test('Directus adapter uses isolated REST/auth clients and tenant filters', async () => {
+  const { createDirectusAdapter } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/directus.mjs');
+  const calls = [];
+  const client = { async login(value) { calls.push(['login', value]); return { access_token: 'token' }; }, async refresh() { return {}; }, async logout() { calls.push(['logout']); }, async request(operation) { calls.push(['request', operation]); if (operation.kind === 'me') return { id: 'usr', email: 'u@example.test', display_name: 'User', created_at: '2025-01-01', updated_at: '2025-01-01' }; return { data: [], total: 0 }; }, with() { return this; } };
+  const adapter = createDirectusAdapter({ client, createDirectus: () => client, rest: () => 'rest', authentication: () => 'auth' });
+  const session = await adapter.createSession({ email: 'u@example.test', password: 'pw' });
+  assert.equal((await session.getProfile()).id, 'usr');
+  await session.listTasks({ organizationId: 'org', projectId: 'prj', page: 0, pageSize: 10 });
+  assert.ok(calls.some(call => call[0] === 'login'));
+  assert.ok(calls.some(call => call[0] === 'request' && JSON.stringify(call[1]).includes('organization_id')));
+  await session.close();
+});
+
+test('Directus admin and adapter expose REST access-path metadata', async () => {
+  const { createDirectusAdmin } = await import('../benchmark-sets/realworld-api-v3/shared/lib/admin/directus.mjs');
+  const { createDirectusAdapter } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/directus.mjs');
+  assert.equal(typeof createDirectusAdmin, 'function');
+  assert.equal(createDirectusAdapter({ client: {}, createDirectus: () => ({}) }).accessPath, 'javascript-sdk');
+});
+
 test('administrative dispatch invokes exactly the requested platform handler', async () => {
   const { dispatchAdmin } = await import('../benchmark-sets/realworld-api-v3/shared/lib/admin.mjs');
   const calls = [];
