@@ -182,8 +182,8 @@ test('Supabase .env key lookup parses LF and CRLF files', async () => {
   const { readKey } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/supabase.mjs');
   const dir = await mkdtemp(join(tmpdir(), 'supabase-env-'));
   try {
-    for (const newline of ['\\n', '\\r\\n']) {
-      const path = join(dir, `env-${newline === '\\n' ? 'lf' : 'crlf'}`);
+    for (const newline of ['\n', '\r\n']) {
+      const path = join(dir, `env-${newline === '\n' ? 'lf' : 'crlf'}`);
       await writeFile(path, `OTHER=no${newline}SUPABASE_PUBLISHABLE_KEY=test-key${newline}`);
       assert.equal(await readKey(path, 'SUPABASE_PUBLISHABLE_KEY'), 'test-key');
     }
