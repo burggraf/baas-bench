@@ -175,6 +175,21 @@ test('Supabase adapter maps PostgREST rows and enforces tenant-bound pagination'
   await assert.rejects(adapter.listTasks({ organizationId: 'org', projectId: 'foreign', page: 0, pageSize: 10 }), /tenant|boundary/i);
 });
 
+test('Supabase .env key lookup parses LF and CRLF files', async () => {
+  const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { readKey } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/supabase.mjs');
+  const dir = await mkdtemp(join(tmpdir(), 'supabase-env-'));
+  try {
+    for (const newline of ['\\n', '\\r\\n']) {
+      const path = join(dir, `env-${newline === '\\n' ? 'lf' : 'crlf'}`);
+      await writeFile(path, `OTHER=no${newline}SUPABASE_PUBLISHABLE_KEY=test-key${newline}`);
+      assert.equal(await readKey(path, 'SUPABASE_PUBLISHABLE_KEY'), 'test-key');
+    }
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 test('Supabase adapter maps auth sessions and profile rows without admin APIs', async () => {
   const { createSupabaseAdapter } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/supabase.mjs');
   let authOptions;

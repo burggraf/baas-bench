@@ -1,7 +1,7 @@
 import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { measureRemoteCall } from '../measurement.mjs';
-async function readKey(path, name) { const text = await readFile(path, 'utf8'); const line = text.split(/\\r?\\n/).find(value => value.startsWith(`${name}=`)); if (!line) throw new Error(`missing ${name}`); return line.slice(name.length + 1); }
+export async function readKey(path, name) { const text = await readFile(path, 'utf8'); const line = text.split(/\r?\n/).find(value => value.startsWith(`${name}=`)); if (!line) throw new Error(`missing ${name}`); return line.slice(name.length + 1); }
 
 // Verified @supabase/supabase-js API (pinned runtime): createClient(url, key, options),
 // client.auth.signInWithPassword({email,password}), refreshSession(), signOut(),
@@ -100,5 +100,5 @@ export function createSupabaseAdapter({ client, sdkCreateClient, url, key, timeo
 }
 let defaultAdapter;
 async function getDefaultAdapter() { if (!defaultAdapter) { const [{ createClient }, key] = await Promise.all([import('@supabase/supabase-js'), readKey(join(process.env.BAAS_BENCH_RUNTIME || join(process.env.BAAS_BENCH_ROOT || '.', '.runtime'), 'supabase/docker/.env'), 'SUPABASE_PUBLISHABLE_KEY')]); const url = process.env.SUPABASE_URL || 'http://127.0.0.1:8000'; defaultAdapter = createSupabaseAdapter({ client: createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false } }) }); } return defaultAdapter; }
-export async function createSession(credentials) { return (await getDefaultAdapter()).createSession(credentials); }
+export async function createSession(credentials, options) { return (await getDefaultAdapter()).createSession(credentials, options); }
 export function createBackend(options = {}) { return options.client ? createSupabaseAdapter(options) : getDefaultAdapter(); }
