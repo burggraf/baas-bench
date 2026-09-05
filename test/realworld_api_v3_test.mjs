@@ -190,6 +190,21 @@ test('Supabase adapter maps auth sessions and profile rows without admin APIs', 
   await session.signOut();
 });
 
+test('Supabase session timeout is per request, not session-wide', async () => {
+  const { createSupabaseAdapter } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/supabase.mjs');
+  const user = { id: 'usr', email: 'u@example.test', user_metadata: { display_name: 'User' }, created_at: '2025-01-01', updated_at: '2025-01-01' };
+  const auth = { signInWithPassword: async () => ({ data: { session: { access_token: 'token' } }, error: null }), getUser: async () => ({ data: { user }, error: null }) };
+  const adapter = createSupabaseAdapter({ client: { auth }, timeoutMs: 30 });
+  const session = await adapter.createSession({ email: user.email, password: 'secret' }, { timeoutMs: 5 });
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal((await session.getProfile()).id, 'usr');
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal((await session.getProfile()).id, 'usr');
+  const slow = { then() { return new Promise(() => {}); } };
+  const timeoutAdapter = createSupabaseAdapter({ client: { from() { return { select() { return this; }, eq() { return this; }, order() { return this; }, range() { return slow; } }; } }, timeoutMs: 5 });
+  await assert.rejects(timeoutAdapter.listTasks({ organizationId: 'org', projectId: 'prj' }), /timed out/);
+});
+
 test('workflow selection follows the approved application mix', async () => {
   const { selectWorkflow } = await import('../benchmark-sets/realworld-api-v3/shared/lib/workflows.mjs');
   const weights = { dashboard: 20, taskList: 25, taskDetail: 15, createTask: 10, updateTask: 12, addComment: 10, search: 5, profileUpdate: 1, signIn: 2 };

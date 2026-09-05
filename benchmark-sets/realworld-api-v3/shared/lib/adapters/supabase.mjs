@@ -19,12 +19,12 @@ function pageArgs(value) { const page = value.page ?? 0; const pageSize = value.
 function checkTenant(row, organizationId, projectId) { if (!row || row.organization_id !== organizationId || (projectId && row.project_id !== projectId)) throw new Error('Supabase tenant boundary violation'); }
 
 export function createSupabaseAdapter({ client, sdkCreateClient, url, key, timeoutMs = 30_000 } = {}) {
-  async function request(action, signal) {
+  async function request(action, signal, requestTimeoutMs = timeoutMs) {
     return measureRemoteCall(async () => {
       if (signal && typeof action?.abortSignal === 'function') action.abortSignal(signal);
       let timer;
       const pending = Promise.resolve(action);
-      const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Supabase request timed out')), timeoutMs); });
+      const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Supabase request timed out')), requestTimeoutMs); });
       const cancelled = signal && new Promise((_, reject) => {
         if (signal.aborted) reject(signal.reason ?? new Error('Supabase request aborted'));
         else signal.addEventListener('abort', () => reject(signal.reason ?? new Error('Supabase request aborted')), { once: true });
@@ -38,17 +38,22 @@ export function createSupabaseAdapter({ client, sdkCreateClient, url, key, timeo
   }
   async function query(table, fields, configure, signal) { const builder = configure((client ?? {}).from(table).select(fields)); return request(builder, signal); }
   function makeSession(authClient, options = {}) {
-    const session = { cancelPending() { session.controller.abort(); }, close() { session.cancelPending(); clearTimeout(session.timer); },
-      async refresh() { const result = await request(authClient.auth.refreshSession(session.requestOptions), session.signal); ensure(result.data?.session); return result.data.session; },
-      async signOut() { await request(authClient.auth.signOut(session.requestOptions), session.signal); },
-      async getProfile() { const result = await request(authClient.auth.getUser(session.requestOptions), session.signal); const user = result.data?.user; if (!user) throw new Error('malformed Supabase user'); return mapUser(user); },
-    };
+    const session = { cancelPending() { session.controller.abort(); }, close() { session.cancelPending(); } };
     session.controller = new AbortController();
-    session.requestOptions = { signal: session.controller.signal, ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }) };
     if (options.signal) { if (options.signal.aborted) session.controller.abort(options.signal.reason); else options.signal.addEventListener('abort', () => session.controller.abort(options.signal.reason), { once: true }); }
-    if (options.timeoutMs !== undefined) session.timer = setTimeout(() => session.controller.abort(new Error('Supabase request timed out')), options.timeoutMs);
-    Object.defineProperty(session, 'signal', { get: () => session.controller.signal });
-    for (const name of ['dashboard', 'listTasks', 'getTask', 'createTask', 'updateTask', 'addComment', 'updateComment', 'searchTasks', 'updateMembershipRole', 'updateProfile']) session[name] = (...args) => adapter[name](...(args.length ? [{ ...args[0], signal: args[0]?.signal ?? session.signal }] : [{ signal: session.signal }]));
+    const call = async (action, args = {}) => {
+      const controller = new AbortController();
+      const onAbort = () => controller.abort(session.controller.signal.reason);
+      if (session.controller.signal.aborted) controller.abort(session.controller.signal.reason);
+      else session.controller.signal.addEventListener('abort', onAbort, { once: true });
+      const timer = options.timeoutMs === undefined ? undefined : setTimeout(() => controller.abort(new Error('Supabase request timed out')), options.timeoutMs);
+      try { return await action({ ...args, signal: controller.signal }); }
+      finally { clearTimeout(timer); session.controller.signal.removeEventListener('abort', onAbort); }
+    };
+    session.refresh = () => call(({ signal }) => request(authClient.auth.refreshSession({ signal }), signal, options.timeoutMs));
+    session.signOut = () => call(({ signal }) => request(authClient.auth.signOut({ signal }), signal, options.timeoutMs));
+    session.getProfile = () => call(async ({ signal }) => { const result = await request(authClient.auth.getUser({ signal }), signal, options.timeoutMs); const user = result.data?.user; if (!user) throw new Error('malformed Supabase user'); return mapUser(user); });
+    for (const name of ['dashboard', 'listTasks', 'getTask', 'createTask', 'updateTask', 'addComment', 'updateComment', 'searchTasks', 'updateMembershipRole', 'updateProfile']) session[name] = (args = {}) => call(callArgs => adapter[name]({ ...args, signal: callArgs.signal }));
     return session;
   }
   async function createSession(credentials, options = {}) {
@@ -56,7 +61,7 @@ export function createSupabaseAdapter({ client, sdkCreateClient, url, key, timeo
     const controller = new AbortController();
     const requestOptions = { signal: options.signal ?? controller.signal, ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }) };
     if (options.signal) { if (options.signal.aborted) controller.abort(options.signal.reason); else options.signal.addEventListener('abort', () => controller.abort(options.signal.reason), { once: true }); }
-    const result = await request(authClient.auth.signInWithPassword(credentials, requestOptions), controller.signal);
+    const result = await request(authClient.auth.signInWithPassword(credentials, requestOptions), controller.signal, options.timeoutMs);
     if (!result.data?.session) throw new Error('malformed Supabase session');
     const session = makeSession(authClient, options); session.accessToken = result.data.session.access_token; return session;
   }
