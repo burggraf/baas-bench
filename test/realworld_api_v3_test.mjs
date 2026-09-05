@@ -404,15 +404,47 @@ test('postgres admin schema provides tenant RLS, workload indexes, activity, res
   assert.match(schema, /references public\.users\(id\)/i);
   assert.match(schema, /foreign key \(project_id, organization_id\) references public\.projects/i);
   assert.match(schema, /foreign key \(task_id, project_id, organization_id\) references public\.tasks/i);
-  for (const index of ['memberships_user_idx', 'projects_organization_idx', 'tasks_project_idx', 'tasks_assignee_idx', 'tasks_title_idx', 'comments_task_idx', 'activities_organization_idx']) {
-    assert.match(schema, new RegExp(`create index ${index}`, 'i'));
+  const indexes = {
+    memberships_user_idx: 'user_id, organization_id',
+    projects_organization_idx: 'organization_id, created_at, id',
+    tasks_project_idx: 'organization_id, project_id, created_at, id',
+    tasks_assignee_idx: 'organization_id, assignee_id',
+    tasks_title_idx: null,
+    comments_task_idx: 'organization_id, project_id, task_id, created_at, id',
+    activities_organization_idx: 'organization_id, created_at desc, id desc',
+  };
+  for (const [index, columns] of Object.entries(indexes)) {
+    if (columns) assert.match(schema, new RegExp(`create index ${index} on public\\.\\w+\\(${columns}\\)`, 'i'), `${index} columns/operator class`);
   }
+  assert.match(schema, /create index tasks_title_idx on public\.tasks using gin\(title benchmark_extensions\.gin_trgm_ops\)/i);
   assert.match(schema, /request\.jwt\.claim\.sub/);
   assert.match(schema, /x-hasura-user-id/);
   assert.match(schema, /app\.user_id/);
-  assert.match(schema, /is_manager\(organization_id\)/);
-  assert.match(schema, /create trigger tasks_activity/i);
-  assert.match(schema, /create trigger comments_activity/i);
+  const policies = {
+    organizations_member_read: 'is_member\\(id\\)',
+    memberships_member_read: 'is_member\\(organization_id\\)',
+    memberships_manager_write: 'is_manager\\(organization_id\\)',
+    projects_member_read: 'is_member\\(organization_id\\)',
+    tasks_member_read: 'is_member\\(benchmark_private\\.task_organization\\(tasks\\)\\)',
+    comments_member_read: 'is_member\\(benchmark_private\\.comment_organization\\(comments\\)\\)',
+    activities_member_read: 'is_member\\(organization_id\\)',
+  };
+  for (const [policy, predicate] of Object.entries(policies)) {
+    const declaration = schema.match(new RegExp(`create policy ${policy}[^;]+`, 'i'))?.[0];
+    assert.ok(declaration, `${policy} exists`);
+    assert.match(declaration, new RegExp(predicate, 'i'), `${policy} tenant predicate`);
+  }
+  assert.match(schema, /create policy memberships_manager_write[\s\S]*?for update[\s\S]*?is_manager/i);
+  assert.match(schema, /create policy tasks_member_insert[\s\S]*?creator_id = benchmark_private\.current_user_id/i);
+  assert.match(schema, /create policy comments_member_insert[\s\S]*?author_id = benchmark_private\.current_user_id/i);
+  assert.match(schema, /create trigger tasks_activity after insert or update/i);
+  assert.match(schema, /create trigger comments_activity after insert or update/i);
+  const activity = schema.match(/create function benchmark_private\.log_workflow_activity[\s\S]*?create trigger tasks_activity/i)?.[0] ?? '';
+  assert.match(activity, /app_user text := benchmark_private\.current_user_id/);
+  assert.match(activity, /organization_id/);
+  assert.match(activity, /actor_id/);
+  assert.match(activity, /case when tg_table_name = 'comments'/i);
+  assert.match(activity, /subject_id/);
   assert.match(schema, /create table benchmark_auth\.passwords/i);
   assert.match(schema, /create table benchmark_auth\.sessions/i);
   assert.match(schema, /create schema if not exists benchmark_extensions/i);
@@ -439,7 +471,22 @@ test('postgres admin schema provides tenant RLS, workload indexes, activity, res
   assert.doesNotMatch(schema, /auth\.uid\(|auth\.users|create role|alter role/i);
   assert.match(CREATE_FIXTURE_STATE_SQL, /realworld-api-v3-baseline-v1/);
   assert.match(RESET_FIXTURE_STATE_SQL, /realworld-api-v3-baseline-v1/);
-  assert.match(RESET_FIXTURE_STATE_SQL, /truncate table/i);
+  assert.match(RESET_FIXTURE_STATE_SQL, /truncate table public\.activities, public\.comments, public\.tasks, public\.projects, public\.memberships, public\.organizations, public\.users cascade/i);
+  for (const table of ['users', 'organizations', 'memberships', 'projects', 'tasks', 'comments', 'activities']) {
+    assert.match(RESET_FIXTURE_STATE_SQL, new RegExp(`insert into public\\.${table} select \\* from benchmark_fixture\\.${table}`, 'i'));
+  }
+  assert.match(RESET_FIXTURE_STATE_SQL, /insert into benchmark_auth\.passwords select \* from benchmark_fixture\.passwords/i);
+  assert.match(RESET_FIXTURE_STATE_SQL, /truncate table benchmark_auth\.sessions/i);
+  const signIn = schema.match(/create function benchmark_auth\.sign_in[\s\S]*?\$\$;/i)?.[0] ?? '';
+  assert.match(signIn, /crypt\(login_password, p\.password_hash\)/i);
+  assert.match(signIn, /invalid credentials/i);
+  const validateSession = schema.match(/create function benchmark_auth\.validate_session[\s\S]*?\$\$;/i)?.[0] ?? '';
+  const signOut = schema.match(/create function benchmark_auth\.sign_out[\s\S]*?\$\$;/i)?.[0] ?? '';
+  assert.match(validateSession, /expires_at > (?:pg_catalog\.)?clock_timestamp/i);
+  assert.match(signOut, /delete from benchmark_auth\.sessions/i);
+  assert.match(signIn, /set_config\('app\.user_id', app_user, true\)/i);
+  assert.match(validateSession, /set_config\('app\.user_id', app_user, true\)/i);
+  assert.match(signOut, /set_config\('app\.user_id', '', true\)/i);
   assert.match(exactCountSql(), /union all/i);
 });
 
@@ -474,7 +521,7 @@ test('postgres admin streams escaped bounded COPY and verifies every exact count
   await assert.rejects(verifyExactCounts(async () => [...exact, { table: 'intruder', count: '0' }]), /unexpected table/i);
 });
 
-test('postgres parameterized administrative transports preserve SQL, values, results, and failures', async () => {
+test('postgres admin parameterized administrative transports preserve SQL, values, results, and failures', async () => {
   const {
     CREATE_FIXTURE_STATE_SQL, RESET_FIXTURE_STATE_SQL, CREATE_NEON_PASSWORDS_SQL,
     createFixtureState, resetFixtureState, createNeonPasswords,
