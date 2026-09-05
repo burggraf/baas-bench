@@ -890,6 +890,10 @@ test('PocketBase migration and admin expose collection lifecycle', async () => {
   const migration = readFileSync(new URL('../benchmark-sets/realworld-api-v3/shared/pocketbase/migration.js', import.meta.url), 'utf8');
   assert.equal(typeof createPocketBaseAdmin, 'function');
   assert.match(migration, /organizations|tasks|comments|activities/);
+  assert.match(migration, /title|description|priority/);
+  const admin = readFileSync(new URL('../benchmark-sets/realworld-api-v3/shared/lib/admin/pocketbase.mjs', import.meta.url), 'utf8');
+  assert.match(admin, /authWithPassword|superuser/);
+  assert.match(admin, /seedDataset/);
 });
 
 test('TrailBase adapter uses the official record client with isolated auth sessions', async () => {
