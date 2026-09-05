@@ -122,6 +122,40 @@ test('dataset IDs, roles, references, and virtual-user contexts are stable', asy
   assert.throws(() => buildVirtualUserSpecs(16_001, 42), /exceed/);
 });
 
+test('Supabase adapter exports runtime backend and supports dashboard', async () => {
+  const { createBackend } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/supabase.mjs');
+  assert.equal(typeof createBackend, 'function');
+  const rows = {
+    organizations: [{ id: 'org', name: 'Org', owner_id: 'usr', created_at: '2025-01-01' }],
+    projects: [{ id: 'prj', organization_id: 'org', name: 'Project', status: 'active', created_at: '2025-01-01', updated_at: '2025-01-01' }],
+    activities: [{ id: 'act', organization_id: 'org', project_id: 'prj', actor_id: 'usr', action: 'created', subject_type: 'task', subject_id: 'tsk', created_at: '2025-01-01' }],
+  };
+  const client = { from(table) { return { select() { return { eq(field, value) { this.value = value; return this; }, single() { return Promise.resolve({ data: rows[table][0], error: null }); }, order() { return this; }, range() { return Promise.resolve({ data: rows[table], count: rows[table].length, error: null }); }, then(resolve) { return Promise.resolve({ data: rows[table], error: null }).then(resolve); } }; }, update() { return { eq() { return this; }, select() { return { single: async () => ({ data: null, error: null }) }; } }; } }; } };
+  const backend = createBackend({ client });
+  const value = await backend.dashboard({ organizationId: 'org', projectId: 'prj', activityPage: { page: 0, pageSize: 10 } });
+  assert.equal(value.organization.id, 'org');
+  assert.equal(value.projects[0].organizationId, 'org');
+});
+
+test('Supabase adapter propagates abort signals to query builders and updateTask', async () => {
+  const { createSupabaseAdapter } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/supabase.mjs');
+  const signals = [];
+  const builder = { select() { return this; }, eq() { return this; }, order() { return this; }, range() { return this; }, then(resolve) { return Promise.resolve({ data: [], count: 0, error: null }).then(resolve); }, abortSignal(signal) { signals.push(signal); return this; } };
+  const client = { from() { return { ...builder, update() { return { eq() { return this; }, select() { return { single: async () => ({ data: null, error: null }) }; } }; } }; } };
+  const adapter = createSupabaseAdapter({ client });
+  const signal = new AbortController().signal;
+  await adapter.listTasks({ organizationId: 'org', projectId: 'prj', signal });
+  await assert.rejects(adapter.updateTask({ organizationId: 'org', projectId: 'prj', taskId: 'tsk', title: 'x', signal }), /malformed|Supabase|Cannot/);
+  assert.ok(signals.includes(signal));
+});
+
+test('Supabase adapter enforces request timeout', async () => {
+  const { createSupabaseAdapter } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/supabase.mjs');
+  const pending = { select() { return this; }, eq() { return this; }, order() { return this; }, range() { return this; }, then() { return new Promise(() => {}); } };
+  const adapter = createSupabaseAdapter({ client: { from() { return pending; } }, timeoutMs: 5 });
+  await assert.rejects(adapter.listTasks({ organizationId: 'org', projectId: 'prj' }), /timed out/);
+});
+
 test('Supabase adapter maps PostgREST rows and enforces tenant-bound pagination', async () => {
   const { createSupabaseAdapter } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/supabase.mjs');
   const calls = [];

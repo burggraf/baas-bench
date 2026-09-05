@@ -12,7 +12,7 @@ export function createSupabaseAdmin({ run = runCommand, root, runtime, seed = 42
   async function psql(sql, args = []) { return run(command, [...psqlArgs, ...args], { input: sql, timeoutMs: 60_000 }); }
   async function query(sql) { const result = await psql(sql, ['-At']); return result.stdout; }
   async function verify() { await verifyExactCounts(async sql => (await query(sql)).trim().split('\n').filter(Boolean).map(line => { const [table, row_count] = line.split('\t'); return { table, row_count }; })); }
-  async function teardown() { await psql('DROP SCHEMA IF EXISTS benchmark_fixture CASCADE; DROP SCHEMA IF EXISTS benchmark_auth CASCADE; DROP SCHEMA IF EXISTS benchmark_private CASCADE; DROP SCHEMA IF EXISTS benchmark_extensions CASCADE;'); }
+  async function teardown() { await psql('DROP SCHEMA IF EXISTS benchmark_fixture CASCADE; DROP SCHEMA IF EXISTS benchmark_auth CASCADE; DROP TABLE IF EXISTS public.activities, public.comments, public.tasks, public.projects, public.memberships, public.organizations, public.users CASCADE; DROP SCHEMA IF EXISTS benchmark_private CASCADE; DROP SCHEMA IF EXISTS benchmark_extensions CASCADE;'); }
   return {
     async setup() {
       try {
@@ -20,6 +20,16 @@ export function createSupabaseAdmin({ run = runCommand, root, runtime, seed = 42
         await copyDataset({ batches: seedDataset(seed, 1000), maxBatchSize: 1000, copy: async ({ statement, data }) => { await psql(`${data}\\.\n`, ['-c', statement]); } });
         await psql(`UPDATE public.users SET auth_subject = id WHERE auth_subject IS NULL;`);
         await createNeonPasswords(async (sql, params) => psql(sql.replace('$1', `'${params[0].replaceAll("'", "''")}'`)), password);
+        await psql(`DO $$ BEGIN
+  IF to_regclass('auth.users') IS NOT NULL THEN
+    INSERT INTO auth.users (id, instance_id, aud, role, email, encrypted_password, email_confirmed_at, created_at, updated_at, raw_app_meta_data, raw_user_meta_data)
+    SELECT gen_random_uuid(), '00000000-0000-0000-0000-000000000000'::uuid, 'authenticated', 'authenticated', u.email,
+      benchmark_extensions.crypt('${password.replaceAll("'", "''")}', benchmark_extensions.gen_salt('bf')), now(), now(), now(), '{"provider":"email","providers":["email"]}'::jsonb,
+      jsonb_build_object('display_name', u.display_name)
+    FROM public.users u ON CONFLICT (email) DO NOTHING;
+    UPDATE public.users u SET auth_subject = a.id::text FROM auth.users a WHERE a.email = u.email;
+  END IF;
+END $$;`);
         await psql(await `SELECT ${JSON.stringify('ok')};`);
         await createFixtureState(async sql => psql(sql));
         await mkdir(state, { recursive: true });

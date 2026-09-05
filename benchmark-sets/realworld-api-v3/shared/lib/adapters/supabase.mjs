@@ -16,15 +16,24 @@ const mapComment = row => ({ id: row.id, organizationId: row.organization_id, pr
 const mapActivity = row => ({ id: row.id, organizationId: row.organization_id, projectId: row.project_id ?? null, actorId: row.actor_id, action: row.action, subjectType: row.subject_type, subjectId: row.subject_id, createdAt: row.created_at });
 function ensure(error) { if (error) throw new Error(error.message || 'Supabase request failed'); }
 function pageArgs(value) { const page = value.page ?? 0; const pageSize = value.pageSize ?? 20; if (!Number.isSafeInteger(page) || page < 0 || !Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 100) throw new Error('invalid page'); return [page, pageSize]; }
-function checkTenant(row, organizationId, projectId) { if (row.organization_id !== organizationId || (projectId && row.project_id !== projectId)) throw new Error('Supabase tenant boundary violation'); }
+function checkTenant(row, organizationId, projectId) { if (!row || row.organization_id !== organizationId || (projectId && row.project_id !== projectId)) throw new Error('Supabase tenant boundary violation'); }
 
 export function createSupabaseAdapter({ client, sdkCreateClient, url, key, timeoutMs = 30_000 } = {}) {
   async function request(action, signal) {
     return measureRemoteCall(async () => {
-      if (signal && action?.abortSignal) action.abortSignal(signal);
-      const result = await action;
-      ensure(result?.error);
-      return result;
+      if (signal && typeof action?.abortSignal === 'function') action.abortSignal(signal);
+      let timer;
+      const pending = Promise.resolve(action);
+      const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Supabase request timed out')), timeoutMs); });
+      const cancelled = signal && new Promise((_, reject) => {
+        if (signal.aborted) reject(signal.reason ?? new Error('Supabase request aborted'));
+        else signal.addEventListener('abort', () => reject(signal.reason ?? new Error('Supabase request aborted')), { once: true });
+      });
+      try {
+        const result = await Promise.race(cancelled ? [pending, timeout, cancelled] : [pending, timeout]);
+        ensure(result?.error);
+        return result;
+      } finally { clearTimeout(timer); }
     });
   }
   async function query(table, fields, configure, signal) { const builder = configure((client ?? {}).from(table).select(fields)); return request(builder, signal); }
@@ -43,6 +52,18 @@ export function createSupabaseAdapter({ client, sdkCreateClient, url, key, timeo
     const session = makeSession(authClient); session.accessToken = result.data.session.access_token; return session;
   }
   const adapter = { createSession };
+  adapter.dashboard = async ({ organizationId, projectId, activityPage = { page: 0, pageSize: 20 }, signal }) => {
+    if (!organizationId) throw new Error('tenant context is required');
+    const [orgResult, projectResult, activityResult] = await Promise.all([
+      query('organizations', 'id,name,owner_id,created_at', q => q.eq('id', organizationId).single(), signal),
+      query('projects', 'id,organization_id,name,status,created_at,updated_at', q => q.eq('organization_id', organizationId).order('created_at', { ascending: true }), signal),
+      query('activities', activityFields, q => q.eq('organization_id', organizationId).eq('project_id', projectId).order('created_at', { ascending: false }).range(activityPage.page * activityPage.pageSize, activityPage.page * activityPage.pageSize + activityPage.pageSize - 1), signal),
+    ]);
+    if (!orgResult.data?.id || orgResult.data.id !== organizationId) throw new Error('malformed Supabase organization response');
+    const projects = (projectResult.data ?? []).map(row => { checkTenant(row, organizationId); return { id: row.id, organizationId: row.organization_id, name: row.name, status: row.status, createdAt: row.created_at, updatedAt: row.updated_at }; });
+    const activities = (activityResult.data ?? []).map(row => { checkTenant(row, organizationId, projectId); return mapActivity(row); });
+    return { organization: { id: orgResult.data.id, name: orgResult.data.name, ownerId: orgResult.data.owner_id, createdAt: orgResult.data.created_at }, projects, recentActivity: activities };
+  };
   adapter.listTasks = async ({ organizationId, projectId, page = 0, pageSize = 20, signal }) => {
     if (!organizationId || !projectId) throw new Error('tenant context is required'); const [p, size] = pageArgs({ page, pageSize });
     const result = await query('tasks', taskFields, q => q.eq('organization_id', organizationId).eq('project_id', projectId).order('created_at', { ascending: true }).order('id', { ascending: true }).range(p * size, p * size + size - 1), signal);
@@ -54,7 +75,7 @@ export function createSupabaseAdapter({ client, sdkCreateClient, url, key, timeo
   adapter.getUser = async (id, signal) => { const result = await query('users', userFields, q => q.eq('id', id).single(), signal); if (!result.data?.id) throw new Error('malformed Supabase user response'); return mapUser(result.data); };
   adapter.searchTasks = async ({ organizationId, projectId, query: term, page = 0, pageSize = 20, signal }) => { const [p, size] = pageArgs({ page, pageSize }); const result = await query('tasks', taskFields, q => q.eq('organization_id', organizationId).eq('project_id', projectId).ilike('title', `%${String(term ?? '').replaceAll('%', '\\%')}%`).order('created_at', { ascending: true }).order('id', { ascending: true }).range(p * size, p * size + size - 1), signal); const rows = result.data ?? []; rows.forEach(row => checkTenant(row, organizationId, projectId)); return { items: rows.map(mapTask), page: p, pageSize: size, total: result.count ?? rows.length, hasNext: (result.count ?? rows.length) > (p + 1) * size }; };
   adapter.createTask = async ({ organizationId, projectId, title, description, priority = 'medium', signal }) => { const result = await request(client.from('tasks').insert({ organization_id: organizationId, project_id: projectId, title, description, priority }).select(taskFields).single(), signal); checkTenant(result.data, organizationId, projectId); return mapTask(result.data); };
-  adapter.updateTask = async ({ organizationId, projectId, taskId, ...changes }) => { const result = await request(client.from('tasks').update(Object.fromEntries(Object.entries(changes).filter(([k]) => ['title', 'description', 'status', 'priority', 'due_date'].includes(k)))).eq('id', taskId).eq('organization_id', organizationId).eq('project_id', projectId).select(taskFields).single()); checkTenant(result.data, organizationId, projectId); return mapTask(result.data); };
+  adapter.updateTask = async ({ organizationId, projectId, taskId, signal, ...changes }) => { const result = await request(client.from('tasks').update(Object.fromEntries(Object.entries(changes).filter(([k]) => ['title', 'description', 'status', 'priority', 'due_date'].includes(k)))).eq('id', taskId).eq('organization_id', organizationId).eq('project_id', projectId).select(taskFields).single(), signal); checkTenant(result.data, organizationId, projectId); return mapTask(result.data); };
   adapter.addComment = async ({ organizationId, projectId, taskId, body, signal }) => { const result = await request(client.from('comments').insert({ organization_id: organizationId, project_id: projectId, task_id: taskId, body }).select(commentFields).single(), signal); checkTenant(result.data, organizationId, projectId); return mapComment(result.data); };
   adapter.updateProfile = async ({ displayName }) => { const result = await request(client.auth.updateUser({ data: { display_name: displayName } })); return mapUser(result.data?.user); };
   adapter.signOut = async () => { if (client) await request(client.auth.signOut()); };
@@ -62,5 +83,6 @@ export function createSupabaseAdapter({ client, sdkCreateClient, url, key, timeo
   return adapter;
 }
 let defaultAdapter;
-async function getDefaultAdapter() { if (!defaultAdapter) { const [{ createClient }, key] = await Promise.all([import('@supabase/supabase-js'), readKey(join(process.env.BAAS_BENCH_ROOT || '.', 'benchmark-sets/supabase/docker/.env'), 'SUPABASE_PUBLISHABLE_KEY')]); defaultAdapter = createSupabaseAdapter({ client: createClient('http://127.0.0.1:8000', key, { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false } }) }); } return defaultAdapter; }
+async function getDefaultAdapter() { if (!defaultAdapter) { const [{ createClient }, key] = await Promise.all([import('@supabase/supabase-js'), readKey(join(process.env.BAAS_BENCH_RUNTIME || join(process.env.BAAS_BENCH_ROOT || '.', '.runtime'), 'supabase/docker/.env'), 'SUPABASE_PUBLISHABLE_KEY')]); const url = process.env.SUPABASE_URL || 'http://127.0.0.1:8000'; defaultAdapter = createSupabaseAdapter({ client: createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false } }) }); } return defaultAdapter; }
 export async function createSession(credentials) { return (await getDefaultAdapter()).createSession(credentials); }
+export function createBackend(options = {}) { return options.client ? createSupabaseAdapter(options) : getDefaultAdapter(); }
