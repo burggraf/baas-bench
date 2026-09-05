@@ -762,6 +762,37 @@ test('Neon SQL admin transport preserves parameterized requests and restrictive 
   assert.match(calls[1].text, /count\(\*\)/i);
 });
 
+test('Convex capacity adapter uses native HTTP client auth and the shared session contract', async () => {
+  const { createConvexAdapter } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/convex.mjs');
+  const calls = [];
+  const api = { auth: { signIn: 'auth.signIn', me: 'auth.me', signOut: 'auth.signOut', refresh: 'auth.refresh' }, project: { dashboard: 'project.dashboard' }, task: { list: 'task.list', get: 'task.get', create: 'task.create', update: 'task.update', search: 'task.search' }, comment: { list: 'comment.list', create: 'comment.create', update: 'comment.update' }, membership: { updateRole: 'membership.updateRole' }, user: { updateProfile: 'user.updateProfile' } };
+  class FakeClient {
+    setAuth(token) { calls.push(['auth', token]); }
+    query(ref, args) { calls.push(['query', ref, args]); if (ref === api.auth.me) return Promise.resolve({ id: 'usr', email: 'u@example.test', displayName: 'User', createdAt: '2025-01-01', updatedAt: '2025-01-01' }); return Promise.resolve([]); }
+    mutation(ref, args) { calls.push(['mutation', ref, args]); if (ref === api.auth.signIn) return Promise.resolve({ token: 'convex-token', userId: 'usr' }); return Promise.resolve({}); }
+    close() { calls.push(['close']); return Promise.resolve(); }
+  }
+  const adapter = createConvexAdapter({ ConvexHttpClient: FakeClient, api, users: [{ credentials: { email: 'u@example.test', password: 'pw' }, organizationId: 'org', projectId: 'prj', taskId: 'tsk', commentId: 'cmt' }] });
+  const session = await adapter.createSession({ email: 'u@example.test', password: 'pw' });
+  assert.equal((await session.getProfile()).id, 'usr');
+  assert.equal(typeof session.listTasks, 'function');
+  await session.listTasks({ organizationId: 'org', projectId: 'prj', page: 0, pageSize: 10 });
+  assert.ok(calls.some(call => call[0] === 'auth' && call[1] === 'convex-token'));
+  assert.ok(calls.some(call => call[0] === 'query' && call[1] === api.task.list));
+  await session.close();
+});
+
+test('Convex assets declare tenant authorization, indexes, and bounded lifecycle administration', async () => {
+  const { readFileSync } = await import('node:fs');
+  const schema = readFileSync(new URL('../benchmark-sets/realworld-api-v3/shared/convex/schema.ts', import.meta.url), 'utf8');
+  const authorize = readFileSync(new URL('../benchmark-sets/realworld-api-v3/shared/convex/authorize.ts', import.meta.url), 'utf8');
+  const admin = await import('../benchmark-sets/realworld-api-v3/shared/lib/admin/convex.mjs');
+  assert.match(schema, /organizations|projects|tasks|comments|activities/);
+  assert.match(schema, /by_organization|by_project|by_task/);
+  assert.match(authorize, /getUserIdentity|organization/);
+  assert.deepEqual(admin.deployArgs, ['deploy', '--typecheck', 'disable']);
+});
+
 test('administrative dispatch invokes exactly the requested platform handler', async () => {
   const { dispatchAdmin } = await import('../benchmark-sets/realworld-api-v3/shared/lib/admin.mjs');
   const calls = [];
