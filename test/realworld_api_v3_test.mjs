@@ -978,17 +978,34 @@ test('PocketBase migration and admin expose collection lifecycle', async () => {
 test('TrailBase adapter uses the official record client with isolated auth sessions', async () => {
   const { createTrailBaseAdapter } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/trailbase.mjs');
   const calls = [];
-  const client = { auth: { async login(value) { calls.push(['login', value]); return { user: { id: 'usr' }, token: 'token' }; }, async refresh() {}, async logout() { calls.push(['logout']); } }, records(name) { return { async list(options) { calls.push(['list', name, options]); return { records: name === 'users' ? [{ id: 'usr', email: 'u@example.test' }] : [], totalCount: 0 }; }, async read(id) { calls.push(['read', name, id]); return { id, organization_id: 'org', project_id: 'prj', creator_id: 'usr', title: 't', description: 'd', status: 'todo', priority: 'low', created_at: '2025-01-01', updated_at: '2025-01-01' }; }, async create(data) { calls.push(['create', name, data]); return { id: 'new', ...data }; }, async update(id, data) { return { id, ...data }; } }; } };
+  const client = { auth: { async login(value) { calls.push(['login', value]); return { user: { id: 'usr' }, token: 'token' }; }, async refresh() {}, async logout() { calls.push(['logout']); } }, records(name) { return { async list(options) { calls.push(['list', name, options]); if (name === 'users') return { records: [{ id: 'usr', email: 'u@example.test' }] }; if (name === 'memberships') return { records: [{ id: 42, external_id: 'mem', organization_id: 'org', user_id: 'usr', role: 'member', created_at: '2025-01-01' }] }; return { records: [], totalCount: 0 }; }, async read(id) { calls.push(['read', name, id]); return { id, organization_id: 'org', project_id: 'prj', creator_id: 'usr', title: 't', description: 'd', status: 'todo', priority: 'low', created_at: '2025-01-01', updated_at: '2025-01-01' }; }, async create(data) { calls.push(['create', name, data]); return { id: 'new', ...data }; }, async update(id, data) { calls.push(['update', name, id, data]); return { id, ...data }; } }; } };
   const adapter = createTrailBaseAdapter({ initClient: () => client, client });
   const session = await adapter.createSession({ email: 'u@example.test', password: 'pw' });
   assert.equal((await session.getProfile()).id, 'usr');
   await session.listTasks({ organizationId: 'org', projectId: 'prj', page: 0, pageSize: 10 });
+  const updatedMembership = await session.updateMembershipRole({ organizationId: 'org', membershipId: 'mem', role: 'admin' });
+  assert.deepEqual(updatedMembership, { id: 'mem', organizationId: 'org', userId: 'usr', role: 'admin', createdAt: '2025-01-01' });
   assert.ok(calls.some(call => call[0] === 'login'));
   assert.ok(calls.some(call => call[0] === 'list' && call[2].pagination.limit === 10));
+  assert.ok(calls.some(call => call[0] === 'update' && call[1] === 'memberships' && call[2] === 42));
+  await session.signOut();
+  await assert.rejects(() => session.getProfile(), error => error?.status === 401);
   await session.close();
 });
 
-test('TrailBase migration, config, and admin expose record APIs', async () => {
+test('TrailBase getTask forwards comment pagination to the record API', async () => {
+  const { createTrailBaseAdapter } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/trailbase.mjs');
+  const calls = [];
+  const client = { auth: { async login() {}, async logout() {} }, records(name) { return { async list(options) { calls.push(['list', name, options]); if (name === 'users') return { records: [{ id: 1, external_id: 'usr', email: 'u@example.test', display_name: 'User', created_at: '2025-01-01', updated_at: '2025-01-01' }] }; if (name === 'tasks') return { records: [{ id: 2, external_id: 'task', organization_id: 'org', project_id: 'prj', creator_id: 'usr', assignee_id: null, title: 'Task', description: 'Description', status: 'todo', priority: 'low', due_date: null, created_at: '2025-01-01', updated_at: '2025-01-01' }] }; return { records: [], total_count: 0 }; }, async read(id) { calls.push(['read', name, id]); return { id, external_id: 'task', organization_id: 'org', project_id: 'prj', creator_id: 'usr', assignee_id: null, title: 'Task', description: 'Description', status: 'todo', priority: 'low', due_date: null, created_at: '2025-01-01', updated_at: '2025-01-01' }; }, async update() {}, async create() {} }; } };
+  const adapter = createTrailBaseAdapter({ initClient: () => client, client });
+  const session = await adapter.createSession({ email: 'u@example.test', password: 'pw' });
+  await session.getTask({ organizationId: 'org', projectId: 'prj', taskId: 'task', comments: { page: 2, pageSize: 3 } });
+  const commentCall = calls.find(call => call[0] === 'list' && call[1] === 'comments');
+  assert.deepEqual(commentCall[2].pagination, { limit: 3, offset: 6 });
+  await session.close();
+});
+
+test('TrailBase migration, config, and admin expose tenant-scoped record APIs', async () => {
   const { createTrailBaseAdmin } = await import('../benchmark-sets/realworld-api-v3/shared/lib/admin/trailbase.mjs');
   const { readFileSync } = await import('node:fs');
   const migration = readFileSync(new URL('../benchmark-sets/realworld-api-v3/shared/trailbase/migration.sql', import.meta.url), 'utf8');
@@ -996,6 +1013,9 @@ test('TrailBase migration, config, and admin expose record APIs', async () => {
   assert.equal(typeof createTrailBaseAdmin, 'function');
   assert.match(migration, /organizations|tasks|comments|activities/);
   assert.match(config, /record_apis/);
+  assert.match(config, /EXISTS/);
+  assert.match(config, /update_access_rule/);
+  assert.doesNotMatch(config, /read_access_rule: "_USER_\\.id IS NOT NULL"/);
 });
 
 test('all real-world adapters and administrative modules expose the shared lifecycle contract', async () => {
