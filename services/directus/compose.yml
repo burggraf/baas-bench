@@ -36,7 +36,7 @@ services:
       cache:
         condition: service_healthy
     healthcheck:
-      test: [CMD-SHELL, "wget --spider -q http://localhost:8055/server/ping || exit 1"]
+      test: [CMD-SHELL, "wget --spider -q http://127.0.0.1:8055/server/ping || exit 1"]
       interval: 5s
       timeout: 5s
       retries: 12
@@ -55,6 +55,7 @@ services:
       ADMIN_EMAIL: admin@example.com
       ADMIN_PASSWORD: ${DIRECTUS_ADMIN_PASSWORD}
       PUBLIC_URL: http://localhost:8055
+      EXTENSIONS_PATH: /directus/extensions
 
 volumes:
   database:

@@ -854,7 +854,7 @@ test('Nhost admin and adapter expose the Hasura GraphQL access path', async () =
 test('Directus adapter uses isolated REST/auth clients and tenant filters', async () => {
   const { createDirectusAdapter } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/directus.mjs');
   const calls = [];
-  const client = { async login(value) { calls.push(['login', value]); return { access_token: 'token' }; }, async refresh() { return {}; }, async logout() { calls.push(['logout']); }, async request(operation) { calls.push(['request', operation]); if (operation.kind === 'me') return { id: 'usr', email: 'u@example.test', display_name: 'User', created_at: '2025-01-01', updated_at: '2025-01-01' }; return { data: [], total: 0 }; }, with() { return this; } };
+  const client = { async login(value) { calls.push(['login', value]); return { access_token: 'token' }; }, async refresh() { return {}; }, async logout() { calls.push(['logout']); }, async request(operation) { calls.push(['request', operation]); if (operation.kind === 'me') return { id: 'usr', email: 'u@example.test', display_name: 'User', created_at: '2025-01-01', updated_at: '2025-01-01' }; if (operation.collection === 'memberships') return { data: [{ user_id: 'usr' }] }; return { data: [], total: 0 }; }, with() { return this; } };
   const adapter = createDirectusAdapter({ client, createDirectus: () => client, rest: () => 'rest', authentication: () => 'auth' });
   const session = await adapter.createSession({ email: 'u@example.test', password: 'pw' });
   assert.equal((await session.getProfile()).id, 'usr');
@@ -864,11 +864,90 @@ test('Directus adapter uses isolated REST/auth clients and tenant filters', asyn
   await session.close();
 });
 
+test('Directus session cleanup stops SDK refresh timers without blocking on logout', async () => {
+  const { createDirectusAdapter } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/directus.mjs');
+  let stopped = 0; let cleared = 0;
+  const client = { async login() { return {}; }, stopRefreshing() { stopped += 1; }, async setToken() { cleared += 1; } };
+  const session = await createDirectusAdapter({ client, createDirectus: () => client }).createSession({ email: 'u@example.test', password: 'pw' });
+  await session.close();
+  assert.equal(stopped, 1);
+  assert.equal(cleared, 1);
+});
+
 test('Directus admin and adapter expose REST access-path metadata', async () => {
   const { createDirectusAdmin } = await import('../benchmark-sets/realworld-api-v3/shared/lib/admin/directus.mjs');
   const { createDirectusAdapter } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/directus.mjs');
   assert.equal(typeof createDirectusAdmin, 'function');
   assert.equal(createDirectusAdapter({ client: {}, createDirectus: () => ({}) }).accessPath, 'javascript-sdk');
+});
+
+test('Directus derives the application identity before profile and tenant calls', async () => {
+  const { createDirectusAdapter } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/directus.mjs');
+  const calls = [];
+  const client = {
+    async login(value) { calls.push(['login', value]); return { id: 'directus-user-id' }; },
+    async logout() {},
+    async request(operation) {
+      calls.push(['request', operation]);
+      if (operation.collection === 'users') return { data: [{ id: 'usrv300000000000', email: 'u@example.test', display_name: 'User', created_at: '2025-01-01', updated_at: '2025-01-01' }] };
+      if (operation.collection === 'memberships') return { data: [{ id: 'mem', organization_id: 'org', user_id: 'usrv300000000000', role: 'owner' }] };
+      return { data: [], meta: { total_count: 0 } };
+    },
+  };
+  const adapter = createDirectusAdapter({ client, readItems: (collection, query) => ({ collection, query }) });
+  const session = await adapter.createSession({ email: 'user-usrv300000000000@example.test', password: 'pw' });
+  assert.equal((await session.getProfile()).id, 'usrv300000000000');
+  await session.listTasks({ organizationId: 'org', projectId: 'prj', page: 0, pageSize: 10 });
+  assert.ok(calls.some(call => call[0] === 'request' && call[1].collection === 'users' && call[1].query.filter.id._eq === 'usrv300000000000'));
+  assert.ok(calls.some(call => call[0] === 'request' && call[1].collection === 'memberships' && call[1].query.filter.user_id._eq === 'usrv300000000000'));
+});
+
+test('Directus rejects tenant operations when the session has no application identity', async () => {
+  const { createDirectusAdapter } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/directus.mjs');
+  let requests = 0;
+  const client = { async login() { return { id: 'directus-user-id' }; }, async request() { requests += 1; return { data: [] }; } };
+  const adapter = createDirectusAdapter({ client, readItems: (collection, query) => ({ collection, query }) });
+  const session = await adapter.createSession({ email: 'u@example.test', password: 'pw' });
+  await assert.rejects(session.listTasks({ organizationId: 'org', projectId: 'prj', page: 0, pageSize: 10 }), error => error.status === 403);
+  assert.equal(requests, 0);
+});
+
+test('Directus passes abort signals into SDK REST requests', async () => {
+  const { createDirectusAdapter } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/directus.mjs');
+  const signals = [];
+  const client = {
+    async login() { return { id: 'directus-user-id' }; },
+    async request(operation) { return operation.collection === 'memberships' ? { data: [{ user_id: 'usrv300000000000' }] } : { data: [], meta: { total_count: 0 } }; },
+  };
+  const adapter = createDirectusAdapter({
+    client,
+    readItems: (collection, query) => ({ collection, query }),
+    withOptions: (operation, options) => { signals.push(options.signal); return operation; },
+  });
+  const session = await adapter.createSession({ email: 'user-usrv300000000000@example.test', password: 'pw' });
+  await session.listTasks({ organizationId: 'org', projectId: 'prj', page: 0, pageSize: 10 });
+  assert.ok(signals.length >= 2);
+  assert.ok(signals.every(signal => signal instanceof AbortSignal));
+});
+
+test('Directus runtime uses an IPv4 healthcheck and API-only benchmark users', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const compose = await readFile(new URL('../services/directus/compose.yml', import.meta.url), 'utf8');
+  const admin = await readFile(new URL('../benchmark-sets/realworld-api-v3/shared/lib/admin/directus.mjs', import.meta.url), 'utf8');
+  assert.match(compose, /http:\/\/127\.0\.0\.1:8055\/server\/ping/);
+  assert.match(admin, /admin_access, app_access\) VALUES \([\s\S]*false, false\)/);
+  assert.doesNotMatch(admin, /argon2@0\.44\.0/);
+});
+
+test('Directus activity hook handles task and comment mutations', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const hook = await readFile(new URL('../benchmark-sets/realworld-api-v3/shared/directus/hooks/realworld-activity/index.js', import.meta.url), 'utf8');
+  assert.match(hook, /items\.create/);
+  assert.match(hook, /items\.update/);
+  assert.match(hook, /external_identifier/);
+  assert.match(hook, /activities/);
+  const caseScript = await readFile(new URL('../benchmark-sets/realworld-api-v3/shared/case.sh', import.meta.url), 'utf8');
+  assert.match(caseScript, /cp -R "\$script_dir\/directus" "\$runtime\/"/);
 });
 
 test('PocketBase adapter isolates auth stores and uses parameterized record filters', async () => {
@@ -943,6 +1022,10 @@ test('administrative dispatch invokes exactly the requested platform handler', a
     loadAdmin: async platform => ({ reset: context => calls.push([platform, context]) }),
   });
   assert.deepEqual(calls, [['neon', { platform: 'neon', phase: 'measure', trial: 2, outputDir: '/tmp/output' }]]);
+  await dispatchAdmin(['setup', 'directus', 'setup', '0', '/tmp/output'], {
+    loadAdmin: async platform => ({ setup: context => calls.push([platform, context]) }),
+  });
+  assert.deepEqual(calls[1], ['directus', { platform: 'directus', phase: 'setup', trial: 0, outputDir: '/tmp/output' }]);
 });
 
 test('shared hook validates dispatch and installs an isolated Node 22 runtime', () => {

@@ -8,8 +8,8 @@ export async function dispatchAdmin(args, dependencies = {}) {
   if (args.length !== 5) throw new Error('usage: admin.mjs <action> <platform> <phase> <trial> <output-dir>');
   const [action, platform, phase, trialText, outputDir] = args;
   if (!ACTIONS.has(action) || !PLATFORMS.has(platform)) throw new Error('invalid administrative action or platform');
-  if (phase && phase !== 'measure') throw new Error('invalid phase');
-  if (trialText && (!/^[1-9]\d*$/.test(trialText) || !Number.isSafeInteger(Number(trialText)))) throw new Error('invalid trial');
+  if (phase && !new Set(['setup', 'verify', 'warmup', 'measure', 'teardown']).has(phase)) throw new Error('invalid phase');
+  if (trialText && (!/^(0|[1-9]\d*)$/.test(trialText) || !Number.isSafeInteger(Number(trialText)))) throw new Error('invalid trial');
   if (outputDir && (!isAbsolute(outputDir) || outputDir.includes('\0') || outputDir.split(/[\\/]/).includes('..'))) throw new Error('invalid output directory');
   const module = await (dependencies.loadAdmin ?? (name => import(`./admin/${name}.mjs`)))(platform);
   const handler = module[action];
