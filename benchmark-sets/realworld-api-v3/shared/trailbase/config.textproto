@@ -4,7 +4,7 @@ record_apis: [{
   name: "users"
   table_name: "users"
   acl_authenticated: [READ, UPDATE]
-  read_access_rule: "lower(_ROW_.auth_subject) = lower(hex(_USER_.id))"
+  read_access_rule: "EXISTS (SELECT 1 FROM memberships actor_membership JOIN users actor_user ON actor_user.external_id = actor_membership.user_id WHERE lower(actor_user.auth_subject) = lower(hex(_USER_.id)) AND EXISTS (SELECT 1 FROM memberships target_membership WHERE target_membership.user_id = _ROW_.external_id AND target_membership.organization_id = actor_membership.organization_id))"
   update_access_rule: "lower(_ROW_.auth_subject) = lower(hex(_USER_.id))"
 }]
 record_apis: [{

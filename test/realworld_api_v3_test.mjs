@@ -1014,6 +1014,7 @@ test('TrailBase migration, config, and admin expose tenant-scoped record APIs', 
   assert.match(migration, /organizations|tasks|comments|activities/);
   assert.match(config, /record_apis/);
   assert.match(config, /EXISTS/);
+  assert.match(config, /target_membership/);
   assert.match(config, /update_access_rule/);
   assert.doesNotMatch(config, /read_access_rule: "_USER_\\.id IS NOT NULL"/);
 });
