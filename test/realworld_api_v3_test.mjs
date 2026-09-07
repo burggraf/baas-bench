@@ -1009,6 +1009,7 @@ test('TrailBase migration, config, and admin expose tenant-scoped record APIs', 
   const { createTrailBaseAdmin } = await import('../benchmark-sets/realworld-api-v3/shared/lib/admin/trailbase.mjs');
   const { readFileSync } = await import('node:fs');
   const migration = readFileSync(new URL('../benchmark-sets/realworld-api-v3/shared/trailbase/migration.sql', import.meta.url), 'utf8');
+  const adminSource = readFileSync(new URL('../benchmark-sets/realworld-api-v3/shared/lib/admin/trailbase.mjs', import.meta.url), 'utf8');
   const config = readFileSync(new URL('../benchmark-sets/realworld-api-v3/shared/trailbase/config.textproto', import.meta.url), 'utf8');
   assert.equal(typeof createTrailBaseAdmin, 'function');
   assert.match(migration, /organizations|tasks|comments|activities/);
@@ -1016,6 +1017,7 @@ test('TrailBase migration, config, and admin expose tenant-scoped record APIs', 
   assert.match(config, /EXISTS/);
   assert.match(config, /name: "users"[\s\S]*read_access_rule: "_USER_\.id IS NOT NULL"/);
   assert.match(config, /update_access_rule/);
+  assert.match(adminSource, /result\[0\]\?\.\[0\] < count/);
 });
 
 test('all real-world adapters and administrative modules expose the shared lifecycle contract', async () => {
