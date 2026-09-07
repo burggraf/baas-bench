@@ -975,6 +975,7 @@ test('PocketBase migration and admin expose collection lifecycle', async () => {
   assert.match(admin, /seedDataset/);
   assert.match(admin, /randomBytes\(16\)\.toString\('hex'\)\.slice\(0, 30\)/);
   assert.match(admin, /emailVisibility/);
+  assert.match(admin, /Number\(row\[1\]\) < expected\[row\[0\]\]/);
 });
 
 test('TrailBase adapter uses the official record client with isolated auth sessions', async () => {
