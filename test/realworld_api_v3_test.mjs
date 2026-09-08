@@ -838,7 +838,7 @@ test('Appwrite admin and adapter declare TablesDB access-path metadata', async (
   assert.match(adminSource, /if \(!failure\) await rm\(consolePath/);
   assert.match(adminSource, /\/platforms.*\[401, 403\]/);
   assert.match(adminSource, /\/keys.*\[409\]/);
-  assert.match(adminSource, /if \(!failure\) await rm\(adminPath/);
+  assert.match(adminSource, /if \(!failure\) \{ await rm\(adminPath/);
 });
 
 test('Nhost adapter uses native auth and parameterized GraphQL requests', async () => {
