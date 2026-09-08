@@ -835,7 +835,7 @@ test('Appwrite admin and adapter declare TablesDB access-path metadata', async (
   assert.equal(createAppwriteAdapter({ Client: class {}, Account: class {}, TablesDB: class {}, api: {}, databaseId: 'db' }).accessPath, 'javascript-sdk');
   assert.match(adminSource, /rowId/);
   assert.match(adminSource, /\[404, 401, 403\]/);
-  assert.match(adminSource, /if \(!failure\) await rm\(consolePath/);
+  assert.match(adminSource, /if \(!failure\) \{ await rm\(adminPath.*await rm\(consolePath/);
   assert.match(adminSource, /\/platforms.*\[401, 403\]/);
   assert.match(adminSource, /\/keys.*\[409\]/);
   assert.match(adminSource, /if \(!failure\) \{ await rm\(adminPath/);
