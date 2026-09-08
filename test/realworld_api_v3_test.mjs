@@ -516,8 +516,10 @@ test('adaptive search brackets on measured SLO failure even when cleanup invalid
       monotonic: (() => { let n = 0; return () => ++n; })(),
     });
     const raw = JSON.parse(readFileSync(join(outputDir, 'raw.json'), 'utf8'));
+    const summary = JSON.parse(readFileSync(join(outputDir, 'summary.json'), 'utf8'));
     assert.deepEqual(raw.stages.map(stage => stage.requestedUsers), [5, 10]);
     assert.deepEqual(raw.stages[1].validityReasons, ['workload failed']);
+    assert.equal(summary.metrics.capacity_bounded, 1);
   } finally { await rm(outputDir, { recursive: true, force: true }); }
 });
 

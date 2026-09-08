@@ -17,7 +17,8 @@ export function summarize(stages, capacity) {
     const classes = stage.operationClassMetrics ?? {};
     Object.assign(metrics, {
       capacity_users: selected,
-      capacity_bounded: capacity.stages?.some(item => !item.passed && !item.invalid) ? 1 : 0,
+      capacity_bounded: capacity.stages?.some(item => item.requestedUsers > selected && !item.passed
+        && (!item.invalid || Object.values(item.operationClasses ?? {}).some(metric => metric.passed === false))) ? 1 : 0,
       achieved_users_at_capacity: stage.achievedUsers,
       workflow_tps_at_capacity: stage.workflowTransactionsPerSecond,
       remote_operations_per_second_at_capacity: stage.remoteOperationsPerSecond,
