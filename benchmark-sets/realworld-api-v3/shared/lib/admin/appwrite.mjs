@@ -31,7 +31,7 @@ export function createAppwriteAdmin({ sdk, fetchImpl = fetch, runtime, endpoint 
     async setup() {
       try {
         await mkdir(state, { recursive: true, mode: 0o700 }); await chmod(state, 0o700); if (!key) projectKey = undefined; await ensureTables();
-        for await (const batch of seedDataset(42, 100)) { const rows = batch.records.map(record => ({ $id: record.id, ...normalize(batch.entity, record) })); await db.createRows({ databaseId, tableId: batch.entity === 'user' ? 'users' : batch.entity === 'activity' ? 'activities' : `${batch.entity}s`, rows }); if (batch.entity === 'user') await Promise.all(batch.records.map(record => accountService.create({ userId: record.id, email: record.email, password, name: record.displayName }).catch(error => { if (error?.code !== 409) throw error; }))); }
+        for await (const batch of seedDataset(42, 100)) { const rows = batch.records.map(record => ({ rowId: record.id, data: normalize(batch.entity, record) })); await db.createRows({ databaseId, tableId: batch.entity === 'user' ? 'users' : batch.entity === 'activity' ? 'activities' : `${batch.entity}s`, rows }); if (batch.entity === 'user') await Promise.all(batch.records.map(record => accountService.create({ userId: record.id, email: record.email, password, name: record.displayName }).catch(error => { if (error?.code !== 409) throw error; }))); }
         await writeFile(configPath, `${JSON.stringify({ endpoint, projectId, databaseId })}\n`, { mode: 0o600 });
         await this.verify();
       } catch (error) { try { await teardown(); } catch (cleanup) { if (error && typeof error === 'object') error.cleanupError = String(cleanup?.message ?? cleanup); } throw error; }

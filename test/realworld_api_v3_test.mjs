@@ -829,8 +829,11 @@ test('Appwrite adapter isolates Account and TablesDB sessions and normalizes row
 test('Appwrite admin and adapter declare TablesDB access-path metadata', async () => {
   const { createAppwriteAdmin } = await import('../benchmark-sets/realworld-api-v3/shared/lib/admin/appwrite.mjs');
   const { createAppwriteAdapter } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/appwrite.mjs');
+  const { readFile } = await import('node:fs/promises');
+  const adminSource = await readFile(new URL('../benchmark-sets/realworld-api-v3/shared/lib/admin/appwrite.mjs', import.meta.url), 'utf8');
   assert.equal(typeof createAppwriteAdmin, 'function');
   assert.equal(createAppwriteAdapter({ Client: class {}, Account: class {}, TablesDB: class {}, api: {}, databaseId: 'db' }).accessPath, 'javascript-sdk');
+  assert.match(adminSource, /rowId/);
 });
 
 test('Nhost adapter uses native auth and parameterized GraphQL requests', async () => {
