@@ -2,7 +2,7 @@ import { mulberry32 } from "./random.mjs";
 import { MAX_PAGE_SIZE, runWorkflow, selectWorkflow } from "./workflows.mjs";
 import { isIntegrityError, isSessionLossError } from "./errors.mjs";
 import { withRemoteMeasurement } from "./measurement.mjs";
-export const SESSION_PREPARATION_CONCURRENCY = 10;
+export const SESSION_PREPARATION_CONCURRENCY = 100;
 const defaultNow = () => performance.now();
 const defaultSleep = (milliseconds, signal) => new Promise((resolve, reject) => {
     if (signal?.aborted) {

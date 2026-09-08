@@ -320,7 +320,7 @@ test('capacity stages follow the approved doubling and bounded refinement', asyn
 
 test('workload prepares outside measurement and closes each session once', async () => {
   const { runWorkload, SESSION_PREPARATION_CONCURRENCY } = await import('../benchmark-sets/realworld-api-v3/shared/lib/workload.mjs');
-  assert.equal(SESSION_PREPARATION_CONCURRENCY, 10);
+  assert.equal(SESSION_PREPARATION_CONCURRENCY, 100);
   const events = [];
   let closes = 0;
   const session = { cancelPending() {}, async close() { closes += 1; } };

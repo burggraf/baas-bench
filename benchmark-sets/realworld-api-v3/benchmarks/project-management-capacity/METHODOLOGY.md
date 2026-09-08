@@ -8,7 +8,7 @@ This benchmark measures SLO-qualified concurrent-user capacity for one determini
 
 Setup provisions the platform topology, schema, permissions, indexes, authentication users, and exactly one million deterministic application records: 1,600 organizations, 16,000 users, 16,000 memberships, 8,000 projects, 160,000 tasks, 479,200 comments, and 319,200 activities. Correctness runs before warm-up and measured stages. Reset restores the declared fixture baseline and clears benchmark-created sessions/state. Teardown removes only benchmark-owned resources and preserves the primary failure if cleanup also fails.
 
-The runner performs a zero-duration framework warm-up, then prepares authenticated virtual-user sessions outside measurement. Each virtual user executes serial complete dashboard, task-list, task-detail, create-task, update-task, add-comment, search, profile-update, and sign-out/sign-in workflows with deterministic selection and 1,000–5,000 ms think time. Requests have a five-second timeout, no retries, and bounded cancellation/grace handling.
+The runner performs a zero-duration framework warm-up, then prepares authenticated virtual-user sessions outside measurement. Each virtual user executes serial complete dashboard, task-list, task-detail, create-task, update-task, add-comment, search, profile-update, and sign-out/sign-in workflows with deterministic selection and 1,000–5,000 ms think time. Requests have a five-second timeout, no retries, and bounded cancellation/grace handling. Session preparation and cleanup use a fixed concurrency of 100 and remain outside measured intervals.
 
 ## Capacity and SLOs
 
