@@ -966,7 +966,9 @@ test('PocketBase adapter isolates auth stores and uses parameterized record filt
 test('Supabase teardown clears isolated auth users efficiently', async () => {
   const { readFile } = await import('node:fs/promises');
   const admin = await readFile(new URL('../benchmark-sets/realworld-api-v3/shared/lib/admin/supabase.mjs', import.meta.url), 'utf8');
+  const command = await readFile(new URL('../benchmark-sets/realworld-api-v3/shared/lib/command.mjs', import.meta.url), 'utf8');
   assert.match(admin, /TRUNCATE TABLE auth\.users CASCADE/);
+  assert.match(command, /timeout > 600_000/);
 });
 
 test('PocketBase migration and admin expose collection lifecycle', async () => {

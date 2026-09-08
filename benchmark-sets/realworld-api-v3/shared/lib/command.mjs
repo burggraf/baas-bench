@@ -7,7 +7,7 @@ export function runCommand(command, args = [], options = {}) {
     throw new Error('invalid command');
   }
   const timeout = options.timeoutMs ?? 5_000;
-  if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 60_000) throw new Error('invalid command timeout');
+  if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 600_000) throw new Error('invalid command timeout');
   return new Promise((resolve, reject) => {
     const child = execFile(command, args, { timeout, maxBuffer: 1024 * 1024, encoding: 'utf8', env: options.env, cwd: options.cwd }, (error, stdout, stderr) => {
       if (error) { const normalized = String(stderr || stdout || '').trim().replace(/\s+/g, ' '); const detail = normalized.length > 1200 ? `${normalized.slice(0, 600)} ... ${normalized.slice(-600)}` : normalized; const status = error?.code || error?.signal || ''; return reject(new Error(`${command} command failed${status ? ` [${status}]` : ''}${detail ? `: ${detail}` : ''}`)); }
