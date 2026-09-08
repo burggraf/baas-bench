@@ -17,7 +17,7 @@ const mapTask = row => ({ id: row.id, organizationId: row.organization_id, proje
 const mapComment = row => ({ id: row.id, organizationId: row.organization_id, projectId: row.project_id, taskId: row.task_id, authorId: row.author_id, body: row.body, createdAt: row.created_at, updatedAt: row.updated_at });
 const mapActivity = row => ({ id: row.id, organizationId: row.organization_id, projectId: row.project_id ?? null, actorId: row.actor_id, action: row.action, subjectType: row.subject_type, subjectId: row.subject_id, createdAt: row.created_at });
 const mapMembership = row => ({ id: row.id, organizationId: row.organization_id, userId: row.user_id, role: row.role, createdAt: row.created_at });
-function ensure(error) { if (!error) return; const failure = new Error(error.message || 'Supabase request failed'); if (error.status !== undefined) failure.status = Number(error.status) === 406 ? 403 : error.status; if (error.code !== undefined) failure.code = error.code; throw failure; }
+function ensure(error) { if (!error) return; const failure = new Error(error.message || 'Supabase request failed'); const code = String(error.code ?? ''); if (error.status !== undefined) failure.status = Number(error.status) === 406 || code === 'PGRST116' || code === '42501' ? 403 : error.status; else if (code === 'PGRST116' || code === '42501') failure.status = 403; if (error.code !== undefined) failure.code = error.code; throw failure; }
 function pageArgs(value) { const page = value.page ?? 0; const pageSize = value.pageSize ?? 20; if (!Number.isSafeInteger(page) || page < 0 || !Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 100) throw new Error('invalid page'); return [page, pageSize]; }
 function checkTenant(row, organizationId, projectId) { if (!row || row.organization_id !== organizationId || (projectId && row.project_id !== projectId)) throw new Error('Supabase tenant boundary violation'); }
 function abortableFetch(signalRef, timeoutMs) {
@@ -73,8 +73,9 @@ export function createSupabaseAdapter({ client, sdkCreateClient, url, key, timeo
     };
     session.refreshSession = () => call(({ signal }) => request(authClient.auth.refreshSession(), signal, options.timeoutMs));
     session.refresh = session.refreshSession;
-    session.signOut = () => call(({ signal }) => request(authClient.auth.signOut(), signal, options.timeoutMs));
+    session.signOut = async () => { if (session.signedOut) return; try { await call(({ signal }) => request(authClient.auth.signOut(), signal, options.timeoutMs)); } finally { session.signedOut = true; } };
     session.getProfile = () => call(async ({ signal }) => {
+      if (session.signedOut) throw Object.assign(new Error('Supabase session is signed out'), { status: 401 });
       const result = await request(authClient.auth.getUser(), signal, options.timeoutMs);
       const user = result.data?.user;
       if (!user) throw new Error('malformed Supabase user');
