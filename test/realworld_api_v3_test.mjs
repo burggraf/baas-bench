@@ -339,6 +339,33 @@ test('workload prepares outside measurement and closes each session once', async
   assert.equal(closes, 1);
 });
 
+test('workload honors a platform-safe session preparation concurrency', async () => {
+  const { runWorkload } = await import('../benchmark-sets/realworld-api-v3/shared/lib/workload.mjs');
+  const { createSupabaseAdapter } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/supabase.mjs');
+  assert.equal(createSupabaseAdapter({}).sessionPreparationConcurrency, 10);
+  assert.equal(createSupabaseAdapter({}).sessionPreparationBatchDelayMs, 100);
+  let active = 0;
+  let maximum = 0;
+  const sleeps = [];
+  const backend = {
+    sessionPreparationConcurrency: 2,
+    sessionPreparationBatchDelayMs: 7,
+    async createSession() {
+      active += 1;
+      maximum = Math.max(maximum, active);
+      await new Promise(resolve => setTimeout(resolve, 1));
+      active -= 1;
+      return { cancelPending() {}, async close() {} };
+    },
+  };
+  const users = Array.from({ length: 5 }, (_, index) => ({ credentials: { email: `user${index}@example.test`, password: 'secret' }, organizationId: 'org', projectId: 'project', taskId: 'task' }));
+  const config = { seed: 42, stageSeconds: 0, timeoutMs: 5_000, thinkTimeMs: { min: 0, max: 0 }, weights: { dashboard: 100 } };
+  const result = await runWorkload(backend, config, { users, durationMs: 0, graceMs: 0, sleep: async milliseconds => { sleeps.push(milliseconds); } });
+  assert.equal(result.startedUsers, 5);
+  assert.equal(maximum, 2);
+  assert.equal(sleeps.filter(milliseconds => milliseconds === 7).length, 6);
+});
+
 test('operation errors are classified and credentials are redacted and bounded', async () => {
   const { BenchmarkOperationError, classifyOperationError } = await import('../benchmark-sets/realworld-api-v3/shared/lib/correctness.mjs');
   const { safeErrorDetails } = await import('../benchmark-sets/realworld-api-v3/shared/lib/errors.mjs');

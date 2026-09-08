@@ -104,7 +104,7 @@ export function createSupabaseAdapter({ client, sdkCreateClient, url, key, timeo
     const userId = authId && sessionAdapter.getUserByAuthSubject ? await sessionAdapter.getUserByAuthSubject(authId) : authId;
     const session = makeSession(authClient, options, sessionAdapter, userId, signalRef); session.accessToken = result.data.session.access_token; return session;
   }
-  const adapter = { createSession,
+  const adapter = { createSession, sessionPreparationConcurrency: 10, sessionPreparationBatchDelayMs: 100,
     virtualUsers(count = 10_000, seed = 42) { return buildVirtualUserSpecs(count, seed); },
     correctnessFixture() {
       const specs = buildVirtualUserSpecs(3_201, 42);

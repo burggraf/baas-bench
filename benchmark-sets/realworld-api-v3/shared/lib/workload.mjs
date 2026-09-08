@@ -34,6 +34,12 @@ const validCredentials = (value) => {
 export async function runWorkload(backend, config, options) {
     const now = options.now ?? defaultNow;
     const sleep = options.sleep ?? defaultSleep;
+    const sessionPreparationConcurrency = backend.sessionPreparationConcurrency ?? SESSION_PREPARATION_CONCURRENCY;
+    const sessionPreparationBatchDelayMs = backend.sessionPreparationBatchDelayMs ?? 0;
+    if (!Number.isSafeInteger(sessionPreparationConcurrency) || sessionPreparationConcurrency < 1 || sessionPreparationConcurrency > SESSION_PREPARATION_CONCURRENCY)
+        throw new RangeError("invalid session preparation concurrency");
+    if (!Number.isFinite(sessionPreparationBatchDelayMs) || sessionPreparationBatchDelayMs < 0)
+        throw new RangeError("invalid session preparation batch delay");
     if (!Array.isArray(options.users))
         throw new TypeError("users must be an array");
     if (options.users.some(user => !user || !validCredentials(user.credentials) || !user.organizationId || !user.projectId || !user.taskId))
@@ -91,8 +97,10 @@ export async function runWorkload(backend, config, options) {
     const closeAll = async () => {
         for (let attempt = 0; attempt < 2 && active.size; attempt++) {
             const batch = [...active];
-            for (let offset = 0; offset < batch.length; offset += SESSION_PREPARATION_CONCURRENCY) {
-                await Promise.allSettled(batch.slice(offset, offset + SESSION_PREPARATION_CONCURRENCY).map(session => closeSession(session)));
+            for (let offset = 0; offset < batch.length; offset += sessionPreparationConcurrency) {
+                await Promise.allSettled(batch.slice(offset, offset + sessionPreparationConcurrency).map(session => closeSession(session)));
+                if (sessionPreparationBatchDelayMs)
+                    await sleep(sessionPreparationBatchDelayMs);
             }
             for (const session of batch)
                 if (closed.has(session))
@@ -134,15 +142,17 @@ export async function runWorkload(backend, config, options) {
             summary.stageFailed = true;
             return false;
         }
-        for (let offset = 0; offset < options.users.length; offset += SESSION_PREPARATION_CONCURRENCY) {
+        for (let offset = 0; offset < options.users.length; offset += sessionPreparationConcurrency) {
             if (requestController.signal.aborted) {
                 summary.preparationFailed = true;
                 summary.preparationFailureCount = options.users.length - offset;
                 summary.stageFailed = true;
                 return false;
             }
-            const batch = options.users.slice(offset, offset + SESSION_PREPARATION_CONCURRENCY);
+            const batch = options.users.slice(offset, offset + sessionPreparationConcurrency);
             const settled = await Promise.allSettled(batch.map(spec => create(spec)));
+            if (sessionPreparationBatchDelayMs)
+                await sleep(sessionPreparationBatchDelayMs);
             let failures = 0;
             for (const result of settled) {
                 if (result.status === "fulfilled")
