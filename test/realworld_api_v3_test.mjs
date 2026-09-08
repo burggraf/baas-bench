@@ -209,6 +209,13 @@ test('Supabase correctness fixture supplies every authenticated role and members
   assert.notEqual(fixture.memberMembershipId, fixture.adminMembershipId);
 });
 
+test('Supabase adapter preserves authentication failures for classification', async () => {
+  const { createSupabaseAdapter } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/supabase.mjs');
+  const sdk = { auth: { async signInWithPassword() { return { data: {}, error: { status: 400, message: 'invalid credentials' } }; } } };
+  const adapter = createSupabaseAdapter({ sdkCreateClient: () => sdk, url: 'http://supabase.test', key: 'key' });
+  await assert.rejects(adapter.createSession({ email: 'u@example.test', password: 'invalid' }), error => error.status === 401);
+});
+
 test('Supabase reset preserves native auth metadata and clears sessions', async () => {
   const { RESET_FIXTURE_STATE_SQL } = await import('../benchmark-sets/realworld-api-v3/shared/lib/admin/postgres.mjs');
   assert.match(RESET_FIXTURE_STATE_SQL, /auth\.users/i);
