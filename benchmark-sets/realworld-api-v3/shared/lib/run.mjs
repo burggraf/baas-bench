@@ -121,7 +121,9 @@ export async function executeRun(context, dependencies) {
     capacity = evaluate(stages, config, { minSamples: 20 });
     const current = capacity.stages.find(item => item.requestedUsers === requestedUsers);
     if (current?.passed) lowerPass = Math.max(lowerPass ?? 0, requestedUsers);
-    else if (current && !current.invalid) upperFailure = Math.min(upperFailure ?? requestedUsers, requestedUsers);
+    else if (current && (!current.invalid || Object.values(current.operationClasses ?? {}).some(metric => metric.passed === false))) {
+      upperFailure = Math.min(upperFailure ?? requestedUsers, requestedUsers);
+    }
     if (refining) refinements++;
   }
 

@@ -2,7 +2,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { runCommand } from '../command.mjs';
 import { seedDataset, buildVirtualUserSpecs } from '../dataset.mjs';
-import { loadSchemaText, copyDataset, exactCountSql, verifyExactCounts, createFixtureState, resetFixtureState, createNeonPasswords } from './postgres.mjs';
+import { loadSchemaText, copyDataset, exactCountSql, verifyExactCounts, verifyMinimumCounts, createFixtureState, resetFixtureState, createNeonPasswords } from './postgres.mjs';
 
 const psqlArgs = ['compose', 'supabase', 'exec', '-T', 'db', 'psql', '-X', '-q', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', 'postgres'];
 function jsonRows(stdout) { try { return JSON.parse(stdout.trim()); } catch { throw new Error('invalid Supabase administration response'); } }
@@ -11,7 +11,8 @@ export function createSupabaseAdmin({ run = runCommand, root, runtime, seed = 42
   const state = join(runtime, 'state');
   async function psql(sql, args = []) { return run(command, [...psqlArgs, ...args], { input: sql, timeoutMs: 600_000 }); }
   async function query(sql) { const result = await psql(sql, ['-At']); return result.stdout; }
-  async function verify() { await verifyExactCounts(async sql => (await query(sql)).trim().split('\n').filter(Boolean).map(line => { const [table, row_count] = line.split(/[\t|]/); return { table, row_count }; })); }
+  async function countRows(sql) { return (await query(sql)).trim().split('\n').filter(Boolean).map(line => { const [table, row_count] = line.split(/[\t|]/); return { table, row_count }; }); }
+  async function verify() { await verifyMinimumCounts(countRows); }
   async function teardown() { await psql("DO $$ BEGIN IF to_regclass('auth.users') IS NOT NULL THEN TRUNCATE TABLE auth.users CASCADE; END IF; END $$; DROP SCHEMA IF EXISTS benchmark_fixture CASCADE; DROP SCHEMA IF EXISTS benchmark_auth CASCADE; DROP TABLE IF EXISTS public.activities, public.comments, public.tasks, public.projects, public.memberships, public.organizations, public.users CASCADE; DROP SCHEMA IF EXISTS benchmark_private CASCADE; DROP SCHEMA IF EXISTS benchmark_extensions CASCADE;"); }
   return {
     async setup() {
@@ -34,11 +35,11 @@ END $$;`);
         await createFixtureState(async sql => psql(sql));
         await mkdir(state, { recursive: true });
         await writeFile(join(state, 'supabase-config.json'), `${JSON.stringify({ seed, password })}\n`, { mode: 0o600 });
-        await verify();
+        await verifyExactCounts(countRows);
       } catch (error) { try { await teardown(); } catch (cleanup) { error.cleanupError = cleanup?.message ?? String(cleanup); } throw error; }
     },
     verify,
-    async reset() { await resetFixtureState(sql => psql(sql)); await verify(); },
+    async reset() { await resetFixtureState(sql => psql(sql)); await verifyExactCounts(countRows); },
     teardown,
   };
 }

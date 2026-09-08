@@ -107,7 +107,7 @@ function resultRows(result) {
   throw new TypeError('count transport must return rows');
 }
 
-export async function verifyExactCounts(query, expected = DATASET_COUNTS) {
+async function verifyCounts(query, expected, minimum) {
   if (typeof query !== 'function') throw new TypeError('query transport is required');
   const rows = resultRows(await query(exactCountSql(), []));
   const seen = new Map();
@@ -122,9 +122,19 @@ export async function verifyExactCounts(query, expected = DATASET_COUNTS) {
   for (const table of APPLICATION_TABLES) {
     if (!seen.has(table)) throw new Error(`${table} count is missing`);
     const wanted = BigInt(expected[table]);
-    if (seen.get(table) !== wanted) throw new Error(`${table} count expected ${wanted}, received ${seen.get(table)}`);
+    if (minimum ? seen.get(table) < wanted : seen.get(table) !== wanted) {
+      throw new Error(`${table} count expected ${minimum ? 'at least ' : ''}${wanted}, received ${seen.get(table)}`);
+    }
   }
   return true;
+}
+
+export async function verifyExactCounts(query, expected = DATASET_COUNTS) {
+  return verifyCounts(query, expected, false);
+}
+
+export async function verifyMinimumCounts(query, expected = DATASET_COUNTS) {
+  return verifyCounts(query, expected, true);
 }
 
 const snapshotTables = APPLICATION_TABLES.map(table =>

@@ -486,6 +486,41 @@ test('runner performs correctness before warm-up, keeps warm-up writes, and foll
   } finally { await rm(outputDir, { recursive: true, force: true }); }
 });
 
+test('adaptive search brackets on measured SLO failure even when cleanup invalidates the stage', async () => {
+  const { executeRun } = await import('../benchmark-sets/realworld-api-v3/shared/lib/run.mjs');
+  const outputDir = await mkdtemp(join(tmpdir(), 'rw-product-failure-'));
+  try {
+    await executeRun({ platform: 'supabase', phase: 'measure', trial: 1, outputDir, warmupMs: 0, stageMs: 1 }, {
+      adapter: { users: Array.from({ length: 50 }, (_, i) => ({ i })), fixture: {} },
+      correctness: async () => ({ findings: [{ passed: true }] }),
+      workload: async (_adapter, _config, options) => {
+        options.onMeasuredStart?.();
+        options.onMeasuredEnd?.();
+        return { startedUsers: options.users.length, lostUsers: 0, stageFailed: options.users.length === 10 };
+      },
+      metricsFactory: () => ({ record() {}, finalize(_elapsed, counts) { return passingStage(counts.requestedUsers); } }),
+      collectResources: async () => ({ samples: [], valid: true, validityReasons: [] }),
+      evaluateCapacity: stages => ({
+        selectedCapacityUsers: stages[0].requestedUsers,
+        stages: stages.map(stage => stage.requestedUsers === 5
+          ? { requestedUsers: 5, passed: true, invalid: false, operationClasses: { read: { passed: true } } }
+          : { requestedUsers: 10, passed: false, invalid: true, operationClasses: { read: { passed: false } } }),
+        reasons: [], saturation: false,
+      }),
+      nextStage: ({ measuredUsers, upperFailure }) => {
+        if (!measuredUsers.length) return 5;
+        if (measuredUsers.length === 1) return 10;
+        assert.equal(upperFailure, 10);
+        return null;
+      },
+      monotonic: (() => { let n = 0; return () => ++n; })(),
+    });
+    const raw = JSON.parse(readFileSync(join(outputDir, 'raw.json'), 'utf8'));
+    assert.deepEqual(raw.stages.map(stage => stage.requestedUsers), [5, 10]);
+    assert.deepEqual(raw.stages[1].validityReasons, ['workload failed']);
+  } finally { await rm(outputDir, { recursive: true, force: true }); }
+});
+
 test('summary contains every fixed numeric metric and zeroes without a passing stage', async () => {
   const { summarize, FIXED_METRICS } = await import('../benchmark-sets/realworld-api-v3/shared/lib/summary.mjs');
   const summary = summarize([], { selectedCapacityUsers: 0, stages: [], saturation: false });
@@ -695,7 +730,7 @@ test('postgres admin schema provides tenant RLS, workload indexes, activity, res
 
 test('postgres admin streams escaped bounded COPY and verifies every exact count', async () => {
   const {
-    copyDataset, encodeCopyRow, verifyExactCounts,
+    copyDataset, encodeCopyRow, verifyExactCounts, verifyMinimumCounts,
   } = await import('../benchmark-sets/realworld-api-v3/shared/lib/admin/postgres.mjs');
   assert.equal(encodeCopyRow(['back\\slash', 'a\tb', 'a\nb', 'a\rb', null]), 'back\\\\slash\ta\\tb\ta\\nb\ta\\rb\t\\N\n');
   const calls = [];
@@ -719,7 +754,10 @@ test('postgres admin streams escaped bounded COPY and verifies every exact count
   const exact = Object.entries(DATASET_COUNTS).map(([table, count]) => ({ table, count: String(count) }));
   await verifyExactCounts(async (_sql, values) => { assert.deepEqual(values, []); return exact; });
   await assert.rejects(verifyExactCounts(async () => exact.map((row, index) => index ? row : { ...row, count: String(Number(row.count) - 1) })), /organizations.*expected/i);
-  await assert.rejects(verifyExactCounts(async () => exact.map((row, index) => index ? row : { ...row, count: String(Number(row.count) + 1) })), /organizations.*expected/i);
+  const extra = exact.map((row, index) => index ? row : { ...row, count: String(Number(row.count) + 1) });
+  await assert.rejects(verifyExactCounts(async () => extra), /organizations.*expected/i);
+  await verifyMinimumCounts(async () => extra);
+  await assert.rejects(verifyMinimumCounts(async () => exact.map((row, index) => index ? row : { ...row, count: String(Number(row.count) - 1) })), /organizations.*expected at least/i);
   await assert.rejects(verifyExactCounts(async () => exact.slice(1)), /organizations.*missing/i);
   await assert.rejects(verifyExactCounts(async () => [...exact, { table: 'intruder', count: '0' }]), /unexpected table/i);
 });

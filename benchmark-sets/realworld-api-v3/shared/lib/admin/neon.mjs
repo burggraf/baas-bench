@@ -1,6 +1,6 @@
 import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { loadSchemaText, exactCountSql, verifyExactCounts, createFixtureState, resetFixtureState, createNeonPasswords } from './postgres.mjs';
+import { loadSchemaText, exactCountSql, verifyExactCounts, verifyMinimumCounts, createFixtureState, resetFixtureState, createNeonPasswords } from './postgres.mjs';
 import { createTlsFetch } from '../adapters/neon.mjs';
 import { DATASET_COUNTS, entityId, seedDataset } from '../dataset.mjs';
 
@@ -46,7 +46,8 @@ export function createNeonAdmin({ sql, seed = 42, password = `Bb-v3-${seed}-capa
     const values = records.map(source => { const record = normalizeRecord(entity, source); return `(${fields.map(field => { params.push(record[field]); return `$${params.length}`; }).join(',')})`; }).join(',');
     await query(`INSERT INTO public.${table} (${columns.join(',')}) VALUES ${values}`, params);
   }
-  async function verify() { return verifyExactCounts((text, params) => query(text, params)); }
+  async function verify() { return verifyMinimumCounts((text, params) => query(text, params)); }
+  async function verifyExact() { return verifyExactCounts((text, params) => query(text, params)); }
   async function teardown() {
     let failure;
     try { await query('DROP SCHEMA IF EXISTS benchmark_fixture CASCADE; DROP SCHEMA IF EXISTS benchmark_auth CASCADE; DROP TABLE IF EXISTS public.activities, public.comments, public.tasks, public.projects, public.memberships, public.organizations, public.users CASCADE; DROP SCHEMA IF EXISTS benchmark_private CASCADE; DROP SCHEMA IF EXISTS benchmark_extensions CASCADE;'); }
@@ -65,14 +66,14 @@ export function createNeonAdmin({ sql, seed = 42, password = `Bb-v3-${seed}-capa
         await mkdir(stateDir, { recursive: true, mode: 0o700 });
         await chmod(stateDir, 0o700);
         await writeFile(configPath, `${JSON.stringify({ seed, password })}\n`, { mode: 0o600 });
-        await verify();
+        await verifyExact();
       } catch (error) {
         try { await teardown(); } catch (cleanupError) { if (error && typeof error === 'object') error.cleanupError = String(cleanupError?.message ?? cleanupError); }
         throw error;
       }
     },
     verify,
-    async reset() { await resetFixtureState((text, params) => query(text, params)); await verify(); },
+    async reset() { await resetFixtureState((text, params) => query(text, params)); await verifyExact(); },
     teardown,
   };
 }
