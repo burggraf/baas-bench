@@ -968,6 +968,7 @@ test('Supabase teardown clears isolated auth users efficiently', async () => {
   const admin = await readFile(new URL('../benchmark-sets/realworld-api-v3/shared/lib/admin/supabase.mjs', import.meta.url), 'utf8');
   const command = await readFile(new URL('../benchmark-sets/realworld-api-v3/shared/lib/command.mjs', import.meta.url), 'utf8');
   assert.match(admin, /TRUNCATE TABLE auth\.users CASCADE/);
+  assert.match(admin, /timeoutMs: 600_000/);
   assert.match(command, /timeout > 600_000/);
 });
 

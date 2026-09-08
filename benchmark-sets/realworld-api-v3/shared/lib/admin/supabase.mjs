@@ -9,7 +9,7 @@ function jsonRows(stdout) { try { return JSON.parse(stdout.trim()); } catch { th
 export function createSupabaseAdmin({ run = runCommand, root, runtime, seed = 42, password = `Bb-v3-${seed}-capacity!` }) {
   const command = join(root, 'bin/baas');
   const state = join(runtime, 'state');
-  async function psql(sql, args = []) { return run(command, [...psqlArgs, ...args], { input: sql, timeoutMs: 60_000 }); }
+  async function psql(sql, args = []) { return run(command, [...psqlArgs, ...args], { input: sql, timeoutMs: 600_000 }); }
   async function query(sql) { const result = await psql(sql, ['-At']); return result.stdout; }
   async function verify() { await verifyExactCounts(async sql => (await query(sql)).trim().split('\n').filter(Boolean).map(line => { const [table, row_count] = line.split(/[\t|]/); return { table, row_count }; })); }
   async function teardown() { await psql("DO $$ BEGIN IF to_regclass('auth.users') IS NOT NULL THEN TRUNCATE TABLE auth.users CASCADE; END IF; END $$; DROP SCHEMA IF EXISTS benchmark_fixture CASCADE; DROP SCHEMA IF EXISTS benchmark_auth CASCADE; DROP TABLE IF EXISTS public.activities, public.comments, public.tasks, public.projects, public.memberships, public.organizations, public.users CASCADE; DROP SCHEMA IF EXISTS benchmark_private CASCADE; DROP SCHEMA IF EXISTS benchmark_extensions CASCADE;"); }
