@@ -23,7 +23,7 @@ export function createConvexAdmin({ run = runCommand, root, runtime, seed = 42, 
     return Object.fromEntries(Object.entries(value).map(([field, fieldValue]) => [field, typeof fieldValue === 'string' && /At$|Date$/.test(field) ? Date.parse(fieldValue) : fieldValue]));
   }
   let cliEnv;
-  async function cli(args) { if (!cliEnv) throw new Error('Convex administrative environment is missing'); return run('npx', ['convex', ...args], { cwd: runtime, env: cliEnv, timeoutMs: 60_000 }); }
+  async function cli(args) { if (!cliEnv) throw new Error('Convex administrative environment is missing'); return run('npx', ['convex', ...args], { cwd: runtime, env: cliEnv, timeoutMs: 600_000 }); }
   async function deploy() { await cli(deployArgs); }
   async function importFixture() { for (const entity of Object.keys(importPaths)) { const prefix = `${importPaths[entity]}.`; const files = (await readdir(state)).filter(name => name.startsWith(prefix.slice(prefix.lastIndexOf('/') + 1))).sort((a, b) => Number(a.slice(a.lastIndexOf('.') + 1)) - Number(b.slice(b.lastIndexOf('.') + 1))); for (const [index, name] of files.entries()) await cli(['import', '--table', importTables[entity], index === 0 ? '--replace' : '--append', '--format', 'jsonLines', '--yes', join(state, name)]); } }
   async function teardown() {

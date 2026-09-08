@@ -800,10 +800,12 @@ test('Convex assets declare tenant authorization, indexes, and bounded lifecycle
   const schema = readFileSync(new URL('../benchmark-sets/realworld-api-v3/shared/convex/schema.ts', import.meta.url), 'utf8');
   const authorize = readFileSync(new URL('../benchmark-sets/realworld-api-v3/shared/convex/authorize.ts', import.meta.url), 'utf8');
   const admin = await import('../benchmark-sets/realworld-api-v3/shared/lib/admin/convex.mjs');
+  const adminSource = readFileSync(new URL('../benchmark-sets/realworld-api-v3/shared/lib/admin/convex.mjs', import.meta.url), 'utf8');
   assert.match(schema, /organizations|projects|tasks|comments|activities/);
   assert.match(schema, /by_organization|by_project|by_task/);
   assert.match(authorize, /getUserIdentity|organization/);
   assert.deepEqual(admin.deployArgs, ['deploy', '--typecheck', 'disable']);
+  assert.match(adminSource, /timeoutMs: 600_000/);
 });
 
 test('Appwrite adapter isolates Account and TablesDB sessions and normalizes rows', async () => {
