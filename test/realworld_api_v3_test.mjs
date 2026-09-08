@@ -834,6 +834,7 @@ test('Appwrite admin and adapter declare TablesDB access-path metadata', async (
   assert.equal(typeof createAppwriteAdmin, 'function');
   assert.equal(createAppwriteAdapter({ Client: class {}, Account: class {}, TablesDB: class {}, api: {}, databaseId: 'db' }).accessPath, 'javascript-sdk');
   assert.match(adminSource, /rowId/);
+  assert.match(adminSource, /\[404, 401, 403\]/);
 });
 
 test('Nhost adapter uses native auth and parameterized GraphQL requests', async () => {
