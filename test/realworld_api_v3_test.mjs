@@ -997,9 +997,10 @@ test('Directus session cleanup stops SDK refresh timers without blocking on logo
 });
 
 test('Directus admin and adapter expose REST access-path metadata', async () => {
-  const { createDirectusAdmin } = await import('../benchmark-sets/realworld-api-v3/shared/lib/admin/directus.mjs');
+  const { createDirectusAdmin, DIRECTUS_SQL_TIMEOUT_MS } = await import('../benchmark-sets/realworld-api-v3/shared/lib/admin/directus.mjs');
   const { createDirectusAdapter } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/directus.mjs');
   assert.equal(typeof createDirectusAdmin, 'function');
+  assert.equal(DIRECTUS_SQL_TIMEOUT_MS, 600_000);
   assert.equal(createDirectusAdapter({ client: {}, createDirectus: () => ({}) }).accessPath, 'javascript-sdk');
 });
 
