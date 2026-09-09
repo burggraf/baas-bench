@@ -498,7 +498,10 @@ test('adaptive search brackets on measured SLO failure even when cleanup invalid
         options.onMeasuredEnd?.();
         return { startedUsers: options.users.length, lostUsers: 0, stageFailed: options.users.length === 10 };
       },
-      metricsFactory: () => ({ record() {}, finalize(_elapsed, counts) { return passingStage(counts.requestedUsers); } }),
+      metricsFactory: options => {
+        assert.equal(options.maxLatencySamples, 1_000_000);
+        return { record() {}, finalize(_elapsed, counts) { return passingStage(counts.requestedUsers); } };
+      },
       collectResources: async () => ({ samples: [], valid: true, validityReasons: [] }),
       evaluateCapacity: stages => ({
         selectedCapacityUsers: stages[0].requestedUsers,

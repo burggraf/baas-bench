@@ -92,7 +92,7 @@ export async function executeRun(context, dependencies) {
     const requestedUsers = chooseNext({ measuredUsers, lowerPass, upperFailure, refinements, maxUsers: users.length });
     if (requestedUsers === null) break;
     if (!Number.isSafeInteger(requestedUsers) || requestedUsers < 1 || requestedUsers > users.length || measuredUsers.includes(requestedUsers)) throw new Error('invalid adaptive capacity decision');
-    const accumulator = (dependencies.metricsFactory ?? (options => new StageMetricsAccumulator(options)))({ maxErrorExamples: 100 });
+    const accumulator = (dependencies.metricsFactory ?? (options => new StageMetricsAccumulator(options)))({ maxErrorExamples: 100, maxLatencySamples: 1_000_000 });
     let start;
     let end;
     let resourcePromise;
