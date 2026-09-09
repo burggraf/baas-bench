@@ -162,6 +162,14 @@ export async function runFromArguments(args, dependencies = {}) {
   );
 }
 
+export async function runCli(args, dependencies = {}, io = {}) {
+  const run = io.run ?? runFromArguments;
+  const exit = io.exit ?? (code => process.exit(code));
+  const report = io.error ?? (message => console.error(message));
+  try { await run(args, dependencies); exit(0); }
+  catch (error) { report(String(error?.message ?? error).slice(0, 300)); exit(1); }
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  runFromArguments(process.argv.slice(2)).catch(error => { console.error(String(error?.message ?? error).slice(0, 300)); process.exitCode = 1; });
+  void runCli(process.argv.slice(2));
 }

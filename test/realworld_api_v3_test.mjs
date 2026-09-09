@@ -566,6 +566,16 @@ test('summary contains every fixed numeric metric and zeroes without a passing s
   assert.ok(Object.values(summary.metrics).every(value => typeof value === 'number' && value === 0));
 });
 
+test('runner CLI exits after completed writes instead of waiting for SDK handles', async () => {
+  const { runCli } = await import('../benchmark-sets/realworld-api-v3/shared/lib/run.mjs');
+  const exits = [];
+  const errors = [];
+  await runCli([], {}, { run: async () => 'complete', exit: code => exits.push(code), error: message => errors.push(message) });
+  await runCli([], {}, { run: async () => { throw new Error('failed safely'); }, exit: code => exits.push(code), error: message => errors.push(message) });
+  assert.deepEqual(exits, [0, 1]);
+  assert.deepEqual(errors, ['failed safely']);
+});
+
 test('runner overload invalidates attribution and every primary failure survives teardown failure', async () => {
   const { preservePrimaryFailure } = await import('../benchmark-sets/realworld-api-v3/shared/lib/run.mjs');
   await assert.rejects(preservePrimaryFailure(async () => 'ok', async () => { throw new Error('teardown only'); }), /teardown only/);
@@ -1001,7 +1011,9 @@ test('Directus admin and adapter expose REST access-path metadata', async () => 
   const { createDirectusAdapter } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/directus.mjs');
   assert.equal(typeof createDirectusAdmin, 'function');
   assert.equal(DIRECTUS_SQL_TIMEOUT_MS, 600_000);
-  assert.equal(createDirectusAdapter({ client: {}, createDirectus: () => ({}) }).accessPath, 'javascript-sdk');
+  const adapter = createDirectusAdapter({ client: {}, createDirectus: () => ({}) });
+  assert.equal(adapter.accessPath, 'javascript-sdk');
+  assert.equal(adapter.sessionPreparationConcurrency, 10);
 });
 
 test('Directus derives the application identity before profile and tenant calls', async () => {

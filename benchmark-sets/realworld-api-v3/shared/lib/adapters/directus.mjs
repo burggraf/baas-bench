@@ -116,6 +116,7 @@ export function createDirectusAdapter({ createDirectus, rest, authentication, wi
 
   const adapter = {
     accessPath: 'javascript-sdk',
+    sessionPreparationConcurrency: 10,
     deviations: ['Directus measured traffic uses the official REST SDK with native user sessions; tenant authorization is enforced by the adapter because Directus 12 Core ignores custom permission rules.'],
     virtualUsers(count = 10_000, seed = 42) { return buildVirtualUserSpecs(count, seed); },
     correctnessFixture() {
