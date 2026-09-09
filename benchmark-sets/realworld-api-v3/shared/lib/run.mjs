@@ -104,10 +104,25 @@ export async function executeRun(context, dependencies) {
       onMeasuredStart: async () => { start = monotonic(); resourcePromise = resourcesFn({ platform: context.platform, containerIds, samples: resourceSamples, intervalMs: 1_000 }); },
       onMeasuredEnd: async () => { end = monotonic(); },
     });
-    if (start === undefined || end === undefined || !resourcePromise) throw new Error('measured stage boundaries unavailable');
-    const resource = await resourcePromise;
-    const elapsed = (end - start) / 1_000;
-    const stage = accumulator.finalize(elapsed, { requestedUsers, achievedUsers: Math.max(0, result.startedUsers - (result.lostUsers ?? 0)) });
+    let resource;
+    let stage;
+    if (start === undefined || end === undefined || !resourcePromise) {
+      if (!result.preparationFailed) throw new Error('measured stage boundaries unavailable');
+      const failureCount = result.preparationFailureCount ?? requestedUsers;
+      const noun = failureCount === 1 ? 'user' : 'users';
+      resource = { samples: [], valid: true, validityReasons: [] };
+      stage = {
+        requestedUsers, achievedUsers: 0, elapsedSeconds: 0,
+        workflowTransactionsPerSecond: 0, workflowTransactionsPerSecondByName: {},
+        remoteOperationsPerSecond: 0, readOperationsPerSecond: 0, writeOperationsPerSecond: 0,
+        workflowCompletionCountByName: {}, operationClassMetrics: {}, operations: {}, errorExamples: [],
+        valid: false, validityReasons: [`session preparation failed for ${failureCount} ${noun}`],
+      };
+    } else {
+      resource = await resourcePromise;
+      const elapsed = (end - start) / 1_000;
+      stage = accumulator.finalize(elapsed, { requestedUsers, achievedUsers: Math.max(0, result.startedUsers - (result.lostUsers ?? 0)) });
+    }
     const overload = evaluateRunnerOverload(resource.samples ?? []);
     if (overload) stage.validityReasons.push(overload);
     if (!resource.valid) stage.validityReasons.push(...(resource.validityReasons ?? ['resource collection failed']));

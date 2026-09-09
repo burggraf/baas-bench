@@ -526,6 +526,39 @@ test('adaptive search brackets on measured SLO failure even when cleanup invalid
   } finally { await rm(outputDir, { recursive: true, force: true }); }
 });
 
+test('session preparation failure bounds capacity without losing completed stages', async () => {
+  const { executeRun } = await import('../benchmark-sets/realworld-api-v3/shared/lib/run.mjs');
+  const outputDir = await mkdtemp(join(tmpdir(), 'rw-preparation-failure-'));
+  try {
+    await executeRun({ platform: 'trailbase', phase: 'measure', trial: 1, outputDir, warmupMs: 0, stageMs: 1 }, {
+      adapter: { users: Array.from({ length: 50 }, (_, i) => ({ i })), fixture: {} },
+      correctness: async () => ({ findings: [{ passed: true }] }),
+      workload: async (_adapter, _config, options) => {
+        if (options.users.length === 10) return { startedUsers: 0, lostUsers: 0, stageFailed: true, preparationFailed: true, preparationFailureCount: 1 };
+        options.onMeasuredStart?.();
+        options.onMeasuredEnd?.();
+        return { startedUsers: options.users.length, lostUsers: 0, stageFailed: false, preparationFailed: false };
+      },
+      metricsFactory: () => ({ record() {}, finalize(_elapsed, counts) { return passingStage(counts.requestedUsers); } }),
+      collectResources: async () => ({ samples: [], valid: true, validityReasons: [] }),
+      nextStage: ({ measuredUsers, upperFailure }) => {
+        if (!measuredUsers.length) return 5;
+        if (measuredUsers.length === 1) return 10;
+        assert.equal(upperFailure, 10);
+        return null;
+      },
+      monotonic: (() => { let n = 0; return () => ++n; })(),
+    });
+    const raw = JSON.parse(readFileSync(join(outputDir, 'raw.json'), 'utf8'));
+    const summary = JSON.parse(readFileSync(join(outputDir, 'summary.json'), 'utf8'));
+    assert.deepEqual(raw.stages.map(stage => stage.requestedUsers), [5, 10]);
+    assert.equal(raw.stages[1].elapsedSeconds, 0);
+    assert.match(raw.stages[1].validityReasons.join(' '), /session preparation failed for 1 user/);
+    assert.equal(summary.metrics.capacity_users, 5);
+    assert.equal(summary.metrics.capacity_bounded, 1);
+  } finally { await rm(outputDir, { recursive: true, force: true }); }
+});
+
 test('summary contains every fixed numeric metric and zeroes without a passing stage', async () => {
   const { summarize, FIXED_METRICS } = await import('../benchmark-sets/realworld-api-v3/shared/lib/summary.mjs');
   const summary = summarize([], { selectedCapacityUsers: 0, stages: [], saturation: false });
