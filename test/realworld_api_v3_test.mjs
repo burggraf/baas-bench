@@ -918,7 +918,7 @@ test('Convex assets declare tenant authorization, indexes, and bounded lifecycle
   assert.match(schema, /by_organization|by_project|by_task/);
   assert.match(authorize, /getUserIdentity|organization/);
   assert.deepEqual(admin.deployArgs, ['deploy', '--typecheck', 'disable']);
-  assert.equal(admin.CONVEX_POST_IMPORT_SETTLE_MS, 60_000);
+  assert.deepEqual(admin.postImportRestartArgs, ['compose', 'convex', 'restart', 'backend']);
   assert.deepEqual(admin.fixtureImportArgs('tasks', '/tmp/tasks.jsonl'), ['import', '--table', 'tasks', '--replace', '--format', 'jsonLines', '--yes', '/tmp/tasks.jsonl']);
   const removed = [];
   assert.equal(await admin.consumePristineMarker('/tmp/pristine', { accessFn: async () => {}, rmFn: async path => removed.push(path) }), true);
@@ -926,8 +926,8 @@ test('Convex assets declare tenant authorization, indexes, and bounded lifecycle
   assert.equal(await admin.consumePristineMarker('/tmp/missing', { accessFn: async () => { throw Object.assign(new Error('missing'), { code: 'ENOENT' }); } }), false);
   await assert.rejects(admin.consumePristineMarker('/tmp/broken', { accessFn: async () => { throw new Error('transport'); } }), /transport/);
   assert.match(adminSource, /timeoutMs: 600_000/);
-  assert.match(adminSource, /await sleepFn\(settleMs\)/);
-  assert.doesNotMatch(adminSource, /--append|importChunkSize/);
+  assert.match(adminSource, /postImportRestartArgs.*\['smoke', 'convex'\]/s);
+  assert.doesNotMatch(adminSource, /--append|importChunkSize|sleepFn|settleMs/);
 });
 
 test('Appwrite adapter isolates Account and TablesDB sessions and normalizes rows', async () => {
