@@ -1,4 +1,5 @@
 import { buildVirtualUserSpecs } from '../dataset.mjs';
+import { BenchmarkOperationError } from '../correctness.mjs';
 import { measureRemoteCall } from '../measurement.mjs';
 
 const mapUser = row => ({ id: row.id ?? row.$id, email: row.email, displayName: row.displayName ?? row.name, createdAt: row.createdAt ?? row.$createdAt, updatedAt: row.updatedAt ?? row.$updatedAt });
@@ -25,7 +26,7 @@ export function createAppwriteAdapter({ Client, Account, TablesDB, Query = {}, I
   async function remote(operation, signal, limit = timeoutMs) {
     return measureRemoteCall(async () => {
       let timerId;
-      const timer = new Promise((_, reject) => { timerId = setTimeout(() => reject(new Error('Appwrite request timed out')), limit); });
+      const timer = new Promise((_, reject) => { timerId = setTimeout(() => reject(new BenchmarkOperationError('timeout', { code: 'timeout', status: 408 })), limit); });
       let onAbort;
       const cancelled = signal && new Promise((_, reject) => { onAbort = () => reject(signal.reason ?? new Error('Appwrite request aborted')); if (signal.aborted) onAbort(); else signal.addEventListener('abort', onAbort, { once: true }); });
       try { return await Promise.race(cancelled ? [operation, timer, cancelled] : [operation, timer]); } finally { clearTimeout(timerId); if (onAbort) signal.removeEventListener('abort', onAbort); }
@@ -45,6 +46,7 @@ export function createAppwriteAdapter({ Client, Account, TablesDB, Query = {}, I
   function rowPermissions(userId) { return [`write("user:${userId}")`, `read("user:${userId}")`]; }
   function makeSession(resources, options = {}) {
     const session = { ...resources, controller: new AbortController(), timeoutMs: options.timeoutMs ?? timeoutMs, userId: undefined };
+    let signOutPromise;
     let externalAbort;
     if (options.signal) { externalAbort = () => session.controller.abort(options.signal.reason); if (options.signal.aborted) externalAbort(); else options.signal.addEventListener('abort', externalAbort, { once: true }); }
     const call = (operation, signal) => { const controller = new AbortController(); const abort = () => controller.abort(session.controller.signal.reason); const external = () => controller.abort(signal.reason); if (session.controller.signal.aborted) abort(); else session.controller.signal.addEventListener('abort', abort, { once: true }); if (signal?.aborted) external(); else signal?.addEventListener('abort', external, { once: true }); return Promise.resolve().then(() => operation(controller.signal)).finally(() => { session.controller.signal.removeEventListener('abort', abort); signal?.removeEventListener('abort', external); }); };
@@ -52,13 +54,13 @@ export function createAppwriteAdapter({ Client, Account, TablesDB, Query = {}, I
     session.close = async () => { try { await session.signOut(); } finally { session.cancelPending(); if (externalAbort) options.signal.removeEventListener('abort', externalAbort); } };
     session.getProfile = () => call(async signal => { const row = await remote(session.account.get(), signal, session.timeoutMs); session.userId = row.$id; return mapUser(row); });
     session.refreshSession = () => call(async signal => { await remote(session.account.updateSession({ sessionId: 'current' }), signal, session.timeoutMs); return session; }); session.refresh = session.refreshSession;
-    session.signOut = () => call(() => remote(session.account.deleteSession({ sessionId: 'current' }), undefined, session.timeoutMs), undefined);
+    session.signOut = () => signOutPromise ??= call(() => remote(session.account.deleteSession({ sessionId: 'current' }), undefined, session.timeoutMs), undefined);
     const methods = ['dashboard', 'listTasks', 'getTask', 'createTask', 'updateTask', 'addComment', 'updateComment', 'searchTasks', 'updateMembershipRole', 'updateProfile'];
     for (const name of methods) session[name] = args => call(signal => adapter[name]({ ...args, ...(name === 'createTask' ? { creatorId: session.userId } : {}), ...(name === 'addComment' ? { authorId: session.userId } : {}), session, signal }), args?.signal);
     return session;
   }
   const adapter = {
-    accessPath: 'javascript-sdk', deviations: ['Appwrite TablesDB rows and Account sessions are measured through the official JavaScript SDK; schema provisioning uses the Appwrite administration API.'],
+    accessPath: 'javascript-sdk', sessionPreparationConcurrency: 10, deviations: ['Appwrite TablesDB rows and Account sessions are measured through the official JavaScript SDK; schema provisioning uses the Appwrite administration API.'],
     virtualUsers(count = 10_000, seed = 42) { return buildVirtualUserSpecs(count, seed); },
     correctnessFixture() { const specs = buildVirtualUserSpecs(3_201, 42); const owner = specs[0], outsider = specs[1], admin = specs[1_600], member = specs[3_200]; return { organizationId: owner.organizationId, projectId: owner.projectId, taskId: owner.taskId, commentId: owner.commentId, owner: owner.credentials, member: { ...member.credentials, organizationId: owner.organizationId, projectId: owner.projectId, taskId: owner.taskId, commentId: owner.commentId }, admin: { ...admin.credentials, organizationId: owner.organizationId, projectId: owner.projectId, taskId: owner.taskId, commentId: owner.commentId }, outsider: outsider.credentials, memberMembershipId: 'memv3' + (3_200).toString(36).padStart(11, '0'), adminMembershipId: 'memv3' + (1_600).toString(36).padStart(11, '0'), ownerMembershipId: 'memv3' + '00000000000', memberUserId: member.credentials.email.match(/user-(usrv3[0-9a-z]+)/)?.[1] }; },
     async createSession(credentials, options = {}) { const resources = buildClient(); await remote(signInWithCookie(resources, credentials), options.signal, options.timeoutMs ?? timeoutMs); return makeSession(resources, options); },

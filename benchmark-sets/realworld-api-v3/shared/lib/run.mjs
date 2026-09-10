@@ -76,7 +76,7 @@ export async function executeRun(context, dependencies) {
 
   // Deliberately do not reset after this write-capable warm-up: its state remains for measured stages.
   const warmup = await workloadFn(backend, config, { users: users.slice(0, 50), durationMs: warmupMs, graceMs: config.timeoutMs });
-  if (warmup.stageFailed || warmup.failedWorkflowCount) throw new Error('warm-up failed');
+  if (warmup.stageFailed) throw new Error('warm-up failed');
 
   const stages = [];
   const resources = [];

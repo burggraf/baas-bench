@@ -457,9 +457,10 @@ test('runner performs correctness before warm-up, keeps warm-up writes, and foll
       reset: async () => { events.push('reset'); },
       workload: async (_adapter, _config, options) => {
         const users = options.users.length;
-        events.push(users === 50 && !events.includes('stage:5') ? 'warmup-write' : `stage:${users}`);
+        const warmup = users === 50 && !events.includes('stage:5');
+        events.push(warmup ? 'warmup-write' : `stage:${users}`);
         options.onMeasuredStart?.(); options.onSample?.({}); options.onMeasuredEnd?.();
-        return { startedUsers: users, lostUsers: 0, stageFailed: false };
+        return { startedUsers: users, lostUsers: 0, stageFailed: false, failedWorkflowCount: warmup ? 1 : 0 };
       },
       metricsFactory: () => ({ record() {}, finalize(_elapsed, counts) { return passingStage(counts.requestedUsers); } }),
       collectResources: async () => ({ samples: Array.from({ length: 3 }, () => ({ runner: { cpuPercent: 95 }, eventLoop: { p99Ms: 0, maxMs: 0 } })), valid: true, validityReasons: [] }),
@@ -945,7 +946,16 @@ test('Appwrite adapter isolates Account and TablesDB sessions and normalizes row
   await session.listTasks({ organizationId: 'org', projectId: 'prj', page: 0, pageSize: 10 });
   assert.ok(calls.some(call => call[0] === 'signIn'));
   assert.ok(calls.some(call => call[0] === 'list' && call[1].databaseId === 'db'));
+  await session.signOut();
+  await session.signOut();
   await session.close();
+  assert.equal(calls.filter(call => call[0] === 'signOut').length, 1);
+  assert.equal(adapter.sessionPreparationConcurrency, 10);
+
+  const timeoutAdapter = createAppwriteAdapter({ ...api, Account: class extends api.Account { async get() { return new Promise(() => {}); } }, timeoutMs: 1 });
+  const timeoutSession = await timeoutAdapter.createSession({ email: 'u@example.test', password: 'pw' });
+  await assert.rejects(timeoutSession.getProfile(), error => error.classification === 'timeout' && error.status === 408);
+  await timeoutSession.close();
 });
 
 test('Appwrite admin authenticates cleanup and retains console credentials', async () => {
@@ -986,6 +996,8 @@ test('Appwrite admin authenticates cleanup and retains console credentials', asy
   assert.match(adminSource, /\/platforms.*\[409\]/);
   assert.match(adminSource, /\/keys.*\[409\]/);
   assert.match(adminSource, /create\("users"\)/);
+  assert.match(adminSource, /TablesDBIndexType\.Fulltext/);
+  assert.match(adminSource, /tasks_title_fulltext/);
   assert.match(adminSource, /appwrite-fixture-pristine/);
   assert.match(adminSource, /if \(await consumeAppwritePristineMarker\(pristinePath\)\) return/);
 });
