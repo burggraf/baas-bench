@@ -1,11 +1,12 @@
 import { access, appendFile, chmod, mkdir, readdir, rm, writeFile } from 'node:fs/promises';
 import { generateKeyPairSync } from 'node:crypto';
 import { join } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { runCommand } from '../command.mjs';
 import { DATASET_COUNTS, entityId, seedDataset } from '../dataset.mjs';
 
 export const deployArgs = ['deploy', '--typecheck', 'disable'];
-export const postImportRestartArgs = ['compose', 'convex', 'restart', 'backend'];
+export const postImportCheckpointLogArgs = ['compose', 'convex', 'logs', '--no-color', '--since', '15s', '--tail', '100', 'backend'];
 export const fixtureImportArgs = (table, path) => ['import', '--table', table, '--replace', '--format', 'jsonLines', '--yes', path];
 export async function consumePristineMarker(path, { accessFn = access, rmFn = rm } = {}) {
   try { await accessFn(path); } catch (error) { if (error?.code === 'ENOENT') return false; throw error; }
@@ -14,7 +15,7 @@ export async function consumePristineMarker(path, { accessFn = access, rmFn = rm
 }
 export const inspectionExportPath = path => `${path}.zip`;
 
-export function createConvexAdmin({ run = runCommand, root, runtime, seed = 42, password = `Bb-v3-${seed}-capacity!` } = {}) {
+export function createConvexAdmin({ run = runCommand, root, runtime, seed = 42, password = `Bb-v3-${seed}-capacity!`, sleepFn = sleep } = {}) {
   const state = join(runtime, 'state');
   const envPath = join(state, 'convex.env');
   const privateKeyPath = join(state, 'convex-private-key.pem');
@@ -35,8 +36,12 @@ export function createConvexAdmin({ run = runCommand, root, runtime, seed = 42, 
   async function importFixture() { for (const entity of Object.keys(importPaths)) await cli(fixtureImportArgs(importTables[entity], importPaths[entity])); }
   async function restoreFixture() {
     await importFixture();
-    await run(join(root, 'bin/baas'), postImportRestartArgs, { timeoutMs: 600_000 });
-    await run(join(root, 'bin/baas'), ['smoke', 'convex'], { timeoutMs: 600_000 });
+    for (let attempt = 0; attempt < 120; attempt++) {
+      const result = await run(join(root, 'bin/baas'), postImportCheckpointLogArgs, { timeoutMs: 30_000 });
+      if (/Writing table summary checkpoint/.test(`${result.stdout}\n${result.stderr}`)) return;
+      await sleepFn(5_000);
+    }
+    throw new Error('Convex post-import table summary checkpoint timed out');
   }
   async function teardown() {
     if (!cliEnv) return;
