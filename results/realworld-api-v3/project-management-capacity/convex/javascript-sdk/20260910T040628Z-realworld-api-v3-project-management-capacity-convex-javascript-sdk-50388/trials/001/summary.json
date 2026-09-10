@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "duration_seconds": 2429.422440417,
+  "completed_operations": 128453,
+  "failed_operations": 669,
+  "error_rate": 0.0051811465126004866,
+  "metrics": {
+    "capacity_users": 500,
+    "capacity_bounded": 1,
+    "achieved_users_at_capacity": 500,
+    "workflow_tps_at_capacity": 160.94621527252733,
+    "remote_operations_per_second_at_capacity": 170.25522517656694,
+    "read_latency_p95_ms_at_capacity": 322.4884580001235,
+    "write_latency_p95_ms_at_capacity": 403.24599999934435,
+    "auth_search_latency_p95_ms_at_capacity": 615.8600829988718,
+    "read_error_rate_at_capacity": 0,
+    "write_error_rate_at_capacity": 0,
+    "auth_search_error_rate_at_capacity": 0
+  }
+}
