@@ -948,21 +948,37 @@ test('Appwrite adapter isolates Account and TablesDB sessions and normalizes row
   await session.close();
 });
 
-test('Appwrite admin and adapter declare TablesDB access-path metadata', async () => {
+test('Appwrite admin authenticates cleanup and retains console credentials', async () => {
   const { createAppwriteAdmin } = await import('../benchmark-sets/realworld-api-v3/shared/lib/admin/appwrite.mjs');
   const { createAppwriteAdapter } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/appwrite.mjs');
-  const { readFile } = await import('node:fs/promises');
+  const { access, mkdir, readFile, writeFile } = await import('node:fs/promises');
+  const runtime = await mkdtemp(join(tmpdir(), 'baas-bench-appwrite-'));
+  const state = join(runtime, 'state');
+  const calls = [];
+  await mkdir(state);
+  await writeFile(join(state, 'appwrite-console.json'), JSON.stringify({ email: 'admin@example.test', password: 'secret' }));
+  await writeFile(join(state, 'appwrite-admin.json'), '{}');
+  await writeFile(join(state, 'appwrite-config.json'), '{}');
+  const fetchImpl = async (url, options) => {
+    calls.push({ url, ...options });
+    return { ok: true, status: options.method === 'POST' ? 201 : 204, text: async () => '', headers: { getSetCookie: () => options.method === 'POST' ? ['a_session=token; Path=/'] : [] } };
+  };
+  try {
+    await createAppwriteAdmin({ runtime, fetchImpl }).teardown();
+    assert.match(calls[0].url, /\/account\/sessions\/email$/);
+    assert.ok(calls.slice(1).every(call => call.headers.cookie === 'a_session=token'));
+    await access(join(state, 'appwrite-console.json'));
+    await assert.rejects(access(join(state, 'appwrite-admin.json')));
+    await assert.rejects(access(join(state, 'appwrite-config.json')));
+  } finally { await rm(runtime, { recursive: true, force: true }); }
+
   const adminSource = await readFile(new URL('../benchmark-sets/realworld-api-v3/shared/lib/admin/appwrite.mjs', import.meta.url), 'utf8');
   assert.equal(typeof createAppwriteAdmin, 'function');
   assert.equal(createAppwriteAdapter({ Client: class {}, Account: class {}, TablesDB: class {}, api: {}, databaseId: 'db' }).accessPath, 'javascript-sdk');
   assert.match(adminSource, /\$id/);
-  assert.match(adminSource, /\[404, 401, 403\]/);
-  assert.match(adminSource, /if \(!failure\) \{ await rm\(adminPath.*await rm\(consolePath/);
   assert.match(adminSource, /\/platforms.*\[401, 403\]/);
-  assert.match(adminSource, /'DELETE', '\/account'.*\[404, 401, 403\]/);
   assert.match(adminSource, /\/keys.*\[409\]/);
   assert.match(adminSource, /create\("users"\)/);
-  assert.match(adminSource, /if \(!failure\) \{ await rm\(adminPath/);
 });
 
 test('Nhost adapter uses native auth and parameterized GraphQL requests', async () => {
