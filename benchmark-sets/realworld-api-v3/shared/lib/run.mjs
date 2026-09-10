@@ -75,8 +75,7 @@ export async function executeRun(context, dependencies) {
   if (users.length < 50) throw new Error('backend returned fewer than 50 virtual users');
 
   // Deliberately do not reset after this write-capable warm-up: its state remains for measured stages.
-  const warmup = await workloadFn(backend, config, { users: users.slice(0, 50), durationMs: warmupMs, graceMs: config.timeoutMs });
-  if (warmup.stageFailed) throw new Error('warm-up failed');
+  await workloadFn(backend, config, { users: users.slice(0, 50), durationMs: warmupMs, graceMs: config.timeoutMs });
 
   const stages = [];
   const resources = [];

@@ -463,7 +463,7 @@ test('runner performs correctness before warm-up, keeps warm-up writes, and foll
         const warmup = users === 50 && !events.includes('stage:5');
         events.push(warmup ? 'warmup-write' : `stage:${users}`);
         options.onMeasuredStart?.(); options.onSample?.({}); options.onMeasuredEnd?.();
-        return { startedUsers: users, lostUsers: 0, stageFailed: false, failedWorkflowCount: warmup ? 1 : 0 };
+        return { startedUsers: users, lostUsers: 0, stageFailed: warmup, failedWorkflowCount: warmup ? 1 : 0 };
       },
       metricsFactory: () => ({ record() {}, finalize(_elapsed, counts) { return passingStage(counts.requestedUsers); } }),
       collectResources: async () => ({ samples: Array.from({ length: 3 }, () => ({ runner: { cpuPercent: 95 }, eventLoop: { p99Ms: 0, maxMs: 0 } })), valid: true, validityReasons: [] }),
