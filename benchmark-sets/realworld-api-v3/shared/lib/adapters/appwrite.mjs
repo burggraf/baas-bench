@@ -29,7 +29,13 @@ export function createAppwriteAdapter({ Client, Account, TablesDB, Query = {}, I
       const timer = new Promise((_, reject) => { timerId = setTimeout(() => reject(new BenchmarkOperationError('timeout', { code: 'timeout', status: 408 })), limit); });
       let onAbort;
       const cancelled = signal && new Promise((_, reject) => { onAbort = () => reject(signal.reason ?? new Error('Appwrite request aborted')); if (signal.aborted) onAbort(); else signal.addEventListener('abort', onAbort, { once: true }); });
-      try { return await Promise.race(cancelled ? [operation, timer, cancelled] : [operation, timer]); } finally { clearTimeout(timerId); if (onAbort) signal.removeEventListener('abort', onAbort); }
+      try { return await Promise.race(cancelled ? [operation, timer, cancelled] : [operation, timer]); }
+      catch (error) {
+        if (error instanceof BenchmarkOperationError || error?.name === 'AbortError') throw error;
+        const status = Number(error?.status ?? error?.code);
+        const classification = status === 401 ? 'authentication' : status === 403 || status === 404 ? 'authorization' : status === 408 ? 'timeout' : 'transport/sdk';
+        throw new BenchmarkOperationError(classification, { code: Number.isFinite(status) ? String(status) : 'sdk_error', ...(Number.isFinite(status) ? { status } : {}) });
+      } finally { clearTimeout(timerId); if (onAbort) signal.removeEventListener('abort', onAbort); }
     });
   }
   function queriesFor(filters, page, pageSize) {
@@ -60,7 +66,7 @@ export function createAppwriteAdapter({ Client, Account, TablesDB, Query = {}, I
     return session;
   }
   const adapter = {
-    accessPath: 'javascript-sdk', sessionPreparationConcurrency: 10, deviations: ['Appwrite TablesDB rows and Account sessions are measured through the official JavaScript SDK; schema provisioning uses the Appwrite administration API.'],
+    accessPath: 'javascript-sdk', sessionPreparationConcurrency: 10, sessionPreparationBatchDelayMs: 100, deviations: ['Appwrite TablesDB rows and Account sessions are measured through the official JavaScript SDK; schema provisioning uses the Appwrite administration API.'],
     virtualUsers(count = 10_000, seed = 42) { return buildVirtualUserSpecs(count, seed); },
     correctnessFixture() { const specs = buildVirtualUserSpecs(3_201, 42); const owner = specs[0], outsider = specs[1], admin = specs[1_600], member = specs[3_200]; return { organizationId: owner.organizationId, projectId: owner.projectId, taskId: owner.taskId, commentId: owner.commentId, owner: owner.credentials, member: { ...member.credentials, organizationId: owner.organizationId, projectId: owner.projectId, taskId: owner.taskId, commentId: owner.commentId }, admin: { ...admin.credentials, organizationId: owner.organizationId, projectId: owner.projectId, taskId: owner.taskId, commentId: owner.commentId }, outsider: outsider.credentials, memberMembershipId: 'memv3' + (3_200).toString(36).padStart(11, '0'), adminMembershipId: 'memv3' + (1_600).toString(36).padStart(11, '0'), ownerMembershipId: 'memv3' + '00000000000', memberUserId: member.credentials.email.match(/user-(usrv3[0-9a-z]+)/)?.[1] }; },
     async createSession(credentials, options = {}) { const resources = buildClient(); await remote(signInWithCookie(resources, credentials), options.signal, options.timeoutMs ?? timeoutMs); return makeSession(resources, options); },

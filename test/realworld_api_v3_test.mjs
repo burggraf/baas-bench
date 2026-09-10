@@ -954,11 +954,17 @@ test('Appwrite adapter isolates Account and TablesDB sessions and normalizes row
   await session.close();
   assert.equal(calls.filter(call => call[0] === 'signOut').length, 1);
   assert.equal(adapter.sessionPreparationConcurrency, 10);
+  assert.equal(adapter.sessionPreparationBatchDelayMs, 100);
 
   const timeoutAdapter = createAppwriteAdapter({ ...api, Account: class extends api.Account { async get() { return new Promise(() => {}); } }, timeoutMs: 1 });
   const timeoutSession = await timeoutAdapter.createSession({ email: 'u@example.test', password: 'pw' });
   await assert.rejects(timeoutSession.getProfile(), error => error.classification === 'timeout' && error.status === 408);
   await timeoutSession.close();
+
+  const failureAdapter = createAppwriteAdapter({ ...api, Account: class extends api.Account { async get() { throw Object.assign(new Error('backend unavailable'), { code: 500 }); } } });
+  const failureSession = await failureAdapter.createSession({ email: 'u@example.test', password: 'pw' });
+  await assert.rejects(failureSession.getProfile(), error => error.classification === 'transport/sdk' && error.status === 500);
+  await failureSession.close();
 });
 
 test('Appwrite admin authenticates cleanup and retains console credentials', async () => {
