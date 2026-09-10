@@ -12,13 +12,13 @@ export function summarize(stages, capacity) {
   if (!Array.isArray(stages) || !capacity || typeof capacity !== 'object') throw new Error('invalid summary input');
   const metrics = zeroMetrics();
   const selected = Number.isSafeInteger(capacity.selectedCapacityUsers) ? capacity.selectedCapacityUsers : 0;
+  metrics.capacity_bounded = capacity.stages?.some(item => item.requestedUsers > selected && !item.passed
+    && (!item.invalid || Object.values(item.operationClasses ?? {}).some(metric => metric.passed === false))) ? 1 : 0;
   const stage = stages.find(candidate => candidate.requestedUsers === selected && candidate.valid);
   if (stage) {
     const classes = stage.operationClassMetrics ?? {};
     Object.assign(metrics, {
       capacity_users: selected,
-      capacity_bounded: capacity.stages?.some(item => item.requestedUsers > selected && !item.passed
-        && (!item.invalid || Object.values(item.operationClasses ?? {}).some(metric => metric.passed === false))) ? 1 : 0,
       achieved_users_at_capacity: stage.achievedUsers,
       workflow_tps_at_capacity: stage.workflowTransactionsPerSecond,
       remote_operations_per_second_at_capacity: stage.remoteOperationsPerSecond,

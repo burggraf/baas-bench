@@ -450,7 +450,11 @@ function passingStage(users) {
 }
 
 test('runner performs correctness before warm-up, keeps warm-up writes, and follows adaptive decisions', async () => {
-  const { executeRun } = await import('../benchmark-sets/realworld-api-v3/shared/lib/run.mjs');
+  const { capacityStageDurationMs, executeRun } = await import('../benchmark-sets/realworld-api-v3/shared/lib/run.mjs');
+  assert.equal(capacityStageDurationMs(300_000, 1), 1_500_000);
+  assert.equal(capacityStageDurationMs(300_000, 2), 750_000);
+  assert.equal(capacityStageDurationMs(300_000, 5), 300_000);
+  assert.equal(capacityStageDurationMs(300_000, 10), 300_000);
   const outputDir = await mkdtemp(join(tmpdir(), 'rw-runner-'));
   const events = [];
   try {
@@ -568,6 +572,9 @@ test('summary contains every fixed numeric metric and zeroes without a passing s
   const summary = summarize([], { selectedCapacityUsers: 0, stages: [], saturation: false });
   assert.deepEqual(Object.keys(summary.metrics).sort(), [...FIXED_METRICS].sort());
   assert.ok(Object.values(summary.metrics).every(value => typeof value === 'number' && value === 0));
+  const belowOne = summarize([], { selectedCapacityUsers: 0, stages: [{ requestedUsers: 1, passed: false, invalid: false, operationClasses: {} }], saturation: false });
+  assert.equal(belowOne.metrics.capacity_users, 0);
+  assert.equal(belowOne.metrics.capacity_bounded, 1);
 });
 
 test('runner CLI exits after completed writes instead of waiting for SDK handles', async () => {

@@ -12,7 +12,7 @@ The runner performs a non-scored 50-user warm-up before adaptive capacity search
 
 ## Capacity and SLOs
 
-The search tests stages 5, 10, 25, and 50 and doubles until the first failure or 10,000 users. If the initial five-user stage fails, it halves toward one user to establish a lower bound; once bracketed, it performs at most four bounded integer refinements. Capacity is the highest contiguous passing stage. A passing stage must achieve at least 95% of requested users, include at least 20 samples in each active class, keep read/write/auth-search p95 latency at or below 500/750/1000 ms, and keep each class error rate strictly below 1%.
+The search tests stages 5, 10, 25, and 50 and doubles until the first failure or 10,000 users. If the initial five-user stage fails, it halves toward one user to establish a lower bound; stages below five users extend duration to preserve the five-user stage's 1,500 user-seconds of sample exposure, ensuring low-weight operation classes can reach the 20-sample minimum. Once bracketed, the search performs at most four bounded integer refinements. Capacity is the highest contiguous passing stage. A passing stage must achieve at least 95% of requested users, include at least 20 samples in each active class, keep read/write/auth-search p95 latency at or below 500/750/1000 ms, and keep each class error rate strictly below 1%.
 
 ## Metrics and evidence
 

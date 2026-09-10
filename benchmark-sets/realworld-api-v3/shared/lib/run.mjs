@@ -15,6 +15,8 @@ const DEFAULT_CONFIG = Object.freeze({
   slos: { read: { p95Ms: 500, maxErrorRate: 0.01 }, write: { p95Ms: 750, maxErrorRate: 0.01 }, authSearch: { p95Ms: 1_000, maxErrorRate: 0.01 } },
 });
 
+export const capacityStageDurationMs = (stageMs, users) => Math.ceil(stageMs * Math.max(1, 5 / users));
+
 function parseArguments(args) {
   if (args.length !== 4) throw new Error('usage: run.mjs <platform> <phase> <trial> <absolute-output-dir>');
   const [platform, phase, trialText, outputDir] = args;
@@ -94,10 +96,11 @@ export async function executeRun(context, dependencies) {
     let start;
     let end;
     let resourcePromise;
-    const resourceSamples = Math.max(1, Math.ceil(stageMs / 1_000));
+    const durationMs = capacityStageDurationMs(stageMs, requestedUsers);
+    const resourceSamples = Math.max(1, Math.ceil(durationMs / 1_000));
     const containerIds = dependencies.containerIds ?? [];
     const result = await workloadFn(backend, config, {
-      users: users.slice(0, requestedUsers), durationMs: stageMs, graceMs: config.timeoutMs,
+      users: users.slice(0, requestedUsers), durationMs, graceMs: config.timeoutMs,
       onSample: sample => accumulator.record(sample),
       onMeasuredStart: async () => { start = monotonic(); resourcePromise = resourcesFn({ platform: context.platform, containerIds, samples: resourceSamples, intervalMs: 1_000 }); },
       onMeasuredEnd: async () => { end = monotonic(); },
