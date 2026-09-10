@@ -1,10 +1,12 @@
 import { access, appendFile, chmod, mkdir, readdir, rm, writeFile } from 'node:fs/promises';
 import { generateKeyPairSync } from 'node:crypto';
 import { join } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { runCommand } from '../command.mjs';
 import { DATASET_COUNTS, entityId, seedDataset } from '../dataset.mjs';
 
 export const deployArgs = ['deploy', '--typecheck', 'disable'];
+export const CONVEX_POST_IMPORT_SETTLE_MS = 60_000;
 export const fixtureImportArgs = (table, path) => ['import', '--table', table, '--replace', '--format', 'jsonLines', '--yes', path];
 export async function consumePristineMarker(path, { accessFn = access, rmFn = rm } = {}) {
   try { await accessFn(path); } catch (error) { if (error?.code === 'ENOENT') return false; throw error; }
@@ -13,7 +15,7 @@ export async function consumePristineMarker(path, { accessFn = access, rmFn = rm
 }
 export const inspectionExportPath = path => `${path}.zip`;
 
-export function createConvexAdmin({ run = runCommand, root, runtime, seed = 42, password = `Bb-v3-${seed}-capacity!` } = {}) {
+export function createConvexAdmin({ run = runCommand, root, runtime, seed = 42, password = `Bb-v3-${seed}-capacity!`, sleepFn = sleep, settleMs = CONVEX_POST_IMPORT_SETTLE_MS } = {}) {
   const state = join(runtime, 'state');
   const envPath = join(state, 'convex.env');
   const privateKeyPath = join(state, 'convex-private-key.pem');
@@ -32,6 +34,7 @@ export function createConvexAdmin({ run = runCommand, root, runtime, seed = 42, 
   async function cli(args) { if (!cliEnv) throw new Error('Convex administrative environment is missing'); return run('npx', ['convex', ...args], { cwd: runtime, env: cliEnv, timeoutMs: 600_000 }); }
   async function deploy() { await cli(deployArgs); }
   async function importFixture() { for (const entity of Object.keys(importPaths)) await cli(fixtureImportArgs(importTables[entity], importPaths[entity])); }
+  async function restoreFixture() { await importFixture(); await sleepFn(settleMs); }
   async function teardown() {
     if (!cliEnv) return;
     let failure;
@@ -59,12 +62,12 @@ export function createConvexAdmin({ run = runCommand, root, runtime, seed = 42, 
         for await (const batch of seedDataset(seed, 500)) {
           await appendFile(importPaths[batch.entity], batch.records.map(record => `${JSON.stringify(normalizeRecord(batch.entity, record))}\n`).join(''));
         }
-        await importFixture();
+        await restoreFixture();
         await writeFile(pristinePath, '', { mode: 0o600 });
       } catch (error) { try { await teardown(); } catch (cleanup) { if (error && typeof error === 'object') error.cleanupError = String(cleanup?.message ?? cleanup); } throw error; }
     },
     async verify() { await cli(['run', 'setup:verify', '{}']); },
-    async reset() { if (!await consumePristineMarker(pristinePath)) await importFixture(); await verify(); },
+    async reset() { if (!await consumePristineMarker(pristinePath)) await restoreFixture(); await verify(); },
     teardown,
     setEnvironment(environment) { cliEnv = { ...process.env, ...environment }; },
   };
