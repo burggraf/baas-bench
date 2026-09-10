@@ -1,4 +1,4 @@
-import { appendFile, chmod, mkdir, readdir, rm, writeFile } from 'node:fs/promises';
+import { access, appendFile, chmod, mkdir, readdir, rm, writeFile } from 'node:fs/promises';
 import { generateKeyPairSync } from 'node:crypto';
 import { join } from 'node:path';
 import { runCommand } from '../command.mjs';
@@ -6,6 +6,11 @@ import { DATASET_COUNTS, entityId, seedDataset } from '../dataset.mjs';
 
 export const deployArgs = ['deploy', '--typecheck', 'disable'];
 export const fixtureImportArgs = (table, path) => ['import', '--table', table, '--replace', '--format', 'jsonLines', '--yes', path];
+export async function consumePristineMarker(path, { accessFn = access, rmFn = rm } = {}) {
+  try { await accessFn(path); } catch (error) { if (error?.code === 'ENOENT') return false; throw error; }
+  await rmFn(path);
+  return true;
+}
 export const inspectionExportPath = path => `${path}.zip`;
 
 export function createConvexAdmin({ run = runCommand, root, runtime, seed = 42, password = `Bb-v3-${seed}-capacity!` } = {}) {
@@ -13,6 +18,7 @@ export function createConvexAdmin({ run = runCommand, root, runtime, seed = 42, 
   const envPath = join(state, 'convex.env');
   const privateKeyPath = join(state, 'convex-private-key.pem');
   const baselinePath = join(state, 'convex-baseline.zip');
+  const pristinePath = join(state, 'convex-fixture-pristine');
   const importPaths = { user: join(state, 'convex-users.jsonl'), organization: join(state, 'convex-organizations.jsonl'), membership: join(state, 'convex-memberships.jsonl'), project: join(state, 'convex-projects.jsonl'), task: join(state, 'convex-tasks.jsonl'), comment: join(state, 'convex-comments.jsonl'), activity: join(state, 'convex-activities.jsonl') };
   const importTables = { user: 'users', organization: 'organizations', membership: 'memberships', project: 'projects', task: 'tasks', comment: 'comments', activity: 'activities' };
   function ordinalFromId(id, prefix) { return Number.parseInt(id.slice(prefix.length), 36); }
@@ -30,7 +36,7 @@ export function createConvexAdmin({ run = runCommand, root, runtime, seed = 42, 
     if (!cliEnv) return;
     let failure;
     try { if (await import('node:fs/promises').then(({ access }) => access(baselinePath).then(() => true).catch(() => false))) await cli(['import', '--replace', '--yes', baselinePath]); } catch (error) { failure = error; }
-    try { await rm(baselinePath, { force: true }); await rm(privateKeyPath, { force: true }); await Promise.all((await readdir(state).catch(() => [])).filter(name => name.startsWith('convex-') && name.endsWith('.jsonl') || /^convex-.*\.jsonl\.\d+$/.test(name)).map(name => rm(join(state, name), { force: true }))); await rm(envPath, { force: true }); } catch (error) { if (!failure) failure = error; else failure.cleanupError = String(error?.message ?? error); }
+    try { await rm(baselinePath, { force: true }); await rm(pristinePath, { force: true }); await rm(privateKeyPath, { force: true }); await Promise.all((await readdir(state).catch(() => [])).filter(name => (name.startsWith('convex-') && name.endsWith('.jsonl')) || /^convex-.*\.jsonl\.\d+$/.test(name)).map(name => rm(join(state, name), { force: true }))); await rm(envPath, { force: true }); } catch (error) { if (!failure) failure = error; else failure.cleanupError = String(error?.message ?? error); }
     if (failure) throw failure;
   }
   return {
@@ -54,10 +60,11 @@ export function createConvexAdmin({ run = runCommand, root, runtime, seed = 42, 
           await appendFile(importPaths[batch.entity], batch.records.map(record => `${JSON.stringify(normalizeRecord(batch.entity, record))}\n`).join(''));
         }
         await importFixture();
+        await writeFile(pristinePath, '', { mode: 0o600 });
       } catch (error) { try { await teardown(); } catch (cleanup) { if (error && typeof error === 'object') error.cleanupError = String(cleanup?.message ?? cleanup); } throw error; }
     },
     async verify() { await cli(['run', 'setup:verify', '{}']); },
-    async reset() { await importFixture(); await verify(); },
+    async reset() { if (!await consumePristineMarker(pristinePath)) await importFixture(); await verify(); },
     teardown,
     setEnvironment(environment) { cliEnv = { ...process.env, ...environment }; },
   };

@@ -919,6 +919,11 @@ test('Convex assets declare tenant authorization, indexes, and bounded lifecycle
   assert.match(authorize, /getUserIdentity|organization/);
   assert.deepEqual(admin.deployArgs, ['deploy', '--typecheck', 'disable']);
   assert.deepEqual(admin.fixtureImportArgs('tasks', '/tmp/tasks.jsonl'), ['import', '--table', 'tasks', '--replace', '--format', 'jsonLines', '--yes', '/tmp/tasks.jsonl']);
+  const removed = [];
+  assert.equal(await admin.consumePristineMarker('/tmp/pristine', { accessFn: async () => {}, rmFn: async path => removed.push(path) }), true);
+  assert.deepEqual(removed, ['/tmp/pristine']);
+  assert.equal(await admin.consumePristineMarker('/tmp/missing', { accessFn: async () => { throw Object.assign(new Error('missing'), { code: 'ENOENT' }); } }), false);
+  await assert.rejects(admin.consumePristineMarker('/tmp/broken', { accessFn: async () => { throw new Error('transport'); } }), /transport/);
   assert.match(adminSource, /timeoutMs: 600_000/);
   assert.doesNotMatch(adminSource, /--append|importChunkSize/);
 });
