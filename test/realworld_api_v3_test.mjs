@@ -976,7 +976,9 @@ test('Appwrite admin authenticates cleanup and retains console credentials', asy
   assert.equal(typeof createAppwriteAdmin, 'function');
   assert.equal(createAppwriteAdapter({ Client: class {}, Account: class {}, TablesDB: class {}, api: {}, databaseId: 'db' }).accessPath, 'javascript-sdk');
   assert.match(adminSource, /\$id/);
-  assert.match(adminSource, /\/platforms.*\[401, 403\]/);
+  assert.match(adminSource, /platformId = 'bb-realworld-api-v3-web4'/);
+  assert.match(adminSource, /keyId = 'bb-realworld-api-v3-key4'/);
+  assert.match(adminSource, /\/platforms.*\[409\]/);
   assert.match(adminSource, /\/keys.*\[409\]/);
   assert.match(adminSource, /create\("users"\)/);
 });
