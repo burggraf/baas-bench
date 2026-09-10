@@ -315,6 +315,7 @@ test('capacity stages follow the approved doubling and bounded refinement', asyn
   assert.equal(nextCapacityStage({ measuredUsers: [5, 10, 25, 50, 6_400] }), 10_000);
   assert.equal(nextCapacityStage({ measuredUsers: [5], upperFailure: 5 }), 2);
   assert.equal(nextCapacityStage({ measuredUsers: [5, 2], upperFailure: 2 }), 1);
+  assert.equal(nextCapacityStage({ measuredUsers: [5, 2], lowerPass: 2, upperFailure: 5 }), 3);
   assert.equal(nextCapacityStage({ measuredUsers: [5, 2, 1], upperFailure: 1 }), null);
   assert.equal(nextCapacityStage({ measuredUsers: [5, 10, 25, 50, 100], lowerPass: 50, upperFailure: 100, refinements: 0 }), 75);
   assert.equal(nextCapacityStage({ measuredUsers: [5, 10, 25, 50, 51], lowerPass: 50, upperFailure: 51, refinements: 1 }), null);
