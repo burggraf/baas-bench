@@ -87,7 +87,6 @@ export async function executeRun(context, dependencies) {
   let refinements = 0;
   let capacity = { selectedCapacityUsers: 0, stages: [], reasons: [], saturation: false };
   for (;;) {
-    if (upperFailure !== undefined && lowerPass === undefined) break;
     const refining = lowerPass !== undefined && upperFailure !== undefined;
     const requestedUsers = chooseNext({ measuredUsers, lowerPass, upperFailure, refinements, maxUsers: users.length });
     if (requestedUsers === null) break;

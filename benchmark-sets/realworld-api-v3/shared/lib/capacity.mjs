@@ -170,6 +170,14 @@ export function nextCapacityStage({ measuredUsers, lowerPass, upperFailure, refi
     if (!Array.isArray(measuredUsers) || measuredUsers.some(value => !Number.isSafeInteger(value) || value < 1))
         throw new RangeError("measuredUsers must contain positive integers");
     const measured = new Set(measuredUsers);
+    if (upperFailure !== undefined && lowerPass === undefined) {
+        if (!Number.isSafeInteger(upperFailure) || upperFailure < 1)
+            throw new RangeError("invalid capacity upper bound");
+        if (upperFailure === 1)
+            return null;
+        const candidate = Math.max(1, Math.floor(upperFailure / 2));
+        return measured.has(candidate) ? null : candidate;
+    }
     for (const stage of INITIAL_STAGES) if (!measured.has(stage)) return stage;
     if (upperFailure !== undefined) {
         if (!Number.isSafeInteger(lowerPass) || !Number.isSafeInteger(upperFailure) || lowerPass < 1 || upperFailure <= lowerPass)
