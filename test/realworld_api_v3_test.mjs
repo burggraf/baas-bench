@@ -949,12 +949,17 @@ test('Appwrite adapter isolates Account and TablesDB sessions and normalizes row
 });
 
 test('Appwrite admin authenticates cleanup and retains console credentials', async () => {
-  const { createAppwriteAdmin } = await import('../benchmark-sets/realworld-api-v3/shared/lib/admin/appwrite.mjs');
+  const { consumeAppwritePristineMarker, createAppwriteAdmin } = await import('../benchmark-sets/realworld-api-v3/shared/lib/admin/appwrite.mjs');
   const { createAppwriteAdapter } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/appwrite.mjs');
   const { access, mkdir, readFile, writeFile } = await import('node:fs/promises');
   const runtime = await mkdtemp(join(tmpdir(), 'baas-bench-appwrite-'));
   const state = join(runtime, 'state');
   const calls = [];
+  const removed = [];
+  assert.equal(await consumeAppwritePristineMarker('/tmp/pristine', { readFileFn: async () => 'pristine', rmFn: async path => removed.push(path) }), true);
+  assert.deepEqual(removed, ['/tmp/pristine']);
+  assert.equal(await consumeAppwritePristineMarker('/tmp/missing', { readFileFn: async () => { throw Object.assign(new Error('missing'), { code: 'ENOENT' }); } }), false);
+  await assert.rejects(consumeAppwritePristineMarker('/tmp/broken', { readFileFn: async () => { throw new Error('transport'); } }), /transport/);
   await mkdir(state);
   await writeFile(join(state, 'appwrite-console.json'), JSON.stringify({ email: 'admin@example.test', password: 'secret' }));
   await writeFile(join(state, 'appwrite-admin.json'), '{}');
@@ -981,6 +986,8 @@ test('Appwrite admin authenticates cleanup and retains console credentials', asy
   assert.match(adminSource, /\/platforms.*\[409\]/);
   assert.match(adminSource, /\/keys.*\[409\]/);
   assert.match(adminSource, /create\("users"\)/);
+  assert.match(adminSource, /appwrite-fixture-pristine/);
+  assert.match(adminSource, /if \(await consumeAppwritePristineMarker\(pristinePath\)\) return/);
 });
 
 test('Nhost adapter uses native auth and parameterized GraphQL requests', async () => {
