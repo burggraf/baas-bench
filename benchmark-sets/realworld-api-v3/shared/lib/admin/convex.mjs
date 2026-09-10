@@ -5,6 +5,7 @@ import { runCommand } from '../command.mjs';
 import { DATASET_COUNTS, entityId, seedDataset } from '../dataset.mjs';
 
 export const deployArgs = ['deploy', '--typecheck', 'disable'];
+export const fixtureImportArgs = (table, path) => ['import', '--table', table, '--replace', '--format', 'jsonLines', '--yes', path];
 export const inspectionExportPath = path => `${path}.zip`;
 
 export function createConvexAdmin({ run = runCommand, root, runtime, seed = 42, password = `Bb-v3-${seed}-capacity!` } = {}) {
@@ -14,7 +15,6 @@ export function createConvexAdmin({ run = runCommand, root, runtime, seed = 42, 
   const baselinePath = join(state, 'convex-baseline.zip');
   const importPaths = { user: join(state, 'convex-users.jsonl'), organization: join(state, 'convex-organizations.jsonl'), membership: join(state, 'convex-memberships.jsonl'), project: join(state, 'convex-projects.jsonl'), task: join(state, 'convex-tasks.jsonl'), comment: join(state, 'convex-comments.jsonl'), activity: join(state, 'convex-activities.jsonl') };
   const importTables = { user: 'users', organization: 'organizations', membership: 'memberships', project: 'projects', task: 'tasks', comment: 'comments', activity: 'activities' };
-  const importChunkSize = 20_000;
   function ordinalFromId(id, prefix) { return Number.parseInt(id.slice(prefix.length), 36); }
   function normalizeRecord(entity, record) {
     const value = entity === 'user' ? { ...record, authSubject: record.id } : { ...record };
@@ -25,7 +25,7 @@ export function createConvexAdmin({ run = runCommand, root, runtime, seed = 42, 
   let cliEnv;
   async function cli(args) { if (!cliEnv) throw new Error('Convex administrative environment is missing'); return run('npx', ['convex', ...args], { cwd: runtime, env: cliEnv, timeoutMs: 600_000 }); }
   async function deploy() { await cli(deployArgs); }
-  async function importFixture() { for (const entity of Object.keys(importPaths)) { const prefix = `${importPaths[entity]}.`; const files = (await readdir(state)).filter(name => name.startsWith(prefix.slice(prefix.lastIndexOf('/') + 1))).sort((a, b) => Number(a.slice(a.lastIndexOf('.') + 1)) - Number(b.slice(b.lastIndexOf('.') + 1))); for (const [index, name] of files.entries()) await cli(['import', '--table', importTables[entity], index === 0 ? '--replace' : '--append', '--format', 'jsonLines', '--yes', join(state, name)]); } }
+  async function importFixture() { for (const entity of Object.keys(importPaths)) await cli(fixtureImportArgs(importTables[entity], importPaths[entity])); }
   async function teardown() {
     if (!cliEnv) return;
     let failure;
@@ -49,13 +49,9 @@ export function createConvexAdmin({ run = runCommand, root, runtime, seed = 42, 
         await cli(['env', 'set', 'CONVEX_AUTH_JWKS', jwks]);
         await cli(['env', 'set', 'CONVEX_BENCHMARK_PASSWORD', password]);
         await deploy();
-        const chunks = Object.fromEntries(Object.keys(importPaths).map(entity => [entity, []]));
-        const counts = Object.fromEntries(Object.keys(importPaths).map(entity => [entity, 0]));
+        await Promise.all(Object.values(importPaths).map(path => writeFile(path, '', { mode: 0o600 })));
         for await (const batch of seedDataset(seed, 500)) {
-          const entity = batch.entity;
-          let path = chunks[entity].at(-1);
-          if (!path || counts[entity] + batch.records.length > importChunkSize) { path = `${importPaths[entity]}.${chunks[entity].length}`; chunks[entity].push(path); counts[entity] = 0; await writeFile(path, '', { mode: 0o600 }); }
-          await appendFile(path, batch.records.map(record => `${JSON.stringify(normalizeRecord(entity, record))}\n`).join('')); counts[entity] += batch.records.length;
+          await appendFile(importPaths[batch.entity], batch.records.map(record => `${JSON.stringify(normalizeRecord(batch.entity, record))}\n`).join(''));
         }
         await importFixture();
       } catch (error) { try { await teardown(); } catch (cleanup) { if (error && typeof error === 'object') error.cleanupError = String(cleanup?.message ?? cleanup); } throw error; }

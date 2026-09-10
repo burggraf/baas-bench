@@ -918,7 +918,9 @@ test('Convex assets declare tenant authorization, indexes, and bounded lifecycle
   assert.match(schema, /by_organization|by_project|by_task/);
   assert.match(authorize, /getUserIdentity|organization/);
   assert.deepEqual(admin.deployArgs, ['deploy', '--typecheck', 'disable']);
+  assert.deepEqual(admin.fixtureImportArgs('tasks', '/tmp/tasks.jsonl'), ['import', '--table', 'tasks', '--replace', '--format', 'jsonLines', '--yes', '/tmp/tasks.jsonl']);
   assert.match(adminSource, /timeoutMs: 600_000/);
+  assert.doesNotMatch(adminSource, /--append|importChunkSize/);
 });
 
 test('Appwrite adapter isolates Account and TablesDB sessions and normalizes rows', async () => {
