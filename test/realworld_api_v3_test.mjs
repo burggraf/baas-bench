@@ -328,7 +328,7 @@ test('workload prepares outside measurement and closes each session once', async
   const events = [];
   let closes = 0;
   const session = { cancelPending() {}, async close() { closes += 1; } };
-  const backend = { async createSession() { events.push('prepare'); return session; } };
+  const backend = { async prepareWorkload() { events.push('maintain'); }, async createSession() { events.push('prepare'); return session; } };
   const config = {
     seed: 42, stageSeconds: 1, timeoutMs: 5_000, thinkTimeMs: { min: 1_000, max: 5_000 },
     weights: { dashboard: 20, taskList: 25, taskDetail: 15, createTask: 10, updateTask: 12, addComment: 10, search: 5, profileUpdate: 1, signIn: 2 },
@@ -338,7 +338,7 @@ test('workload prepares outside measurement and closes each session once', async
     durationMs: 0, graceMs: 0, now: () => 0, sleep: async () => {},
     onMeasuredStart: () => events.push('start'), onMeasuredEnd: () => events.push('end'),
   });
-  assert.deepEqual(events, ['prepare', 'start', 'end']);
+  assert.deepEqual(events, ['maintain', 'prepare', 'start', 'end']);
   assert.equal(result.startedUsers, 1);
   assert.equal(closes, 1);
 });
@@ -895,11 +895,26 @@ test('Neon adapter exposes the complete session workflow contract and parameteri
   sql.query = async text => /sign_in/i.test(text) ? [{ token: 'neon-session-token-123456' }] : /validate_session/i.test(text) ? [{ user_id: 'u' }] : [];
   sql.transaction = async () => [[{ user_id: 'u' }], []];
   const adapter = createNeonAdapter({ sql });
+  assert.equal(adapter.sessionPreparationConcurrency, 10);
+  assert.equal(adapter.sessionPreparationBatchDelayMs, 100);
   const session = await adapter.createSession({ email: "a' OR 1=1 --", password: 'p$1' });
   for (const method of ['dashboard', 'listTasks', 'getTask', 'createTask', 'updateTask', 'addComment', 'updateComment', 'searchTasks', 'updateMembershipRole', 'updateProfile', 'getProfile', 'refreshSession', 'signOut', 'cancelPending', 'close']) assert.equal(typeof session[method], 'function', method);
   const fixture = adapter.correctnessFixture();
   assert.equal(fixture.member.organizationId, fixture.organizationId);
   assert.equal(fixture.admin.organizationId, fixture.organizationId);
+});
+
+test('Neon proxy recovery waits for SQL-over-HTTP readiness', async () => {
+  const { restartNeonProxy } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/neon.mjs');
+  const calls = [];
+  let smokeAttempts = 0;
+  const run = async (_command, args) => {
+    calls.push(args);
+    if (args[0] === 'smoke' && ++smokeAttempts < 3) throw new Error('not ready');
+  };
+  await restartNeonProxy('/repo', { run, sleep: async () => {} });
+  assert.deepEqual(calls[0], ['compose', 'neon', 'restart', 'proxy']);
+  assert.equal(smokeAttempts, 3);
 });
 
 test('Neon SQL admin transport preserves parameterized requests and restrictive config', async () => {
@@ -915,6 +930,21 @@ test('Neon SQL admin transport preserves parameterized requests and restrictive 
   assert.deepEqual(calls[0].values, ['value']);
   assert.equal(await createNeonAdmin({ sql, runtime: '/tmp/neon-v3-test' }).verify(), true);
   assert.match(calls[1].text, /count\(\*\)/i);
+});
+
+test('Neon administration recovers proxy connections before teardown', async () => {
+  const { createNeonAdmin } = await import('../benchmark-sets/realworld-api-v3/shared/lib/admin/neon.mjs');
+  const calls = [];
+  const counts = [{ table: 'organizations', count: '1600' }, { table: 'users', count: '16000' }, { table: 'memberships', count: '16000' }, { table: 'projects', count: '8000' }, { table: 'tasks', count: '160000' }, { table: 'comments', count: '479200' }, { table: 'activities', count: '319200' }];
+  const sql = { query: async text => { calls.push(text); return /count\(\*\)/i.test(text) ? counts : []; } };
+  const admin = createNeonAdmin({ sql, runtime: '/tmp/neon-v3-recovery-test', recoverConnections: async () => { calls.push('recover'); } });
+  await admin.reset();
+  assert.equal(calls[0], 'recover');
+  assert.match(calls[1], /TRUNCATE TABLE benchmark_auth\.sessions/);
+  calls.length = 0;
+  await admin.teardown();
+  assert.equal(calls[0], 'recover');
+  assert.match(calls[1], /DROP SCHEMA IF EXISTS benchmark_fixture/);
 });
 
 test('Neon SQL admin transport splits trusted scripts into one atomic HTTP transaction', async () => {

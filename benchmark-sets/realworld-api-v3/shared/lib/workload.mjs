@@ -49,6 +49,8 @@ export async function runWorkload(backend, config, options) {
     const graceMs = options.graceMs ?? Math.max(0, config.timeoutMs);
     if (!Number.isFinite(durationMs) || durationMs < 0 || !Number.isFinite(graceMs) || graceMs < 0)
         throw new RangeError("invalid workload duration or grace");
+    if (backend.prepareWorkload)
+        await backend.prepareWorkload();
     const loopController = new AbortController();
     const requestController = new AbortController();
     const summary = { requestedUsers: options.users.length, startedUsers: 0, completedWorkflowCount: 0, failedWorkflowCount: 0, lostUsers: 0, graceExpired: false, stageFailed: false, closeErrors: 0, preparationFailed: false, preparationFailureCount: 0 };

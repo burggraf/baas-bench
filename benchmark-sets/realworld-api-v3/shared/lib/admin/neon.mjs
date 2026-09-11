@@ -1,7 +1,7 @@
 import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { loadSchemaText, exactCountSql, verifyExactCounts, verifyMinimumCounts, createFixtureState, resetFixtureState, createNeonPasswords } from './postgres.mjs';
-import { createTlsFetch } from '../adapters/neon.mjs';
+import { createTlsFetch, restartNeonProxy } from '../adapters/neon.mjs';
 import { DATASET_COUNTS, entityId, seedDataset } from '../dataset.mjs';
 
 export const NEON_CLIENT_ROLE_SQL = `DO $$ BEGIN
@@ -66,7 +66,7 @@ export function createNeonSql({ sql, endpoint = 'https://localhost:4444/sql' } =
   } };
 }
 
-export function createNeonAdmin({ sql, seed = 42, password = `Bb-v3-${seed}-capacity!`, runtime } = {}) {
+export function createNeonAdmin({ sql, seed = 42, password = `Bb-v3-${seed}-capacity!`, runtime, recoverConnections } = {}) {
   const stateDir = join(runtime ?? process.env.BAAS_BENCH_RUNTIME ?? '.', 'state');
   const configPath = join(stateDir, 'neon-config.json');
   if (!sql || typeof sql.query !== 'function') throw new TypeError('Neon SQL transport is required');
@@ -95,10 +95,16 @@ export function createNeonAdmin({ sql, seed = 42, password = `Bb-v3-${seed}-capa
   async function verifyExact() { return verifyExactCounts((text, params) => query(text, params)); }
   async function teardown() {
     let failure;
+    try { if (recoverConnections) await recoverConnections(); } catch (error) { failure = error; }
     try { await query('DROP SCHEMA IF EXISTS benchmark_fixture CASCADE; DROP SCHEMA IF EXISTS benchmark_auth CASCADE; DROP TABLE IF EXISTS public.activities, public.comments, public.tasks, public.projects, public.memberships, public.organizations, public.users CASCADE; DROP SCHEMA IF EXISTS benchmark_private CASCADE; DROP SCHEMA IF EXISTS benchmark_extensions CASCADE;'); }
-    catch (error) { failure = error; }
+    catch (error) { if (!failure) failure = error; else failure.cleanupError = String(error?.message ?? error); }
     try { await rm(configPath, { force: true }); } catch (error) { if (!failure) failure = error; else failure.cleanupError = String(error?.message ?? error); }
     if (failure) throw failure;
+  }
+  async function reset() {
+    if (recoverConnections) await recoverConnections();
+    await resetFixtureState((text, params) => query(text, params));
+    await verifyExact();
   }
   return {
     async setup() {
@@ -119,7 +125,7 @@ export function createNeonAdmin({ sql, seed = 42, password = `Bb-v3-${seed}-capa
       }
     },
     verify,
-    async reset() { await resetFixtureState((text, params) => query(text, params)); await verifyExact(); },
+    reset,
     teardown,
   };
 }
@@ -134,7 +140,11 @@ async function getDefault() {
     const caPath = process.env.NEON_PROXY_CA || join(runtimeRoot, 'neon', 'proxy-certs', 'localhost.crt');
     try { neonConfig.fetchFunction = createTlsFetch(await readFile(caPath, 'utf8')); } catch (error) { if (error?.code !== 'ENOENT') throw error; }
     const connectionString = process.env.NEON_DATABASE_URL || 'postgresql://cloud_admin:cloud_admin@localhost:4444/postgres?sslmode=require';
-    instance = createNeonAdmin({ sql: createNeonSql({ sql: neon(connectionString) }), runtime: process.env.BAAS_BENCH_RUNTIME });
+    const sql = createNeonSql({ sql: neon(connectionString) });
+    // Timed-out SQL-over-HTTP requests can keep compute backends occupied.
+    // Recycle the proxy between unmeasured phases so each stage starts clean.
+    async function recoverConnections() { await restartNeonProxy(root); }
+    instance = createNeonAdmin({ sql, runtime: process.env.BAAS_BENCH_RUNTIME, recoverConnections });
   }
   return instance;
 }

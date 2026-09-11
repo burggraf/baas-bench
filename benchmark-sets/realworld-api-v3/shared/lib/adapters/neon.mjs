@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { measureRemoteCall } from '../measurement.mjs';
 import { buildVirtualUserSpecs } from '../dataset.mjs';
 import { BenchmarkOperationError } from '../correctness.mjs';
+import { runCommand } from '../command.mjs';
 
 export async function readKey(path, name) {
   const text = await readFile(path, 'utf8');
@@ -22,6 +23,17 @@ const mapTask = row => ({ id: row.id, organizationId: row.organization_id, proje
 const mapComment = row => ({ id: row.id, organizationId: row.organization_id, projectId: row.project_id, taskId: row.task_id, authorId: row.author_id, body: row.body, createdAt: timestamp(row.created_at), updatedAt: timestamp(row.updated_at) });
 const mapActivity = row => ({ id: row.id, organizationId: row.organization_id, projectId: row.project_id ?? null, actorId: row.actor_id, action: row.action, subjectType: row.subject_type, subjectId: row.subject_id, createdAt: timestamp(row.created_at) });
 const mapMembership = row => ({ id: row.id, organizationId: row.organization_id, userId: row.user_id, role: row.role, createdAt: timestamp(row.created_at) });
+const delay = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+export async function restartNeonProxy(root, { run = runCommand, sleep = delay, attempts = 60 } = {}) {
+  const baas = join(root, 'bin/baas');
+  await run(baas, ['compose', 'neon', 'restart', 'proxy'], { timeoutMs: 60_000 });
+  let failure;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try { await run(baas, ['smoke', 'neon'], { timeoutMs: 5_000 }); return; }
+    catch (error) { failure = error; if (attempt + 1 < attempts) await sleep(500); }
+  }
+  throw new Error(`Neon proxy did not become ready: ${String(failure?.message ?? failure).slice(0, 300)}`);
+}
 const rowsOf = result => Array.isArray(result) ? result : Array.isArray(result?.rows) ? result.rows : [];
 const one = result => rowsOf(result)[0];
 function pageArgs(page = 0, pageSize = 20) {
@@ -68,7 +80,7 @@ function tagged(sql, text, params = []) {
   return sql(strings, ...values);
 }
 
-export function createNeonAdapter({ sql, timeoutMs = 30_000 } = {}) {
+export function createNeonAdapter({ sql, timeoutMs = 30_000, prepareWorkload } = {}) {
   if (typeof sql !== 'function' || typeof sql.query !== 'function') throw new TypeError('Neon SQL transport is required');
 
   async function request(operation, signal, requestTimeoutMs = timeoutMs) {
@@ -147,7 +159,10 @@ export function createNeonAdapter({ sql, timeoutMs = 30_000 } = {}) {
 
   const adapter = {
     accessPath: 'sql-over-http',
-    deviations: ['Neon uses application-owned PostgreSQL authentication and tenant authorization functions rather than a native BaaS API.'],
+    deviations: ['Neon uses application-owned PostgreSQL authentication and tenant authorization functions rather than a native BaaS API.', 'The local SQL-over-HTTP proxy is recycled between workload stages outside measured intervals to release timed-out compute connections.'],
+    sessionPreparationConcurrency: 10,
+    sessionPreparationBatchDelayMs: 100,
+    ...(prepareWorkload ? { prepareWorkload } : {}),
     virtualUsers(count = 10_000, seed = 42) { return buildVirtualUserSpecs(count, seed); },
     correctnessFixture() {
       const specs = buildVirtualUserSpecs(3_201, 42);
@@ -224,7 +239,8 @@ async function getDefaultAdapter() {
     const caPath = process.env.NEON_PROXY_CA || join(runtimeRoot, 'neon', 'proxy-certs', 'localhost.crt');
     try { neonConfig.fetchFunction = createTlsFetch(await readFile(caPath, 'utf8')); } catch (error) { if (error?.code !== 'ENOENT') throw error; }
     const connectionString = process.env.NEON_DATABASE_URL || 'postgresql://cloud_admin:cloud_admin@localhost:4444/postgres?sslmode=require';
-    defaultAdapter = createNeonAdapter({ sql: neon(connectionString) });
+    async function prepareWorkload() { await restartNeonProxy(root); }
+    defaultAdapter = createNeonAdapter({ sql: neon(connectionString), prepareWorkload });
   }
   return defaultAdapter;
 }
