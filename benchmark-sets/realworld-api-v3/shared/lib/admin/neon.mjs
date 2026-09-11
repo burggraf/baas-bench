@@ -15,10 +15,44 @@ const DEFINITIONS = Object.freeze({
 });
 
 function rowsOf(result) { return Array.isArray(result) ? result : result?.rows ?? []; }
+export function splitSqlStatements(text) {
+  const statements = [];
+  let start = 0;
+  let state = 'normal';
+  let dollarTag = '';
+  for (let index = 0; index < text.length; index += 1) {
+    const pair = text.slice(index, index + 2);
+    if (state === 'line-comment') { if (text[index] === '\n') state = 'normal'; continue; }
+    if (state === 'block-comment') { if (pair === '*/') { state = 'normal'; index += 1; } continue; }
+    if (state === 'single-quote') { if (text[index] === "'" && text[index + 1] === "'") index += 1; else if (text[index] === "'") state = 'normal'; continue; }
+    if (state === 'double-quote') { if (text[index] === '"' && text[index + 1] === '"') index += 1; else if (text[index] === '"') state = 'normal'; continue; }
+    if (state === 'dollar-quote') { if (text.startsWith(dollarTag, index)) { index += dollarTag.length - 1; state = 'normal'; } continue; }
+    if (pair === '--') { state = 'line-comment'; index += 1; continue; }
+    if (pair === '/*') { state = 'block-comment'; index += 1; continue; }
+    if (text[index] === "'") { state = 'single-quote'; continue; }
+    if (text[index] === '"') { state = 'double-quote'; continue; }
+    if (text[index] === '$') {
+      const match = text.slice(index).match(/^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/);
+      if (match) { dollarTag = match[0]; state = 'dollar-quote'; index += dollarTag.length - 1; continue; }
+    }
+    if (text[index] === ';') { const statement = text.slice(start, index).trim(); if (statement) statements.push(statement); start = index + 1; }
+  }
+  const statement = text.slice(start).trim();
+  if (statement) statements.push(statement);
+  return statements;
+}
 export function createNeonSql({ sql, endpoint = 'https://localhost:4444/sql' } = {}) {
   const client = typeof sql === 'function' ? sql : sql;
   if (!client || typeof client.query !== 'function') throw new TypeError('Neon SQL transport is required');
-  return { endpoint, async query(text, params = [], options = {}) { return rowsOf(await client.query(text, params, options.fetchOptions ? { fetchOptions: options.fetchOptions } : undefined)); } };
+  return { endpoint, async query(text, params = [], options = {}) {
+    const statements = splitSqlStatements(text);
+    if (statements.length <= 1) return rowsOf(await client.query(text, params, options.fetchOptions ? { fetchOptions: options.fetchOptions } : undefined));
+    if (params.length) throw new Error('parameterized Neon SQL scripts are unsupported');
+    if (typeof client.transaction !== 'function') throw new TypeError('Neon SQL transaction transport is required for scripts');
+    const body = statements.filter(statement => !/^(BEGIN|COMMIT)$/i.test(statement));
+    const results = await client.transaction(transaction => body.map(statement => transaction.query(statement, [])), options.fetchOptions ? { fetchOptions: options.fetchOptions } : undefined);
+    return rowsOf(results.at(-1));
+  } };
 }
 
 export function createNeonAdmin({ sql, seed = 42, password = `Bb-v3-${seed}-capacity!`, runtime } = {}) {
@@ -88,7 +122,7 @@ async function getDefault() {
     const caPath = process.env.NEON_PROXY_CA || join(runtimeRoot, 'neon', 'proxy-certs', 'localhost.crt');
     try { neonConfig.fetchFunction = createTlsFetch(await readFile(caPath, 'utf8')); } catch (error) { if (error?.code !== 'ENOENT') throw error; }
     const connectionString = process.env.NEON_DATABASE_URL || 'postgresql://cloud_admin:cloud_admin@localhost:4444/postgres?sslmode=require';
-    instance = createNeonAdmin({ sql: neon(connectionString), runtime: process.env.BAAS_BENCH_RUNTIME });
+    instance = createNeonAdmin({ sql: createNeonSql({ sql: neon(connectionString) }), runtime: process.env.BAAS_BENCH_RUNTIME });
   }
   return instance;
 }

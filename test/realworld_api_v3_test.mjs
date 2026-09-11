@@ -900,6 +900,29 @@ test('Neon SQL admin transport preserves parameterized requests and restrictive 
   assert.match(calls[1].text, /count\(\*\)/i);
 });
 
+test('Neon SQL admin transport splits trusted scripts into one atomic HTTP transaction', async () => {
+  const { createNeonSql, splitSqlStatements } = await import('../benchmark-sets/realworld-api-v3/shared/lib/admin/neon.mjs');
+  const script = `BEGIN;
+CREATE FUNCTION example() RETURNS void LANGUAGE plpgsql AS $$ BEGIN
+  PERFORM 'value;still-string';
+END $$;
+-- ignored ; comment
+CREATE TABLE example_table (value text);
+COMMIT;`;
+  assert.deepEqual(splitSqlStatements(script), [
+    "BEGIN",
+    "CREATE FUNCTION example() RETURNS void LANGUAGE plpgsql AS $$ BEGIN\n  PERFORM 'value;still-string';\nEND $$",
+    '-- ignored ; comment\nCREATE TABLE example_table (value text)',
+    'COMMIT',
+  ]);
+  const calls = [];
+  const query = text => { calls.push(text); return Promise.resolve([{ text }]); };
+  const sql = { query, transaction: async build => Promise.all(build({ query })) };
+  const transport = createNeonSql({ sql });
+  assert.deepEqual(await transport.query(script), [{ text: '-- ignored ; comment\nCREATE TABLE example_table (value text)' }]);
+  assert.equal(calls.length, 2);
+});
+
 test('Convex capacity adapter uses native HTTP client auth and the shared session contract', async () => {
   const { createConvexAdapter } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/convex.mjs');
   const calls = [];
