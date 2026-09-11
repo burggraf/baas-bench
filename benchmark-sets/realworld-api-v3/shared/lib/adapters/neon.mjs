@@ -3,6 +3,7 @@ import { request as httpsRequest } from 'node:https';
 import { join } from 'node:path';
 import { measureRemoteCall } from '../measurement.mjs';
 import { buildVirtualUserSpecs } from '../dataset.mjs';
+import { BenchmarkOperationError } from '../correctness.mjs';
 
 export async function readKey(path, name) {
   const text = await readFile(path, 'utf8');
@@ -15,10 +16,12 @@ const taskFields = 'id,organization_id,project_id,creator_id,assignee_id,title,d
 const userFields = 'id,email,display_name,created_at,updated_at';
 const commentFields = 'id,organization_id,project_id,task_id,author_id,body,created_at,updated_at';
 const activityFields = 'id,organization_id,project_id,actor_id,action,subject_type,subject_id,created_at';
-const mapUser = row => ({ id: row.id, email: row.email, displayName: row.display_name, createdAt: row.created_at, updatedAt: row.updated_at });
-const mapTask = row => ({ id: row.id, organizationId: row.organization_id, projectId: row.project_id, creatorId: row.creator_id, assigneeId: row.assignee_id ?? null, title: row.title, description: row.description, status: row.status, priority: row.priority, dueDate: row.due_date ?? null, createdAt: row.created_at, updatedAt: row.updated_at });
-const mapComment = row => ({ id: row.id, organizationId: row.organization_id, projectId: row.project_id, taskId: row.task_id, authorId: row.author_id, body: row.body, createdAt: row.created_at, updatedAt: row.updated_at });
-const mapActivity = row => ({ id: row.id, organizationId: row.organization_id, projectId: row.project_id ?? null, actorId: row.actor_id, action: row.action, subjectType: row.subject_type, subjectId: row.subject_id, createdAt: row.created_at });
+const timestamp = value => value instanceof Date ? value.toISOString() : value;
+const mapUser = row => ({ id: row.id, email: row.email, displayName: row.display_name, createdAt: timestamp(row.created_at), updatedAt: timestamp(row.updated_at) });
+const mapTask = row => ({ id: row.id, organizationId: row.organization_id, projectId: row.project_id, creatorId: row.creator_id, assigneeId: row.assignee_id ?? null, title: row.title, description: row.description, status: row.status, priority: row.priority, dueDate: row.due_date == null ? null : timestamp(row.due_date), createdAt: timestamp(row.created_at), updatedAt: timestamp(row.updated_at) });
+const mapComment = row => ({ id: row.id, organizationId: row.organization_id, projectId: row.project_id, taskId: row.task_id, authorId: row.author_id, body: row.body, createdAt: timestamp(row.created_at), updatedAt: timestamp(row.updated_at) });
+const mapActivity = row => ({ id: row.id, organizationId: row.organization_id, projectId: row.project_id ?? null, actorId: row.actor_id, action: row.action, subjectType: row.subject_type, subjectId: row.subject_id, createdAt: timestamp(row.created_at) });
+const mapMembership = row => ({ id: row.id, organizationId: row.organization_id, userId: row.user_id, role: row.role, createdAt: timestamp(row.created_at) });
 const rowsOf = result => Array.isArray(result) ? result : Array.isArray(result?.rows) ? result.rows : [];
 const one = result => rowsOf(result)[0];
 function pageArgs(page = 0, pageSize = 20) {
@@ -26,7 +29,14 @@ function pageArgs(page = 0, pageSize = 20) {
   return [page, pageSize];
 }
 function tenant(row, organizationId, projectId) {
-  if (!row || row.organization_id !== organizationId || (projectId && row.project_id !== projectId)) throw new Error('Neon tenant boundary violation');
+  if (!row || row.organization_id !== organizationId || (projectId && row.project_id !== projectId)) throw new BenchmarkOperationError('authorization', { code: 'tenant_boundary' });
+}
+function normalizeError(error) {
+  if (error instanceof BenchmarkOperationError) return error;
+  const code = String(error?.code ?? 'neon_sdk');
+  if (code.startsWith('28')) return new BenchmarkOperationError('authentication', { code });
+  if (code === '42501' || code === '23503') return new BenchmarkOperationError('authorization', { code });
+  return error;
 }
 export function createTlsFetch(ca) {
   if (typeof ca !== 'string' || ca.length === 0) throw new TypeError('Neon proxy CA is required');
@@ -54,6 +64,7 @@ function tagged(sql, text, params = []) {
     cursor = match.index + match[0].length;
   }
   strings.push(text.slice(cursor));
+  strings.raw = [...strings];
   return sql(strings, ...values);
 }
 
@@ -77,9 +88,9 @@ export function createNeonAdapter({ sql, timeoutMs = 30_000 } = {}) {
         const pending = operation(controller.signal);
         return await (timeout ? Promise.race([pending, timeout]) : pending);
       } catch (error) {
-        if (timedOut || (controller.signal.aborted && !signal?.aborted)) throw new Error('Neon request timed out');
+        if (timedOut || (controller.signal.aborted && !signal?.aborted)) throw new BenchmarkOperationError('timeout', { code: 'timeout', status: 408 });
         if (signal?.aborted) throw signal.reason ?? new Error('Neon request aborted');
-        throw error;
+        throw normalizeError(error);
       } finally {
         clearTimeout(timer);
         if (onAbort) signal.removeEventListener('abort', onAbort);
@@ -93,10 +104,11 @@ export function createNeonAdapter({ sql, timeoutMs = 30_000 } = {}) {
     return request(async requestSignal => {
       if (typeof sql.transaction !== 'function') throw new Error('Neon transaction API is required for authenticated requests');
       const results = await sql.transaction([
+        tagged(sql, 'SET LOCAL ROLE benchmark_client'),
         tagged(sql, 'SELECT benchmark_auth.validate_session($1) AS user_id', [token]),
         tagged(sql, text, params),
       ], { fetchOptions: { signal: requestSignal } });
-      return rowsOf(results?.[1]);
+      return rowsOf(results?.[2]);
     }, signal, requestTimeoutMs);
   }
   async function sessionOne(token, text, params, signal) { return one(await sessionQuery(token, text, params, signal)); }
@@ -178,14 +190,14 @@ export function createNeonAdapter({ sql, timeoutMs = 30_000 } = {}) {
     rows.forEach(row => tenant(row, organizationId, projectId)); const total = Number(rows[0]?.total_count ?? 0);
     return { items: rows.map(mapTask), page: p, pageSize: size, total, hasNext: total > (p + 1) * size };
   };
-  adapter.getTask = async ({ organizationId, projectId, taskId, session, signal }) => {
+  adapter.getTask = async ({ organizationId, projectId, taskId, comments = { page: 0, pageSize: 20 }, session, signal }) => {
     const row = await sessionOne(session.accessToken, `SELECT ${taskFields} FROM public.tasks WHERE id = $1 AND organization_id = $2 AND project_id = $3`, [taskId, organizationId, projectId], signal); tenant(row, organizationId, projectId);
-    const [creator, assignee, comments] = await Promise.all([
+    const [creator, assignee, commentPage] = await Promise.all([
       sessionOne(session.accessToken, `SELECT ${userFields} FROM public.users WHERE id = $1`, [row.creator_id], signal),
       row.assignee_id ? sessionOne(session.accessToken, `SELECT ${userFields} FROM public.users WHERE id = $1`, [row.assignee_id], signal) : null,
-      adapter.listComments({ organizationId, projectId, taskId, page: 0, pageSize: 20, session, signal }),
+      adapter.listComments({ organizationId, projectId, taskId, page: comments.page, pageSize: comments.pageSize, session, signal }),
     ]);
-    return { task: mapTask(row), creator: mapUser(creator), assignee: assignee ? mapUser(assignee) : null, comments };
+    return { task: mapTask(row), creator: mapUser(creator), assignee: assignee ? mapUser(assignee) : null, comments: commentPage };
   };
   adapter.listComments = async ({ organizationId, projectId, taskId, page = 0, pageSize = 20, session, signal }) => {
     const [p, size] = pageArgs(page, pageSize); const rows = await sessionRows(session, `SELECT ${commentFields}, count(*) OVER() AS total_count FROM public.comments WHERE organization_id = $1 AND project_id = $2 AND task_id = $3 ORDER BY created_at,id LIMIT $4 OFFSET $5`, [organizationId, projectId, taskId, size, p * size], signal); rows.forEach(row => tenant(row, organizationId, projectId)); const total = Number(rows[0]?.total_count ?? 0); return { items: rows.map(mapComment), page: p, pageSize: size, total, hasNext: total > (p + 1) * size };
@@ -193,11 +205,11 @@ export function createNeonAdapter({ sql, timeoutMs = 30_000 } = {}) {
   adapter.searchTasks = async ({ organizationId, projectId, query: term, page = 0, pageSize = 20, session, signal }) => {
     const [p, size] = pageArgs(page, pageSize); const rows = await sessionRows(session, `SELECT ${taskFields}, count(*) OVER() AS total_count FROM public.tasks WHERE organization_id = $1 AND project_id = $2 AND title ILIKE $3 ORDER BY created_at,id LIMIT $4 OFFSET $5`, [organizationId, projectId, `%${String(term ?? '').replaceAll('%', '\\%')}%`, size, p * size], signal); rows.forEach(row => tenant(row, organizationId, projectId)); const total = Number(rows[0]?.total_count ?? 0); return { items: rows.map(mapTask), page: p, pageSize: size, total, hasNext: total > (p + 1) * size };
   };
-  adapter.createTask = async ({ organizationId, projectId, creatorId, title, description, priority = 'medium', session, signal }) => { const row = await sessionOne(session.accessToken, `INSERT INTO public.tasks (organization_id,project_id,creator_id,title,description,priority) VALUES ($1,$2,$3,$4,$5,$6) RETURNING ${taskFields}`, [organizationId, projectId, creatorId, title, description, priority], signal); tenant(row, organizationId, projectId); return mapTask(row); };
+  adapter.createTask = async ({ organizationId, projectId, creatorId, title, description, priority = 'medium', session, signal }) => { const row = await sessionOne(session.accessToken, `INSERT INTO public.tasks (id,organization_id,project_id,creator_id,title,description,status,priority,created_at,updated_at) VALUES (substr(replace(benchmark_extensions.gen_random_uuid()::text,'-',''),1,15),$1,$2,$3,$4,$5,'todo',$6,clock_timestamp(),clock_timestamp()) RETURNING ${taskFields}`, [organizationId, projectId, creatorId, title, description, priority], signal); tenant(row, organizationId, projectId); return mapTask(row); };
   adapter.updateTask = async ({ organizationId, projectId, taskId, session, signal, ...changes }) => { const allowed = ['title', 'description', 'status', 'priority', 'due_date']; const values = [organizationId, projectId, taskId]; const sets = []; for (const key of allowed) if (changes[key] !== undefined) { values.push(changes[key]); sets.push(`${key} = $${values.length}`); } if (!sets.length) throw new Error('no task changes'); const row = await sessionOne(session.accessToken, `UPDATE public.tasks SET ${sets.join(',')},updated_at=clock_timestamp() WHERE organization_id=$1 AND project_id=$2 AND id=$3 RETURNING ${taskFields}`, values, signal); tenant(row, organizationId, projectId); return mapTask(row); };
-  adapter.addComment = async ({ organizationId, projectId, taskId, authorId, body, session, signal }) => { const row = await sessionOne(session.accessToken, `INSERT INTO public.comments (organization_id,project_id,task_id,author_id,body) VALUES ($1,$2,$3,$4,$5) RETURNING ${commentFields}`, [organizationId, projectId, taskId, authorId, body], signal); tenant(row, organizationId, projectId); return mapComment(row); };
+  adapter.addComment = async ({ organizationId, projectId, taskId, authorId, body, session, signal }) => { const row = await sessionOne(session.accessToken, `INSERT INTO public.comments (id,organization_id,project_id,task_id,author_id,body,created_at,updated_at) VALUES (substr(replace(benchmark_extensions.gen_random_uuid()::text,'-',''),1,15),$1,$2,$3,$4,$5,clock_timestamp(),clock_timestamp()) RETURNING ${commentFields}`, [organizationId, projectId, taskId, authorId, body], signal); tenant(row, organizationId, projectId); return mapComment(row); };
   adapter.updateComment = async ({ organizationId, projectId, taskId, commentId, body, session, signal }) => { const row = await sessionOne(session.accessToken, `UPDATE public.comments SET body=$1,updated_at=clock_timestamp() WHERE id=$2 AND organization_id=$3 AND project_id=$4 AND task_id=$5 RETURNING ${commentFields}`, [body, commentId, organizationId, projectId, taskId], signal); tenant(row, organizationId, projectId); return mapComment(row); };
-  adapter.updateMembershipRole = async ({ organizationId, membershipId, role, session, signal }) => { const row = await sessionOne(session.accessToken, 'UPDATE public.memberships SET role=$1 WHERE organization_id=$2 AND id=$3 RETURNING id,organization_id,user_id,role,created_at', [role, organizationId, membershipId], signal); if (!row || row.organization_id !== organizationId) throw new Error('Neon tenant boundary violation'); return row; };
+  adapter.updateMembershipRole = async ({ organizationId, membershipId, role, session, signal }) => { const row = await sessionOne(session.accessToken, 'UPDATE public.memberships SET role=$1 WHERE organization_id=$2 AND id=$3 RETURNING id,organization_id,user_id,role,created_at', [role, organizationId, membershipId], signal); tenant(row, organizationId); return mapMembership(row); };
   adapter.updateProfile = async ({ displayName, session, signal }) => { const row = await sessionOne(session.accessToken, `UPDATE public.users SET display_name=$1,updated_at=clock_timestamp() WHERE id=benchmark_private.current_user_id() RETURNING ${userFields}`, [displayName], signal); return mapUser(row); };
   return adapter;
 }

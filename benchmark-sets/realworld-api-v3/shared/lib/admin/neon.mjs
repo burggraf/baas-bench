@@ -4,6 +4,17 @@ import { loadSchemaText, exactCountSql, verifyExactCounts, verifyMinimumCounts, 
 import { createTlsFetch } from '../adapters/neon.mjs';
 import { DATASET_COUNTS, entityId, seedDataset } from '../dataset.mjs';
 
+export const NEON_CLIENT_ROLE_SQL = `DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'benchmark_client') THEN
+    CREATE ROLE benchmark_client NOLOGIN;
+  END IF;
+END $$;
+ALTER ROLE benchmark_client NOLOGIN NOSUPERUSER NOBYPASSRLS;
+GRANT benchmark_client TO cloud_admin;
+GRANT USAGE ON SCHEMA public, benchmark_auth, benchmark_private, benchmark_extensions TO benchmark_client;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO benchmark_client;
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA benchmark_auth, benchmark_private, benchmark_extensions TO benchmark_client;`;
+
 const DEFINITIONS = Object.freeze({
   organization: ['organizations', ['id', 'name', 'owner_id', 'created_at'], ['id', 'name', 'ownerId', 'createdAt']],
   user: ['users', ['id', 'email', 'display_name', 'created_at', 'updated_at'], ['id', 'email', 'displayName', 'createdAt', 'updatedAt']],
@@ -93,6 +104,7 @@ export function createNeonAdmin({ sql, seed = 42, password = `Bb-v3-${seed}-capa
     async setup() {
       try {
         await query(await loadSchemaText());
+        await query(NEON_CLIENT_ROLE_SQL);
         for await (const batch of seedDataset(seed, 1_000)) await insertBatch(batch.entity, batch.records);
         await query('UPDATE public.users SET auth_subject = id WHERE auth_subject IS NULL');
         await createNeonPasswords((text, params) => query(text, params), password);

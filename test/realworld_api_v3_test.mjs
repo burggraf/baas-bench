@@ -853,7 +853,10 @@ test('postgres admin parameterized administrative transports preserve SQL, value
 test('Neon adapter uses SQL-over-HTTP transactions for authenticated tenant operations', async () => {
   const { createNeonAdapter } = await import('../benchmark-sets/realworld-api-v3/shared/lib/adapters/neon.mjs');
   const calls = [];
-  const sql = (strings, ...values) => ({ text: strings.reduce((out, part, index) => out + part + (index < values.length ? `$${index + 1}` : ''), ''), values });
+  const sql = (strings, ...values) => {
+    assert.deepEqual(strings.raw, [...strings]);
+    return { text: strings.reduce((out, part, index) => out + part + (index < values.length ? `$${index + 1}` : ''), ''), values };
+  };
   sql.query = async (text, values, options) => {
     calls.push({ type: 'query', text, values, options });
     if (/sign_in/i.test(text)) return [{ token: 'neon-session-token-123456' }];
@@ -862,15 +865,26 @@ test('Neon adapter uses SQL-over-HTTP transactions for authenticated tenant oper
   };
   sql.transaction = async (queries, options) => {
     calls.push({ type: 'transaction', queries, options });
-    const data = queries[1];
-    if (/from public\.users/i.test(data.text)) return [[{ user_id: 'usrv3' }], [{ id: 'usrv3', email: 'user@example.test', display_name: 'User', created_at: '2025-01-01', updated_at: '2025-01-01' }]];
-    return [[{ user_id: 'usrv3' }], []];
+    const data = queries[2];
+    const task = { id: 'task', organization_id: 'org', project_id: 'project', creator_id: 'usrv3', assignee_id: null, title: 'Task', description: 'Task', status: 'todo', priority: 'low', due_date: null, created_at: new Date('2025-01-01'), updated_at: new Date('2025-01-01') };
+    if (/from public\.users/i.test(data.text)) return [[], [{ user_id: 'usrv3' }], [{ id: 'usrv3', email: 'user@example.test', display_name: 'User', created_at: new Date('2025-01-01'), updated_at: new Date('2025-01-01') }]];
+    if (/insert into public\.tasks/i.test(data.text)) return [[], [{ user_id: 'usrv3' }], [task]];
+    if (/from public\.tasks where id/i.test(data.text)) return [[], [{ user_id: 'usrv3' }], [task]];
+    return [[], [{ user_id: 'usrv3' }], []];
   };
   const backend = createNeonAdapter({ sql, timeoutMs: 1000 });
   const session = await backend.createSession({ email: 'user@example.test', password: 'secret' });
   assert.equal(backend.accessPath, 'sql-over-http');
-  assert.equal((await session.getProfile()).id, 'usrv3');
-  assert.ok(calls.some(call => call.type === 'transaction' && /validate_session/.test(call.queries[0].text)));
+  const profile = await session.getProfile();
+  assert.equal(profile.id, 'usrv3');
+  assert.equal(profile.createdAt, '2025-01-01T00:00:00.000Z');
+  assert.ok(calls.some(call => call.type === 'transaction' && /SET LOCAL ROLE benchmark_client/.test(call.queries[0].text) && /validate_session/.test(call.queries[1].text)));
+  const created = await session.createTask({ organizationId: 'org', projectId: 'project', title: 'Task', description: 'Task', priority: 'low' });
+  assert.equal(created.status, 'todo');
+  assert.match(calls.at(-1).queries[2].text, /'todo'/);
+  await session.getTask({ organizationId: 'org', projectId: 'project', taskId: 'task', comments: { page: 2, pageSize: 7 } });
+  const commentQuery = calls.findLast(call => call.type === 'transaction' && /from public\.comments/i.test(call.queries[2].text));
+  assert.deepEqual(commentQuery.queries[2].values.slice(-2), [7, 14]);
   assert.deepEqual(calls.find(call => call.type === 'query').values, ['user@example.test', 'secret']);
   await session.signOut();
 });
@@ -889,7 +903,10 @@ test('Neon adapter exposes the complete session workflow contract and parameteri
 });
 
 test('Neon SQL admin transport preserves parameterized requests and restrictive config', async () => {
-  const { createNeonSql, createNeonAdmin } = await import('../benchmark-sets/realworld-api-v3/shared/lib/admin/neon.mjs');
+  const { createNeonSql, createNeonAdmin, NEON_CLIENT_ROLE_SQL } = await import('../benchmark-sets/realworld-api-v3/shared/lib/admin/neon.mjs');
+  assert.match(NEON_CLIENT_ROLE_SQL, /CREATE ROLE benchmark_client NOLOGIN/);
+  assert.match(NEON_CLIENT_ROLE_SQL, /NOSUPERUSER NOBYPASSRLS/);
+  assert.match(NEON_CLIENT_ROLE_SQL, /GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO benchmark_client/);
   const calls = [];
   const counts = [{ table: 'organizations', count: '1600' }, { table: 'users', count: '16000' }, { table: 'memberships', count: '16000' }, { table: 'projects', count: '8000' }, { table: 'tasks', count: '160000' }, { table: 'comments', count: '479200' }, { table: 'activities', count: '319200' }];
   const sql = { query: async (text, values, options) => { calls.push({ text, values, options }); return /count\(\*\)/i.test(text) ? counts : [{ ok: true }]; } };
