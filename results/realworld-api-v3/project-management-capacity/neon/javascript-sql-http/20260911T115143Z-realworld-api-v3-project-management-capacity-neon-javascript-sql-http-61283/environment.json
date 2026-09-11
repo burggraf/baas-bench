@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "os": "Darwin",
+  "architecture": "arm64",
+  "git_commit": "6829947c9a748a16c5a5381c75170d75bfdff090",
+  "versions_sha256": "b6c1dd22da6088588d7a524ee6b84e28b3d5ace682c465a1dc4bd6aa9b59f24f",
+  "utc_timestamp": "2026-09-11T11:51:43Z",
+  "docker_server_version": "29.4.0",
+  "docker_compose_version": "5.1.2",
+  "docker_cpus": 8,
+  "docker_memory_bytes": 8393605120
+}

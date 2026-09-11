@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "status": "complete",
+  "debug": false,
+  "dirty": false,
+  "run_id": "20260911T115143Z-realworld-api-v3-project-management-capacity-neon-javascript-sql-http-61283",
+  "set": "realworld-api-v3",
+  "benchmark": "project-management-capacity",
+  "platform": "neon",
+  "variant": "javascript-sql-http",
+  "commit": "6829947c9a748a16c5a5381c75170d75bfdff090",
+  "started_at": "2026-09-11T11:51:43Z",
+  "finished_at": "2026-09-11T14:32:10Z",
+  "arguments": [
+    "run",
+    "realworld-api-v3",
+    "project-management-capacity",
+    "neon",
+    "javascript-sql-http"
+  ],
+  "definitions_sha256": "20526dab4d59cd5973fcb43b7bcdd89032ffc6fced8da0b0a52a53e73afa3840",
+  "warmup_trials": 0,
+  "measured_trials": 1,
+  "lifecycle": {
+    "start": "complete",
+    "setup": "complete",
+    "teardown": "complete",
+    "stop": "complete"
+  }
+}
