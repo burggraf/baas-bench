@@ -146,10 +146,11 @@ ready_line=$(grep -n 'curl .*localhost:3210/version' "$BAAS_TEST_LOG" | head -1 
 dashboard_line=$(grep -n ' up -d --build --no-deps dashboard$' "$BAAS_TEST_LOG" | tail -1 | cut -d: -f1)
 [ "$backend_line" -lt "$ready_line" ] && [ "$ready_line" -lt "$dashboard_line" ] || fail "Convex dashboard started before the backend was ready"
 
-mkdir -p "$BAAS_RUNTIME_DIR/neon/docker-compose" "$BAAS_RUNTIME_DIR/neon/proxy"
+mkdir -p "$BAAS_RUNTIME_DIR/neon/docker-compose/compute_wrapper/var/db/postgres/configs" "$BAAS_RUNTIME_DIR/neon/proxy"
 printf '%s\n' "$NEON_REF" > "$BAAS_RUNTIME_DIR/neon/.baas-ref"
 printf '%s\n' '[package]' 'name = "proxy"' > "$BAAS_RUNTIME_DIR/neon/proxy/Cargo.toml"
 printf '%s\n' 'services: {}' > "$BAAS_RUNTIME_DIR/neon/docker-compose/docker-compose.yml"
+printf '%s\n' '{"encrypted_password": "b093c0d3b281ba6da1eacc608620abd8"}' > "$BAAS_RUNTIME_DIR/neon/docker-compose/compute_wrapper/var/db/postgres/configs/config.json"
 : > "$BAAS_TEST_LOG"
 "$BAAS" setup neon >/dev/null
 "$BAAS" setup neon >/dev/null
@@ -157,6 +158,7 @@ neon_compose="$BAAS_RUNTIME_DIR/neon/docker-compose/docker-compose.yml"
 grep -q "docker compose .* -f $neon_compose -f $ROOT/services/neon/proxy.yml config --quiet" "$BAAS_TEST_LOG" || fail "Neon proxy overlay missing from Compose command"
 grep -q "^neon-build-inputs source=$BAAS_RUNTIME_DIR/neon dockerfile=$ROOT/services/neon/proxy.Dockerfile$" "$BAAS_TEST_LOG" || fail "Neon Compose did not receive repository-owned source and Dockerfile inputs"
 grep -Fqx "neon-resolved-build-args build_tools=$NEON_BUILD_TOOLS_IMAGE runtime=ghcr.io/neondatabase/neon:$NEON_IMAGE ref=$NEON_REF" "$BAAS_TEST_LOG" || fail "Neon Compose did not resolve the pinned build arguments"
+grep -Fq '"encrypted_password": "SCRAM-SHA-256$4096:' "$BAAS_RUNTIME_DIR/neon/docker-compose/compute_wrapper/var/db/postgres/configs/config.json" || fail "Neon role password was not upgraded to SCRAM for proxy authentication"
 [ "$(grep -c '^openssl req ' "$BAAS_TEST_LOG")" -eq 1 ] || fail "Neon TLS certificate was not generated exactly once"
 grep -q '^openssl req .*subjectAltName=DNS:localhost' "$BAAS_TEST_LOG" || fail "Neon TLS certificate is missing localhost SAN"
 [ "$(ls -ld "$BAAS_RUNTIME_DIR/neon/proxy-certs" | cut -c2-10)" = 'rwx------' ] || fail "Neon TLS directory is not private"

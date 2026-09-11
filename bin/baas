@@ -105,6 +105,11 @@ EOF
     -e "s|image: postgres:latest$|image: $NEON_READY_IMAGE|" \
     "$dir/docker-compose.yml"
   rm -f "$dir/docker-compose.yml.baas"
+  config="$dir/compute_wrapper/var/db/postgres/configs/config.json"
+  sed -i.baas \
+    's|"encrypted_password": "b093c0d3b281ba6da1eacc608620abd8"|"encrypted_password": "SCRAM-SHA-256$4096:YmFhcy1iZW5jaC1uZW9u$RYxm113BVHjR+Zp59WvdZrOPXzuF8kU0LiwYDkYc4Ko=:gcTBDEWjfScD0eM+r8raN4Me0wYbKGlbHczSC3NuOzI="|' \
+    "$config"
+  rm -f "$config.baas"
   chmod 600 "$file"
 
   cert_dir="$RUNTIME/neon/proxy-certs"
