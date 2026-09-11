@@ -932,6 +932,23 @@ test('Neon SQL admin transport preserves parameterized requests and restrictive 
   assert.match(calls[1].text, /count\(\*\)/i);
 });
 
+test('Neon setup removes stale benchmark resources before creating the schema', async () => {
+  const { createNeonAdmin } = await import('../benchmark-sets/realworld-api-v3/shared/lib/admin/neon.mjs');
+  const runtime = await mkdtemp(join(tmpdir(), 'neon-v3-setup-'));
+  const events = [];
+  const counts = [{ table: 'organizations', count: '1600' }, { table: 'users', count: '16000' }, { table: 'memberships', count: '16000' }, { table: 'projects', count: '8000' }, { table: 'tasks', count: '160000' }, { table: 'comments', count: '479200' }, { table: 'activities', count: '319200' }];
+  const sql = { query: async text => {
+    if (/DROP SCHEMA IF EXISTS benchmark_fixture/.test(text)) events.push('drop');
+    else if (/CREATE SCHEMA IF NOT EXISTS benchmark_extensions/.test(text)) events.push('schema');
+    return /count\(\*\)/i.test(text) ? counts : [];
+  } };
+  try {
+    const admin = createNeonAdmin({ sql, runtime, recoverConnections: async () => { events.push('recover'); } });
+    await admin.setup();
+    assert.deepEqual(events.slice(0, 3), ['recover', 'drop', 'schema']);
+  } finally { await rm(runtime, { recursive: true, force: true }); }
+});
+
 test('Neon administration recovers proxy connections before teardown', async () => {
   const { createNeonAdmin } = await import('../benchmark-sets/realworld-api-v3/shared/lib/admin/neon.mjs');
   const calls = [];

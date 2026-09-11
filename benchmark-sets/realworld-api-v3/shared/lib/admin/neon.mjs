@@ -109,6 +109,7 @@ export function createNeonAdmin({ sql, seed = 42, password = `Bb-v3-${seed}-capa
   return {
     async setup() {
       try {
+        await teardown();
         await query(await loadSchemaText());
         await query(NEON_CLIENT_ROLE_SQL);
         for await (const batch of seedDataset(seed, 1_000)) await insertBatch(batch.entity, batch.records);
