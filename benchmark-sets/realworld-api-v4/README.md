@@ -22,3 +22,7 @@ V4 overrides the repository defaults in [`versions.env`](versions.env); V3's exi
 | TrailBase | 0.34.1 | `trailbase` 0.14.1 |
 
 The administrative Appwrite Node SDK is pinned separately at `node-appwrite` 29.0.0. These are current stable pins at the check date, not a promise to auto-track future releases; refresh and revalidate them before a later campaign.
+
+## Controller status
+
+The controller library now has mocked Linode API provisioning, campaign-budget reservations, restrictive local inventories, ownership-checked cleanup, and interruption recovery. No live provisioning has been run. The manual `bin/bench-v4-linode.mjs inspect INVENTORY.json` command shows local ownership state without printing IP addresses; `recover INVENTORY.json --campaign LEDGER.json --confirm-delete RUN_ID` is destructive, requires `LINODE_TOKEN` on the controller and an exact run-ID confirmation, and charges the full reserved ceiling after recovery. Do not use it without account-owner approval. Provision-and-run CLI wiring, native per-platform HTTPS/private-CA setup, and complete host provenance remain unfinished.
