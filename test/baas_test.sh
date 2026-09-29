@@ -23,7 +23,8 @@ pocketbase
 trailbase'
 actual=$($BAAS list) || fail "list command failed"
 [ "$actual" = "$expected" ] || fail "unexpected service list"
-grep -q '^NHOST_TRAEFIK_IMAGE=traefik:v3\.6\.1@sha256:' "$ROOT/versions.env" || fail "Nhost Traefik compatibility image is not pinned"
+grep -q '^NHOST_TRAEFIK_IMAGE=traefik:v3\.6\.1@sha256:' "$ROOT/versions.env" || fail "V3 Nhost Traefik compatibility image changed"
+grep -q '^TRAILBASE_VERSION=0\.34\.1$' "$ROOT/benchmark-sets/realworld-api-v4/versions.env" || fail "V4 TrailBase version is not current"
 grep -Eq '^NEON_BUILD_TOOLS_IMAGE=ghcr\.io/neondatabase/build-tools:pinned@sha256:[0-9a-f]{64}$' "$ROOT/versions.env" || fail "Neon proxy build tools image is not fully pinned"
 grep -Eq '^NEON_IMAGE=[^[:space:]@]+@sha256:[0-9a-f]{64}$' "$ROOT/versions.env" || fail "Neon proxy runtime image is not fully pinned"
 grep -Eq '^NEON_REF=[0-9a-f]{40}$' "$ROOT/versions.env" || fail "Neon source ref is not an immutable commit"
@@ -41,6 +42,7 @@ if [ -n "${NEON_SOURCE_DIR:-}" ] || [ -n "${NEON_PROXY_DOCKERFILE:-}" ]; then
   echo "neon-build-inputs source=${NEON_SOURCE_DIR:-} dockerfile=${NEON_PROXY_DOCKERFILE:-}" >> "$BAAS_TEST_LOG"
 fi
 case "$*" in *' exec '*) printf '%s\n' 1;; esac
+docker_args=$*
 compose_env_files=
 neon_overlay=false
 compose_config=false
@@ -62,6 +64,22 @@ if [ "$neon_overlay" = true ] && [ "$compose_config" = true ]; then
     printf '%s\n' "neon-resolved-build-args build_tools=$NEON_BUILD_TOOLS_IMAGE runtime=${REPOSITORY:-ghcr.io/neondatabase}/neon:$NEON_IMAGE ref=$NEON_REF" >> "$BAAS_TEST_LOG"
   )
 fi
+case "$docker_args" in
+  *services/trailbase/compose.yml*)
+    (
+      set -a
+      for compose_env_file in $compose_env_files; do . "$compose_env_file"; done
+      printf '%s\n' "trailbase-resolved-version=$TRAILBASE_VERSION" >> "$BAAS_TEST_LOG"
+    )
+    ;;
+  *services/pocketbase/compose.yml*)
+    (
+      set -a
+      for compose_env_file in $compose_env_files; do . "$compose_env_file"; done
+      printf '%s\n' "pocketbase-resolved-dockerfile=${POCKETBASE_DOCKERFILE:-default}" >> "$BAAS_TEST_LOG"
+    )
+    ;;
+esac
 exit 0
 EOF
 cat > "$TMP/bin/curl" <<'EOF'
@@ -129,6 +147,13 @@ grep -q "docker compose .*--env-file $BAAS_RUNTIME_DIR/directus/.env .*services/
 if grep 'docker compose .*services/directus/compose.yml' "$BAAS_TEST_LOG" | grep -q 'services/neon/proxy.yml'; then fail "Neon overlay leaked into Directus Compose"; fi
 grep -q 'curl .*localhost:8055/server/ping' "$BAAS_TEST_LOG" || fail "Directus smoke call missing"
 [ "$(ls -l "$BAAS_RUNTIME_DIR/directus/.env" | cut -c5-10)" = '------' ] || fail "Directus secrets are not private"
+: > "$BAAS_TEST_LOG"
+BAAS_VERSION_PROFILE=realworld-api-v4 "$BAAS" setup trailbase >/dev/null
+grep -q 'docker compose .*--env-file .*versions.env --env-file .*realworld-api-v4/versions.env .*services/trailbase/compose.yml config --quiet' "$BAAS_TEST_LOG" || fail "V4 service versions were not overlaid for Compose"
+grep -q '^trailbase-resolved-version=0.34.1$' "$BAAS_TEST_LOG" || fail "V4 TrailBase version was not used"
+: > "$BAAS_TEST_LOG"
+BAAS_VERSION_PROFILE=realworld-api-v4 "$BAAS" setup pocketbase >/dev/null
+grep -q '^pocketbase-resolved-dockerfile=benchmark-sets/realworld-api-v4/shared/pocketbase-go/Dockerfile$' "$BAAS_TEST_LOG" || fail "V4 PocketBase helper was not selected"
 
 "$BAAS" setup appwrite >/dev/null
 [ -f "$BAAS_RUNTIME_DIR/appwrite/mongo-entrypoint.sh" ] || fail "Appwrite Mongo entrypoint was not downloaded"

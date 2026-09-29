@@ -1,0 +1,7 @@
+# Appwrite project-management capacity
+
+This case runs the authenticated project-management workload through Appwrite's official JavaScript `Account` and `TablesDB` SDKs on Node.js 22 or newer. Administrative provisioning and deterministic fixture loading use the server SDK outside measurement; each virtual user receives an isolated client and Account session.
+
+TablesDB rows are tenant-filtered by organization/project/task fields and returned through the shared normalized contract. Task search uses a fixture-time full-text index. Email/password sessions, refresh, sign-out, profile updates, pagination, search, and mutations are measured through the SDK. SDK calls that lack native abort options are bounded by the adapter timeout and invalidate unresolved requests. Session preparation uses batches of 10 with 100 ms between batches because the default local deployment cannot reliably create 50 sessions at once.
+
+Appwrite's TablesDB row/permission model and native Account service are the case's declared access path; schema setup and permission configuration remain outside measured operations. Setup records a one-use pristine marker so the runner's immediate first reset preserves the freshly loaded baseline; later resets rebuild the fixture and restore benchmark account names outside measurement. Setup marks its newly loaded fixture as pristine so the runner's immediately following first reset does not delete that baseline; later resets rebuild the deterministic fixture outside measurement.

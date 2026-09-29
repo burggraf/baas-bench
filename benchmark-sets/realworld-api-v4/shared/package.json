@@ -1,0 +1,19 @@
+{
+  "name": "baas-bench-realworld-api-v4",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@directus/sdk": "26.0.0",
+    "@neondatabase/serverless": "1.1.0",
+    "@nhost/nhost-js": "4.8.0",
+    "@supabase/supabase-js": "2.117.2",
+    "appwrite": "28.1.0",
+    "convex": "1.46.0",
+    "node-appwrite": "29.0.0",
+    "pocketbase": "0.28.1",
+    "trailbase": "0.14.1"
+  }
+}

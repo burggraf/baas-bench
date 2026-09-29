@@ -6,6 +6,15 @@ RUNTIME=${BAAS_RUNTIME_DIR:-$ROOT/.runtime}
 SERVICES='supabase neon convex appwrite nhost directus pocketbase trailbase'
 # shellcheck disable=SC1091
 . "$ROOT/versions.env"
+VERSION_PROFILE=${BAAS_VERSION_PROFILE:-}
+PROFILE_FILE=
+if [ -n "$VERSION_PROFILE" ]; then
+  case "$VERSION_PROFILE" in *[!a-z0-9-]*) echo "invalid version profile" >&2; exit 2 ;; esac
+  PROFILE_FILE=$ROOT/benchmark-sets/$VERSION_PROFILE/versions.env
+  [ -f "$PROFILE_FILE" ] || { echo "unknown version profile: $VERSION_PROFILE" >&2; exit 2; }
+  # shellcheck disable=SC1090
+  . "$PROFILE_FILE"
+fi
 
 usage() {
   echo "usage: bin/baas {list|setup|start|smoke|stop|status|compose} [service|all] [compose-args...]" >&2
@@ -253,11 +262,21 @@ run_compose() {
   dir=$(compose_dir "$service")
   env=$(compose_env "$service")
   if [ "$service" = neon ]; then
-    NEON_SOURCE_DIR="$RUNTIME/neon" NEON_PROXY_DOCKERFILE="$ROOT/services/neon/proxy.Dockerfile" \
-      docker compose -p "baas-$service" --project-directory "$dir" --env-file "$ROOT/versions.env" --env-file "$env" \
-        -f "$(compose_path "$service")" -f "$ROOT/services/neon/proxy.yml" "$@"
+    if [ -n "$PROFILE_FILE" ]; then
+      NEON_SOURCE_DIR="$RUNTIME/neon" NEON_PROXY_DOCKERFILE="$ROOT/services/neon/proxy.Dockerfile" \
+        docker compose -p "baas-$service" --project-directory "$dir" --env-file "$ROOT/versions.env" --env-file "$PROFILE_FILE" --env-file "$env" \
+          -f "$(compose_path "$service")" -f "$ROOT/services/neon/proxy.yml" "$@"
+    else
+      NEON_SOURCE_DIR="$RUNTIME/neon" NEON_PROXY_DOCKERFILE="$ROOT/services/neon/proxy.Dockerfile" \
+        docker compose -p "baas-$service" --project-directory "$dir" --env-file "$ROOT/versions.env" --env-file "$env" \
+          -f "$(compose_path "$service")" -f "$ROOT/services/neon/proxy.yml" "$@"
+    fi
+  elif [ -f "$env" ] && [ -n "$PROFILE_FILE" ]; then
+    docker compose -p "baas-$service" --project-directory "$dir" --env-file "$ROOT/versions.env" --env-file "$PROFILE_FILE" --env-file "$env" -f "$(compose_path "$service")" "$@"
   elif [ -f "$env" ]; then
     docker compose -p "baas-$service" --project-directory "$dir" --env-file "$ROOT/versions.env" --env-file "$env" -f "$(compose_path "$service")" "$@"
+  elif [ -n "$PROFILE_FILE" ]; then
+    docker compose -p "baas-$service" --project-directory "$dir" --env-file "$ROOT/versions.env" --env-file "$PROFILE_FILE" -f "$(compose_path "$service")" "$@"
   else
     docker compose -p "baas-$service" --project-directory "$dir" --env-file "$ROOT/versions.env" -f "$(compose_path "$service")" "$@"
   fi

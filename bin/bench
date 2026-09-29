@@ -56,6 +56,19 @@ sha256() {
   fi
 }
 
+sha256_stdin() {
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256 | awk '{print $1}'; else sha256sum | awk '{print $1}'; fi
+}
+
+versions_digest() {
+  profile=$ROOT/benchmark-sets/$1/versions.env
+  if [ -f "$profile" ]; then
+    { cat "$ROOT/versions.env"; printf '\n'; cat "$profile"; } | sha256_stdin
+  else
+    sha256 "$ROOT/versions.env"
+  fi
+}
+
 replace() {
   file=$1 token=$2 value=$3
   sed "s|{{$token}}|$value|g" "$file" > "$file.tmp"
@@ -299,6 +312,7 @@ copy_definitions() {
   target_case=$target_benchmark/cases/$platform/$variant
   mkdir -p "$target_case"
   cp "$source_set/set.conf" "$source_set/README.md" "$target_set/"
+  if [ -f "$source_set/versions.env" ]; then cp "$source_set/versions.env" "$target_set/"; fi
   if [ -d "$source_set/shared" ]; then
     cp -R "$source_set/shared" "$target_set/"
   fi
@@ -354,7 +368,7 @@ write_environment() {
     --arg os "$(uname -s)" \
     --arg architecture "$(uname -m)" \
     --arg git_commit "$DEFINITION_COMMIT" \
-    --arg versions_sha256 "$(sha256 "$ROOT/versions.env")" \
+    --arg versions_sha256 "$(versions_digest "$SET_ID")" \
     --arg utc_timestamp "$STARTED_AT" \
     --arg docker_server_version "$docker_version" \
     --arg docker_compose_version "$compose_version" \
@@ -459,6 +473,8 @@ run_case() {
   valid_id "$SET_ID" && valid_id "$BENCHMARK_ID" && valid_id "$PLATFORM" && valid_id "$VARIANT" ||
     error "invalid case path"
   validate_case "$SET_ID" "$BENCHMARK_ID" "$PLATFORM" "$VARIANT"
+  unset BAAS_VERSION_PROFILE
+  if [ -f "$ROOT/benchmark-sets/$SET_ID/versions.env" ]; then BAAS_VERSION_PROFILE=$SET_ID; export BAAS_VERSION_PROFILE; fi
   require_result_tools
   if definition_state "$SET_ID"; then
     :
@@ -614,7 +630,7 @@ publish_run() {
   recorded_commit=$(jq -r .commit "$source/run.json")
   [ "$recorded_commit" = "$DEFINITION_COMMIT" ] || error "run commit does not match current Git commit"
   [ "$(jq -r .git_commit "$source/environment.json")" = "$recorded_commit" ] || error "environment commit does not match run commit"
-  [ "$(jq -r .versions_sha256 "$source/environment.json")" = "$(sha256 "$ROOT/versions.env")" ] || error "service versions differ from the recorded environment"
+  [ "$(jq -r .versions_sha256 "$source/environment.json")" = "$(versions_digest "$set_id")" ] || error "service versions differ from the recorded environment"
 
   snapshot_sets=$source/definitions/benchmark-sets
   validate_case_at "$snapshot_sets" "$set_id" "$benchmark_id" "$platform" "$variant"

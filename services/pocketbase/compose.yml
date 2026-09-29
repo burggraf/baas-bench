@@ -2,7 +2,7 @@ services:
   pocketbase:
     build:
       context: ../..
-      dockerfile: benchmark-sets/basic-js-v2/shared/pocketbase-go/Dockerfile
+      dockerfile: ${POCKETBASE_DOCKERFILE:-benchmark-sets/basic-js-v2/shared/pocketbase-go/Dockerfile}
       args:
         GO_IMAGE: ${POCKETBASE_GO_IMAGE}
     ports:
