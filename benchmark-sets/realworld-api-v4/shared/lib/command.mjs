@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { sshTransportArgs } from './ssh-config.mjs';
 
 const SAFE_COMMAND = /^[A-Za-z0-9._/-]+$/;
 const managedChildren = new WeakMap();
@@ -69,7 +70,8 @@ export function runCommand(command, args = [], options = {}) {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 600_000) throw new Error('invalid command timeout');
   return Promise.resolve().then(async () => {
     options.signal?.throwIfAborted();
-    const child = spawnManaged(command, args, { stdio: ['pipe', 'pipe', 'pipe'], env: options.env, cwd: options.cwd, rootScope: options.rootScope });
+    const transportArgs = await sshTransportArgs(command, args, options.env ?? process.env);
+    const child = spawnManaged(command, transportArgs, { stdio: ['pipe', 'pipe', 'pipe'], env: options.env, cwd: options.cwd, rootScope: options.rootScope });
     let output;
     try {
       output = await waitForChild(child, { timeoutMs, signal: options.signal, input: options.input, label: `${command} command` });

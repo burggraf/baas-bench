@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { readFile, stat } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { validateSshConfig } from './ssh-config.mjs';
 import { applyRemoteConfig } from './remote-config.mjs';
 
 export async function loadRemoteConfig(path, platform, env = process.env) {
@@ -10,6 +11,7 @@ export async function loadRemoteConfig(path, platform, env = process.env) {
   if (!info.isFile() || (info.mode & 0o077) !== 0) throw new Error('remote config permissions must be 0600');
   const config = JSON.parse(await readFile(path, 'utf8'));
   applyRemoteConfig(config, platform, env);
+  await validateSshConfig(config.ssh_config_file, { runner: true });
   const ca = await stat(config.ca_file);
   if (!ca.isFile() || ca.size === 0) throw new Error('private CA certificate is missing');
   return config;

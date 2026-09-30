@@ -114,6 +114,7 @@ EOF
 mkdir -p "$TMP/remote-bin"
 cat > "$TMP/remote-bin/ssh" <<'EOF'
 #!/bin/sh
+[ "$1" = -F ] && [ "$2" = "$BAAS_BENCH_V4_SSH_CONFIG" ] || exit 99
 for argument do remote_command=$argument; done
 printf '%s\n' "$remote_command" >> "$BENCH_TEST_SSH_LOG"
 case "$remote_command" in
@@ -204,6 +205,8 @@ actual_lifecycle=$(cut -d: -f1-3 "$TMP/log")
 [ "$actual_lifecycle" = "$expected_lifecycle" ] || fail "unexpected lifecycle order"
 
 # V4 backend mode records Docker provenance from the backend, not the controller.
+SSH_CONFIG=$(TMPDIR="$TMP" node "$ROOT/benchmark-sets/realworld-api-v4/shared/lib/ssh-config.mjs" create)
+export BAAS_BENCH_V4_SSH_CONFIG=$SSH_CONFIG
 V4_SET=$BENCH_SETS_DIR/realworld-api-v4
 cp -R "$SET" "$V4_SET"
 sed -i.bench_test 's/^id=core-v1$/id=realworld-api-v4/' "$V4_SET/set.conf"

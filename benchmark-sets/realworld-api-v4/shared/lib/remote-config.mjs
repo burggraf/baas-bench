@@ -35,6 +35,7 @@ function isHttpsEndpoint(value) {
 export function applyRemoteConfig(config, platform, env = process.env) {
   if (!config || typeof config !== 'object' || Array.isArray(config) || config.schema_version !== 1 || config.platform !== platform || !PLATFORMS.has(platform)) throw new Error('invalid remote runner config');
   if (!validTarget(config.docker_ssh_target)) throw new Error('invalid SSH target');
+  if (typeof config.ssh_config_file !== 'string' || !safeRemotePath(config.ssh_config_file)) throw new Error('invalid runner SSH config path');
   if (typeof config.ca_file !== 'string' || !safeRemotePath(config.ca_file)) throw new Error('invalid TLS CA path');
   if (!config.env || typeof config.env !== 'object' || Array.isArray(config.env)) throw new Error('invalid remote environment');
   const allowed = new Set(PLATFORM_ENV[platform]);
@@ -45,6 +46,7 @@ export function applyRemoteConfig(config, platform, env = process.env) {
     env[key] = value;
   }
   if (!Object.keys(config.env).some(key => HTTPS_KEYS.has(key))) throw new Error('remote config needs an HTTPS endpoint');
+  env.BAAS_BENCH_V4_SSH_CONFIG = config.ssh_config_file;
   env.NODE_EXTRA_CA_CERTS = config.ca_file;
   env.BAAS_BENCH_DOCKER_SSH_TARGET = config.docker_ssh_target;
   return env;
@@ -67,6 +69,7 @@ export async function createRemoteConfig({ platform, runtime, runnerRoot, backen
     platform,
     docker_ssh_target: dockerSshTarget,
     ca_file: join(runnerRoot, '.runtime/benchmarks/realworld-api-v4/ca.pem'),
+    ssh_config_file: join(runnerRoot, '.runtime/benchmarks/realworld-api-v4/ssh_config'),
     env: { SUPABASE_URL: `https://${backendAddress}:8443`, SUPABASE_PUBLISHABLE_KEY: publishableKey },
   };
   applyRemoteConfig(config, platform, {});
@@ -82,7 +85,7 @@ export async function prepareRemoteConfig({ platform, runtime, repoRoot, runnerR
   const info = await stat(configPath);
   if (!info.isFile() || (info.mode & 0o077) !== 0) throw new Error('remote config permissions must be 0600');
   const config = JSON.parse(await readFile(configPath, 'utf8'));
-  if (config?.platform !== platform || config.ca_file !== join(remoteRuntime, 'ca.pem')) throw new Error('remote config does not match this runner');
+  if (config?.platform !== platform || config.ca_file !== join(remoteRuntime, 'ca.pem') || config.ssh_config_file !== join(remoteRuntime, 'ssh_config')) throw new Error('remote config does not match this runner');
   const caInfo = await stat(join(runtime, 'ca.pem'));
   if (!caInfo.isFile() || caInfo.size === 0) throw new Error('private CA certificate is missing');
   config.env ??= {};

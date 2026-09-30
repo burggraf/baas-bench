@@ -1,4 +1,5 @@
 import { runCommand } from './command.mjs';
+import { createSshConfig, bindBackend } from './ssh-config.mjs';
 import { createEphemeralSshKey, startSshAgent } from './ephemeral-ssh.mjs';
 import { readBootstrapScript } from './remote-bootstrap.mjs';
 import { bootstrapAndDeploy } from './observation-workflow.mjs';
@@ -20,29 +21,33 @@ export async function runPilot(options) {
   const transferReserve = Number(profile.type.transfer) > 0 ? 0 : transferReserveUsd;
   const key = await createKey();
   let agent;
+  let sshState;
   let primary;
   try {
+    sshState = await (options.createSshConfig ?? createSshConfig)();
     agent = await startAgent({ privateKey: key.privateKey });
-    const command = (name, args, commandOptions = {}) => runCommand(name, args, { ...commandOptions, env: agent.env, rootScope: true });
+    const environment = { ...agent.env, BAAS_BENCH_V4_SSH_CONFIG: sshState.configPath };
+    const command = (name, args, commandOptions = {}) => runCommand(name, args, { ...commandOptions, env: environment, rootScope: true });
     const outcome = await observe({
       ...options,
       api,
       config: { ...config, region: profile.region, type: profile.type.id, controllerCidr, sshPublicKey: key.publicKey },
       inventoryPath, campaignPath, hourlyUsd: profile.hourlyUsd, maxHours, transferReserveUsd: transferReserve, liveApproval, deleteConfirmation,
       bootstrap: async ({ inventory, signal }) => {
+        await bindBackend(sshState.configPath, inventory.resources.backend);
         const script = await readBootstrapScript(bootstrapScriptPath);
         const deployment = await deploy({ inventory, repositoryRoot, backendRoot: '/opt/baas-bench', runnerRoot: '/opt/baas-bench', runnerKeyFile: key.privateKey, script, signal, command });
         inventory.benchmark_environment = deployment.environment ?? deployment;
         if (deployment.hostProvenance) inventory.host_provenance = deployment.hostProvenance;
         inventory.hardware_profile = { region: profile.region, type: Object.fromEntries(['id', 'class', 'memory', 'vcpus', 'disk', 'transfer'].filter(key => profile.type[key] !== undefined).map(key => [key, profile.type[key]])), hourly_usd: profile.hourlyUsd };
       },
-      run: async ({ inventory, signal }) => executeBench({ environment: { ...agent.env, ...inventory.benchmark_environment }, signal }),
+      run: async ({ inventory, signal }) => executeBench({ environment: { ...environment, ...inventory.benchmark_environment, BAAS_BENCH_V4_SSH_CONFIG: sshState.configPath }, signal }),
       verify: verifyBench,
     });
     return { ...outcome, profile };
   } catch (error) { primary = error; throw error; }
   finally {
-    for (const [keyName, cleanup] of [['agentCleanupError', () => agent?.stop()], ['keyCleanupError', () => key.cleanup()]]) {
+    for (const [keyName, cleanup] of [['agentCleanupError', () => agent?.stop()], ['keyCleanupError', () => key.cleanup()], ['sshConfigCleanupError', () => sshState?.cleanup()]]) {
       try { await cleanup(); }
       catch (error) {
         if (!primary) primary = error;

@@ -49,6 +49,15 @@ backend_private_ip=${BAAS_BENCH_V4_BACKEND_PRIVATE_IP:-}
 backend_docker_target=${BAAS_BENCH_V4_BACKEND_DOCKER_SSH_TARGET:-}
 runner_ssh_key=${BAAS_BENCH_V4_RUNNER_SSH_KEY_FILE:-}
 
+ssh_config=${BAAS_BENCH_V4_SSH_CONFIG:-}
+v4_ssh() {
+  node "$runtime/lib/ssh-config.mjs" validate "$ssh_config" || return 1
+  command ssh -F "$ssh_config" "$@"
+}
+if [ -n "$runner_target$backend_target" ]; then
+  node "$runtime/lib/ssh-config.mjs" validate "$ssh_config"
+fi
+
 validate_runner() {
   [ -n "$runner_target" ] || { echo "V4 run requires BAAS_BENCH_V4_RUNNER_TARGET" >&2; exit 1; }
   printf '%s' "$runner_target" | grep -Eq '^([A-Za-z0-9_.-]+@)?[A-Za-z0-9][A-Za-z0-9.-]*$' || { echo "invalid runner SSH target" >&2; exit 1; }
@@ -72,30 +81,31 @@ prepare_supabase_runner_config() {
   backend_runtime=$backend_root/.runtime/benchmarks/realworld-api-v4
   temporary_ca=$runtime/.ca.pem.$$
   trap 'rm -f "$temporary_ca"' 0 1 2 15
-  ssh -o BatchMode=yes -o ConnectTimeout=5 "$backend_target" "cat -- '$backend_runtime/ca.pem'" > "$temporary_ca"
+  v4_ssh -o BatchMode=yes -o ConnectTimeout=5 "$backend_target" "cat -- '$backend_runtime/ca.pem'" > "$temporary_ca"
   [ -s "$temporary_ca" ] || { echo "backend private CA is empty" >&2; exit 1; }
   chmod 600 "$temporary_ca"
   mv "$temporary_ca" "$runtime/ca.pem"
-  publishable_key=$(ssh -o BatchMode=yes -o ConnectTimeout=5 "$backend_target" "grep '^SUPABASE_PUBLISHABLE_KEY=' '$backend_root/.runtime/supabase/docker/.env'" | sed 's/^SUPABASE_PUBLISHABLE_KEY=//')
+  publishable_key=$(v4_ssh -o BatchMode=yes -o ConnectTimeout=5 "$backend_target" "grep '^SUPABASE_PUBLISHABLE_KEY=' '$backend_root/.runtime/supabase/docker/.env'" | sed 's/^SUPABASE_PUBLISHABLE_KEY=//')
   printf '%s\n' "$publishable_key" | node "$runtime/lib/remote-config.mjs" create supabase "$runtime" "$runner_root" "$backend_private_ip" "$backend_docker_target"
   trap - 0 1 2 15
 }
 
 configure_runner_backend_ssh() {
   [ -f "$runner_ssh_key" ] || { echo "V4 Supabase setup requires BAAS_BENCH_V4_RUNNER_SSH_KEY_FILE" >&2; exit 1; }
-  backend_host_key=$(ssh -o BatchMode=yes -o ConnectTimeout=5 "$backend_target" "cat /etc/ssh/ssh_host_ed25519_key.pub")
-  printf '%s' "$backend_host_key" | grep -Eq '^ssh-ed25519 [A-Za-z0-9+/=]+$' || { echo "invalid backend SSH host key" >&2; exit 1; }
-  ssh -o BatchMode=yes -o ConnectTimeout=5 "$runner_target" 'umask 077 && mkdir -p ~/.ssh && chmod 700 ~/.ssh'
-  cat "$runner_ssh_key" | ssh -o BatchMode=yes -o ConnectTimeout=5 "$runner_target" 'cat > ~/.ssh/id_ed25519 && chmod 600 ~/.ssh/id_ed25519'
-  printf '%s %s\n' "$backend_private_ip" "$backend_host_key" | ssh -o BatchMode=yes -o ConnectTimeout=5 "$runner_target" 'cat > ~/.ssh/known_hosts && chmod 600 ~/.ssh/known_hosts'
+  node "$runtime/lib/ssh-config.mjs" runner "$ssh_config" "$backend_target" "$backend_private_ip" "$runner_root"
+  ssh_directory=$(dirname "$ssh_config")
+  cat "$runner_ssh_key" | v4_ssh -o BatchMode=yes -o ConnectTimeout=5 "$runner_target" "cat > '$remote_runtime/id_ed25519' && chmod 600 '$remote_runtime/id_ed25519'"
+  cat "$ssh_directory/runner_known_hosts" | v4_ssh -o BatchMode=yes -o ConnectTimeout=5 "$runner_target" "cat > '$remote_runtime/known_hosts' && chmod 600 '$remote_runtime/known_hosts'"
+  cat "$ssh_directory/runner_ssh_config" | v4_ssh -o BatchMode=yes -o ConnectTimeout=5 "$runner_target" "cat > '$remote_runtime/ssh_config' && chmod 600 '$remote_runtime/ssh_config'"
 }
 
 sync_runner() {
   remote_runtime=$runner_root/.runtime/benchmarks/realworld-api-v4
-  ssh -o BatchMode=yes -o ConnectTimeout=5 "$runner_target" "umask 077 && mkdir -p '$remote_runtime' && chmod 700 '$runner_root/.runtime' '$runner_root/.runtime/benchmarks' '$remote_runtime'"
+  v4_ssh -o BatchMode=yes -o ConnectTimeout=5 "$runner_target" "umask 077 && mkdir -p '$remote_runtime' && chmod 700 '$runner_root/.runtime' '$runner_root/.runtime/benchmarks' '$remote_runtime'"
+  node "$runtime/lib/ssh-config.mjs" validate "$ssh_config"
+  rsync -e "ssh -F $ssh_config" -a --delete --exclude node_modules -- "$runtime/" "$runner_target:$remote_runtime/"
   if [ "$platform" = supabase ]; then configure_runner_backend_ssh; fi
-  rsync -a --delete --exclude node_modules -- "$runtime/" "$runner_target:$remote_runtime/"
-  ssh -o BatchMode=yes -o ConnectTimeout=5 "$runner_target" "node -e 'if (Number(process.versions.node.split(\".\")[0]) < 22) process.exit(1)' && npm ci --ignore-scripts --prefix '$remote_runtime'"
+  v4_ssh -o BatchMode=yes -o ConnectTimeout=5 "$runner_target" "node -e 'if (Number(process.versions.node.split(\".\")[0]) < 22) process.exit(1)' && npm ci --ignore-scripts --prefix '$remote_runtime'"
 }
 
 if [ "$action" = run ]; then

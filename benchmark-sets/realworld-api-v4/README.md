@@ -25,4 +25,26 @@ The administrative Appwrite Node SDK is pinned separately at `node-appwrite` 29.
 
 ## Controller status
 
-The controller library now has mocked Linode API provisioning, campaign-budget reservations, restrictive local inventories, ownership-checked cleanup, and interruption recovery. No live provisioning has been run. The manual `bin/bench-v4-linode.mjs inspect INVENTORY.json` command shows local ownership state without printing IP addresses; `recover INVENTORY.json --campaign LEDGER.json --confirm-delete RUN_ID` is destructive, requires `LINODE_TOKEN` on the controller and an exact run-ID confirmation, and charges the full reserved ceiling after recovery. Do not use it without account-owner approval. The `pilot` command now resolves the current eligible profile, creates an ephemeral SSH credential, bootstraps both x86_64 hosts with pinned Node/Docker/Compose binaries, deploys the checkout, runs the Supabase observation, verifies its local bundle, and cleans up. It remains mock-tested only. Supabase's native Envoy HTTPS/private-CA path has passed a startup check with the digest-pinned Envoy image, but it has not been exercised against a live VM pair. Native HTTPS work for the other platforms and complete host provenance remain unfinished.
+The controller library now has mocked Linode API provisioning, campaign-budget reservations, restrictive local inventories, ownership-checked cleanup, and interruption recovery. No successful end-to-end live pilot is claimed. The manual `bin/bench-v4-linode.mjs inspect INVENTORY.json` command shows local ownership state without printing IP addresses; `recover INVENTORY.json --campaign LEDGER.json --confirm-delete RUN_ID` is destructive, requires `LINODE_TOKEN` on the controller and an exact run-ID confirmation, and charges the full reserved ceiling after recovery. Do not use it without account-owner approval. The `pilot` command now resolves the current eligible profile, creates an ephemeral SSH credential and private observation-scoped host-key state, bootstraps both x86_64 hosts with pinned Node/Docker/Compose binaries, deploys the checkout, runs the Supabase observation, verifies its local bundle, and cleans up. End-to-end live readiness remains unverified. Supabase's native Envoy HTTPS/private-CA path has passed a startup check with the digest-pinned Envoy image, but it has not been exercised against a live VM pair. Native HTTPS work for the other platforms and complete host provenance remain unfinished.
+
+
+## Observation-scoped SSH
+
+The pilot creates a fresh `ssh_config` and `known_hosts` for each observation (0700 directory, 0600 regular files). Every V4 controller SSH call, including rsync and backend orchestration, uses that config explicitly. User/system SSH configuration and global known-hosts files are not consulted or modified. First controller contact uses `accept-new`; subsequent key changes and unsupported host-key algorithms are hard failures, not readiness retries. Generated configs require Ed25519 host keys, supported by the pinned fresh Ubuntu 24.04 hosts.
+
+The runner receives a separate strict-checking config, the authenticated controller-side backend host-key pin mapped to the inventory's verified private backend IP, and an ephemeral identity under its private V4 runtime—not `~/.ssh`. Backend/public-private address mismatches fail before transfer. Controller host-key files are cleaned with the ephemeral credential; runner files disappear with the run-owned VM. Cleanup failures preserve the primary error.
+
+Manual V4 **remote** commands must also supply generated private SSH state; absent, public, symlinked, or nonconforming configs fail closed. Local V4 and V3 commands are unchanged. For an independently authorized manual observation:
+
+```sh
+BAAS_BENCH_V4_SSH_CONFIG=$(node benchmark-sets/realworld-api-v4/shared/lib/ssh-config.mjs create)
+export BAAS_BENCH_V4_SSH_CONFIG
+ssh_state=${BAAS_BENCH_V4_SSH_CONFIG%/*}
+trap 'rm -rf -- "$ssh_state"' 0
+# Bind the backend addresses from the verified observation inventory, before setup:
+node benchmark-sets/realworld-api-v4/shared/lib/ssh-config.mjs bind   "$BAAS_BENCH_V4_SSH_CONFIG" BACKEND_PUBLIC_IPV4 BACKEND_PRIVATE_IPV4
+```
+
+Use `ssh -F "$BAAS_BENCH_V4_SSH_CONFIG"` for manual probes so setup can reuse the same controller pin. The case dispatcher stages the runner's strict config and pin after runtime rsync. Do not reuse a previous observation's files or remove global host keys to work around recycled addresses.
+
+This remains **TOFU** on the observation's first public SSH connection, not out-of-band verification of a Linode host fingerprint. A changed key within that observation is rejected; a fresh observation deliberately starts a fresh trust scope. No further live attempt is authorized by these instructions.

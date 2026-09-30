@@ -375,3 +375,139 @@ test('runBench establishes a root deadline even when invoked from an inherited s
     assert.equal(processRunning(pid), false);
   } finally { if (pid && processRunning(pid)) process.kill(pid, 'SIGKILL'); await outcome; await rm(root, { recursive: true, force: true }); }
 });
+
+
+test('V4 SSH state is private and isolated from earlier/global hosts; runner pins use the bound backend', async () => {
+  const { createSshConfig, validateSshConfig, bindBackend, prepareRunnerSsh, sshTransportArgs } = await import('../benchmark-sets/realworld-api-v4/shared/lib/ssh-config.mjs');
+  const first = await createSshConfig();
+  const second = await createSshConfig();
+  try {
+    const { stat, chmod, symlink } = await import('node:fs/promises');
+    assert.notEqual(first.configPath, second.configPath);
+    for (const state of [first, second]) {
+      assert.equal((await stat(state.directory)).mode & 0o777, 0o700);
+      assert.equal((await stat(state.configPath)).mode & 0o777, 0o600);
+      assert.equal((await stat(state.knownHostsPath)).mode & 0o777, 0o600);
+      const config = spawnSync('ssh', ['-G', '-F', state.configPath, '172.233.137.153'], { encoding: 'utf8' });
+      assert.equal(config.status, 0, config.stderr);
+      assert.match(config.stdout, /stricthostkeychecking accept-new/);
+      assert.match(config.stdout, /^hostkeyalgorithms ssh-ed25519$/m);
+      assert.ok(config.stdout.includes(`userknownhostsfile ${state.knownHostsPath}`));
+      assert.match(config.stdout, /globalknownhostsfile \/dev\/null/);
+      assert.equal(config.stdout.includes('.ssh/known_hosts'), false);
+    }
+    await writeFile(first.knownHostsPath, '172.233.137.153 ssh-ed25519 AAAATESTFIRST\n');
+    assert.equal(await readFile(second.knownHostsPath, 'utf8'), '');
+    await bindBackend(first.configPath, { publicIpv4: '172.233.137.153', privateIpv4: '10.203.0.10' });
+    const pinned = await prepareRunnerSsh({ configPath: first.configPath, backendTarget: 'root@172.233.137.153', backendPrivateIp: '10.203.0.10', runnerRoot: '/opt/baas-bench' });
+    assert.equal(await readFile(pinned.knownHostsPath, 'utf8'), '10.203.0.10 ssh-ed25519 AAAATESTFIRST\n');
+    const runner = await readFile(pinned.configPath, 'utf8');
+    assert.match(runner, /StrictHostKeyChecking yes/);
+    assert.match(runner, /UserKnownHostsFile.*realworld-api-v4\/known_hosts/);
+    assert.match(runner, /IdentityFile.*realworld-api-v4\/id_ed25519/);
+    for (const change of [{ backendTarget: 'root@172.233.137.154' }, { backendPrivateIp: '10.203.0.11' }]) {
+      await assert.rejects(prepareRunnerSsh({ configPath: first.configPath, backendTarget: 'root@172.233.137.153', backendPrivateIp: '10.203.0.10', runnerRoot: '/opt/baas-bench', ...change }), /backend.*match/i);
+    }
+    assert.deepEqual(await sshTransportArgs('ssh', ['host', 'true'], { BAAS_BENCH_V4_SSH_CONFIG: first.configPath }), ['-F', first.configPath, 'host', 'true']);
+    assert.deepEqual(await sshTransportArgs('rsync', ['-a', '--', '/source/', 'host:/dest/'], { BAAS_BENCH_V4_SSH_CONFIG: first.configPath }), ['-e', `ssh -F ${first.configPath}`, '-a', '--', '/source/', 'host:/dest/']);
+    await assert.rejects(sshTransportArgs('ssh', ['host'], {}), /SSH config/);
+    await assert.rejects(validateSshConfig('/tmp/.ssh/ssh_config'), /generated private SSH config/);
+    await assert.rejects(sshTransportArgs('ssh', ['host'], { BAAS_BENCH_V4_SSH_CONFIG: '/tmp/path;bad/ssh_config' }), /SSH config/);
+    const original = await readFile(first.configPath, 'utf8');
+    await writeFile(first.configPath, original + 'Include ~/.ssh/config\n');
+    await assert.rejects(validateSshConfig(first.configPath), /policy/);
+    await rm(first.configPath);
+    await symlink(second.configPath, first.configPath);
+    await assert.rejects(validateSshConfig(first.configPath), /private regular/);
+    await rm(first.configPath);
+    await writeFile(first.configPath, original, { mode: 0o600 });
+    await chmod(first.configPath, 0o644);
+    await assert.rejects(validateSshConfig(first.configPath), /private|0600/);
+  } finally { await first.cleanup(); await second.cleanup(); }
+});
+
+test('recognizable changed SSH host keys are hard failures, not readiness retries', async () => {
+  for (const message of ['REMOTE HOST IDENTIFICATION HAS CHANGED!', 'Host key verification failed', 'no matching host key type found']) {
+    let probes = 0;
+    await assert.rejects(bootstrapHosts({ ...hosts, attempts: 24, sleep: async () => assert.fail('must not retry host-key failure'), command: async () => { probes++; throw new Error(message); } }), error => error.message === message);
+    assert.equal(probes, 1);
+  }
+});
+
+
+test('native SSH accepts a recycled address in a fresh observation but rejects a changed key within it', async () => {
+  const { createSshConfig } = await import('../benchmark-sets/realworld-api-v4/shared/lib/ssh-config.mjs');
+  const { createServer, createConnection } = await import('node:net');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'v4-local-sshd-')));
+  const first = await createSshConfig();
+  const second = await createSshConfig();
+  const listener = createServer();
+  await new Promise(resolve => listener.listen(0, '127.0.0.1', resolve));
+  const port = listener.address().port;
+  await new Promise(resolve => listener.close(resolve));
+  let server; let serverClose;
+  const stop = async () => { if (server) { server.kill('SIGTERM'); await serverClose; server = undefined; } };
+  const start = async key => {
+    await stop();
+    const configPath = join(root, 'sshd_config');
+    await writeFile(configPath, `Port ${port}
+ListenAddress 127.0.0.1
+HostKey ${key}
+PidFile ${root}/sshd.pid
+AuthorizedKeysFile none
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+UsePAM no
+`, { mode: 0o600 });
+    server = spawn('/usr/sbin/sshd', ['-D', '-e', '-f', configPath], { stdio: ['ignore', 'ignore', 'pipe'] });
+    serverClose = new Promise(resolve => server.once('close', resolve));
+    let diagnostics = '';
+    server.stderr.on('data', data => { diagnostics += data; });
+    for (let attempt = 0; attempt < 100; attempt++) {
+      if (server.exitCode !== null) assert.fail(`local sshd failed: ${diagnostics}`);
+      const ready = await new Promise(resolve => {
+        const socket = createConnection({ host: '127.0.0.1', port });
+        socket.once('connect', () => { socket.destroy(); resolve(true); });
+        socket.once('error', () => resolve(false));
+      });
+      if (ready) return;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    assert.fail('local sshd did not become ready');
+  };
+  const connect = state => runCommand('ssh', ['-p', String(port), '-o', 'HostKeyAlias=172.233.137.153', '-o', 'IdentityAgent=none', '-o', 'IdentityFile=none', '-o', 'PreferredAuthentications=none', '127.0.0.1', 'true'], { env: { ...process.env, BAAS_BENCH_V4_SSH_CONFIG: state.configPath } });
+  try {
+    for (const name of ['a', 'b']) await runCommand('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', join(root, name)]);
+    await start(join(root, 'a'));
+    await assert.rejects(connect(first), /Permission denied/);
+    const firstKey = await readFile(first.knownHostsPath, 'utf8');
+    assert.ok(firstKey.includes('172.233.137.153'));
+    await start(join(root, 'b'));
+    await assert.rejects(connect(first), /REMOTE HOST IDENTIFICATION HAS CHANGED/);
+    await assert.rejects(connect(second), /Permission denied/);
+    assert.notEqual(await readFile(second.knownHostsPath, 'utf8'), firstKey);
+    assert.equal(await readFile(first.knownHostsPath, 'utf8'), firstKey);
+    await start(join(root, 'a'));
+    await assert.rejects(connect(second), /REMOTE HOST IDENTIFICATION HAS CHANGED/);
+  } finally { await stop(); await first.cleanup(); await second.cleanup(); await rm(root, { recursive: true, force: true }); }
+});
+
+
+test('all managed V4 SSH and rsync transports use explicit private config', async () => {
+  const { createSshConfig } = await import('../benchmark-sets/realworld-api-v4/shared/lib/ssh-config.mjs');
+  const { runLongCommand } = await import('../benchmark-sets/realworld-api-v4/shared/lib/remote-execution.mjs');
+  const state = await createSshConfig();
+  const bin = join(state.directory, 'bin');
+  const log = join(state.directory, 'args');
+  try {
+    await mkdir(bin);
+    for (const name of ['ssh', 'rsync']) await writeFile(join(bin, name), '#!/bin/sh\nprintf \'%s\\n\' "$@" > "$SSH_TEST_LOG"\n', { mode: 0o755 });
+    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, SSH_TEST_LOG: log, BAAS_BENCH_V4_SSH_CONFIG: state.configPath };
+    await runCommand('ssh', ['root@host', 'true'], { env });
+    assert.deepEqual((await readFile(log, 'utf8')).trim().split('\n'), ['-F', state.configPath, 'root@host', 'true']);
+    await runLongCommand('ssh', ['root@host', 'true'], { env });
+    assert.equal((await readFile(log, 'utf8')).split('\n')[1], state.configPath);
+    await runCommand('rsync', ['-a', '--', '/source/', 'root@host:/dest/'], { env });
+    assert.deepEqual((await readFile(log, 'utf8')).trim().split('\n'), ['-e', `ssh -F ${state.configPath}`, '-a', '--', '/source/', 'root@host:/dest/']);
+  } finally { await state.cleanup(); }
+});

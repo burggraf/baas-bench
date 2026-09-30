@@ -213,14 +213,23 @@ grep -Fq 'API_EXTERNAL_URL=https://10.0.0.10:8443' "$BAAS_RUNTIME_DIR/supabase/d
 grep -Fq 'envoy.filters.listener.tls_inspector' "$BAAS_RUNTIME_DIR/supabase/docker/volumes/api/envoy/docker-entrypoint.sh" || fail "V4 Supabase Envoy TLS listener missing"
 grep -Fq 'transport_protocol: tls' "$BAAS_RUNTIME_DIR/supabase/docker/volumes/api/envoy/docker-entrypoint.sh" || fail "V4 Supabase TLS filter chain is not selected"
 : > "$BAAS_TEST_LOG"
+SSH_CONFIG=$(TMPDIR="$TMP" node "$ROOT/benchmark-sets/realworld-api-v4/shared/lib/ssh-config.mjs" create)
+export BAAS_BENCH_V4_SSH_CONFIG=$SSH_CONFIG
 : > "$BAAS_TEST_SSH_LOG"
 BAAS_VERSION_PROFILE=realworld-api-v4 BAAS_BENCH_V4_BACKEND_TARGET=root@192.0.2.8 BAAS_BENCH_V4_BACKEND_ROOT=/opt/baas-bench BAAS_BENCH_V4_BACKEND_PRIVATE_IP=10.0.0.10 "$BAAS" start supabase >/dev/null
 [ ! -s "$BAAS_TEST_LOG" ] || fail "remote backend start touched local Docker"
 grep -Fq 'root@192.0.2.8' "$BAAS_TEST_SSH_LOG" || fail "V4 backend command did not use SSH"
+grep -Fq " <-F> <$SSH_CONFIG>" "$BAAS_TEST_SSH_LOG" || fail "V4 backend did not use private SSH config"
 grep -Fq "BAAS_RUNTIME_DIR='/opt/baas-bench/.runtime'" "$BAAS_TEST_SSH_LOG" || fail "V4 backend runtime path was not forwarded"
 grep -Fq "BAAS_VERSION_PROFILE='realworld-api-v4'" "$BAAS_TEST_SSH_LOG" || fail "V4 profile was not forwarded to backend"
 grep -Fq "BAAS_BENCH_V4_BACKEND_PRIVATE_IP='10.0.0.10'" "$BAAS_TEST_SSH_LOG" || fail "V4 backend private IP was not forwarded"
 grep -Fq "./bin/baas 'start' 'supabase'" "$BAAS_TEST_SSH_LOG" || fail "remote start command or arguments were not preserved"
+: > "$BAAS_TEST_SSH_LOG"
+if BAAS_BENCH_V4_SSH_CONFIG='' BAAS_VERSION_PROFILE=realworld-api-v4 BAAS_BENCH_V4_BACKEND_TARGET=root@192.0.2.8 BAAS_BENCH_V4_BACKEND_ROOT=/opt/baas-bench "$BAAS" stop supabase >/dev/null 2>&1; then fail "V4 remote backend accepted absent private SSH config"; fi
+chmod 644 "$SSH_CONFIG"
+if BAAS_VERSION_PROFILE=realworld-api-v4 BAAS_BENCH_V4_BACKEND_TARGET=root@192.0.2.8 BAAS_BENCH_V4_BACKEND_ROOT=/opt/baas-bench "$BAAS" stop supabase >/dev/null 2>&1; then fail "V4 remote backend accepted public SSH config"; fi
+chmod 600 "$SSH_CONFIG"
+[ ! -s "$BAAS_TEST_SSH_LOG" ] || fail "invalid SSH state invoked SSH"
 : > "$BAAS_TEST_SSH_LOG"
 if BAAS_VERSION_PROFILE=realworld-api-v3 BAAS_BENCH_V4_BACKEND_TARGET=root@192.0.2.8 BAAS_BENCH_V4_BACKEND_ROOT=/opt/baas-bench "$BAAS" stop supabase >/dev/null 2>&1; then fail "remote backend proxy was accepted outside V4"; fi
 if BAAS_VERSION_PROFILE=realworld-api-v4 BAAS_BENCH_V4_BACKEND_TARGET='root@host;touch' BAAS_BENCH_V4_BACKEND_ROOT=/opt/baas-bench "$BAAS" stop supabase >/dev/null 2>&1; then fail "unsafe SSH target was accepted"; fi

@@ -23,6 +23,7 @@ export async function bootstrapHosts({ backendTarget, runnerTarget, script, comm
         break;
       } catch (error) {
         signal?.throwIfAborted();
+        if (/REMOTE HOST IDENTIFICATION HAS CHANGED|Host key verification failed|Offending .* key|no matching host key type found/i.test(error.message)) throw error;
         if (attempt >= attempts) throw new Error(`SSH host ${target} did not become ready: ${error.message}`, { cause: error });
         await sleep(5_000);
       }

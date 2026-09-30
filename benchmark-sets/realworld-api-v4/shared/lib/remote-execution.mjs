@@ -1,6 +1,7 @@
 import { isAbsolute } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { runCommand, spawnManaged, waitForChild } from './command.mjs';
+import { sshTransportArgs } from './ssh-config.mjs';
 import { verifyTransferManifest } from './transfer.mjs';
 
 const PLATFORMS = new Set(['supabase', 'convex', 'appwrite', 'nhost', 'directus', 'pocketbase', 'trailbase', 'neon']);
@@ -15,7 +16,8 @@ export function runLongCommand(command, args, options = {}) {
   if (!/^[A-Za-z0-9._/-]+$/.test(command) || !Array.isArray(args) || args.some(arg => typeof arg !== 'string' || arg.includes('\0')) || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_RUN_MS) throw new Error('invalid long command');
   return Promise.resolve().then(async () => {
     options.signal?.throwIfAborted();
-    const child = spawnManaged(command, args, { stdio: 'ignore', env: options.env, cwd: options.cwd });
+    const transportArgs = await sshTransportArgs(command, args, options.env ?? process.env);
+    const child = spawnManaged(command, transportArgs, { stdio: 'ignore', env: options.env, cwd: options.cwd });
     const { code, signal } = await waitForChild(child, { timeoutMs, signal: options.signal, label: 'remote command' });
     if (code !== 0) throw new Error(`remote command failed${code === null ? ` (${signal ?? 'signal'})` : ` (${code})`}`);
     return { stdout: '', stderr: '' };

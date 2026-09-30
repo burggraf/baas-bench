@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { accessSync, constants, readFileSync, statSync } from 'node:fs';
-import { chmod, cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, cp, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -77,46 +77,58 @@ test('all eight cases expose valid thin lifecycle hooks', () => {
   assert.match(text('cases/neon/javascript-sql-http/case.conf', benchmarkRoot), /^client=@neondatabase\/serverless@1\.1\.0$/m);
   const dispatcher = text('shared/case.sh');
   assert.match(dispatcher, /remote-config\.mjs" prepare/);
-  assert.match(dispatcher, /rsync -a --delete/);
+  assert.match(dispatcher, /rsync -e.*ssh -F.*-a --delete/);
   assert.match(dispatcher, /remote-execution\.mjs/);
 });
 
 test('V4 case run forwards measured hooks to the configured remote runner', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'rw-case-remote-'));
+  const directory = await realpath(await mkdtemp(join(tmpdir(), 'rw-case-remote-')));
+  const { createSshConfig } = await import('../benchmark-sets/realworld-api-v4/shared/lib/ssh-config.mjs');
+  const sshState = await createSshConfig();
   const runtime = join(directory, 'benchmarks/realworld-api-v4');
   try {
     await mkdir(join(runtime, 'lib'), { recursive: true });
+    await cp(new URL('../benchmark-sets/realworld-api-v4/shared/lib/ssh-config.mjs', import.meta.url), join(runtime, 'lib/ssh-config.mjs'));
     await writeFile(join(runtime, 'lib/remote-execution.mjs'), 'process.stdout.write(JSON.stringify(process.argv.slice(2)));');
     const result = spawnSync('sh', [new URL('../benchmark-sets/realworld-api-v4/shared/case.sh', import.meta.url).pathname, 'run', 'supabase'], {
       encoding: 'utf8',
-      env: { ...process.env, BAAS_RUNTIME_DIR: directory, BAAS_BENCH_V4_RUNNER_TARGET: 'runner.internal', BAAS_BENCH_V4_RUNNER_ROOT: '/tmp/runner-root', BENCH_PHASE: 'measure', BENCH_TRIAL: '2', BENCH_OUTPUT_DIR: '/tmp/bench output' },
+      env: { ...process.env, BAAS_BENCH_V4_SSH_CONFIG: sshState.configPath, BAAS_RUNTIME_DIR: directory, BAAS_BENCH_V4_RUNNER_TARGET: 'runner.internal', BAAS_BENCH_V4_RUNNER_ROOT: '/tmp/runner-root', BENCH_PHASE: 'measure', BENCH_TRIAL: '2', BENCH_OUTPUT_DIR: '/tmp/bench output' },
     });
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual(JSON.parse(result.stdout), ['supabase', 'measure', '2', '/tmp/bench output', 'runner.internal', '/tmp/runner-root']);
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally { await sshState.cleanup(); await rm(directory, { recursive: true, force: true }); }
 });
 
 test('V4 setup validates the runner before seeding and syncs after admin setup', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'rw-case-sync-'));
+  const directory = await realpath(await mkdtemp(join(tmpdir(), 'rw-case-sync-')));
+  const { createSshConfig, bindBackend } = await import('../benchmark-sets/realworld-api-v4/shared/lib/ssh-config.mjs');
+  const sshState = await createSshConfig();
+  await bindBackend(sshState.configPath, { publicIpv4: '172.233.137.153', privateIpv4: '10.0.0.10' });
+  await writeFile(sshState.knownHostsPath, '172.233.137.153 ssh-ed25519 AAAATESTHOSTKEY\n');
   const runtime = join(directory, 'benchmarks/realworld-api-v4');
   const fakeBin = join(directory, 'bin');
   const log = join(directory, 'calls.log');
   const runnerKey = join(directory, 'runner-id_ed25519');
+  const runnerSsh = join(directory, 'runner-ssh');
   try {
     await mkdir(join(runtime, 'node_modules'), { recursive: true });
     await mkdir(fakeBin);
+    await mkdir(runnerSsh, { mode: 0o700 });
     await writeFile(join(runtime, 'package-lock.json'), text('shared/package-lock.json'));
     await writeFile(runnerKey, 'runner-private-key', { mode: 0o600 });
     await writeFile(join(fakeBin, 'node'), `#!/bin/sh
 [ "$1" = -p ] && { echo 22; exit 0; }
 echo "node: $*" >> "$FAKE_LOG"
+case "$1" in *ssh-config.mjs) exec "$REAL_NODE" "$@" ;; esac
 `);
     await writeFile(join(fakeBin, 'ssh'), `#!/bin/sh
 echo "ssh: $*" >> "$FAKE_LOG"
 case "$*" in
   *'ca.pem'*) printf '%s\\n' private-ca ;;
   *'SUPABASE_PUBLISHABLE_KEY='*) printf '%s\\n' sb_test_public_key ;;
-  *'ssh_host_ed25519_key.pub'*) printf '%s\\n' 'ssh-ed25519 AAAATESTHOSTKEY' ;;
+  *"cat > '/srv/runner/.runtime/benchmarks/realworld-api-v4/id_ed25519'"*) cat > "$FAKE_RUNNER_SSH/id_ed25519" ;;
+  *"cat > '/srv/runner/.runtime/benchmarks/realworld-api-v4/known_hosts'"*) cat > "$FAKE_RUNNER_SSH/known_hosts" ;;
+  *"cat > '/srv/runner/.runtime/benchmarks/realworld-api-v4/ssh_config'"*) cat > "$FAKE_RUNNER_SSH/ssh_config" ;;
 esac
 `);
     await writeFile(join(fakeBin, 'rsync'), `#!/bin/sh
@@ -125,21 +137,30 @@ echo "rsync: $*" >> "$FAKE_LOG"
     for (const name of ['node', 'ssh', 'rsync']) await chmod(join(fakeBin, name), 0o755);
     const result = spawnSync('sh', [new URL('../benchmark-sets/realworld-api-v4/shared/case.sh', import.meta.url).pathname, 'setup', 'supabase'], {
       encoding: 'utf8',
-      env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, FAKE_LOG: log, BAAS_RUNTIME_DIR: directory, BAAS_BENCH_V4_RUNNER_TARGET: 'runner.internal', BAAS_BENCH_V4_RUNNER_ROOT: '/srv/runner', BAAS_BENCH_V4_BACKEND_TARGET: 'controller@backend.internal', BAAS_BENCH_V4_BACKEND_ROOT: '/srv/backend', BAAS_BENCH_V4_BACKEND_PRIVATE_IP: '10.0.0.10', BAAS_BENCH_V4_BACKEND_DOCKER_SSH_TARGET: 'bench@10.0.0.10', BAAS_BENCH_V4_RUNNER_SSH_KEY_FILE: runnerKey },
+      env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, FAKE_LOG: log, FAKE_RUNNER_SSH: runnerSsh, REAL_NODE: process.execPath, BAAS_BENCH_V4_SSH_CONFIG: sshState.configPath, BAAS_RUNTIME_DIR: directory, BAAS_BENCH_V4_RUNNER_TARGET: 'runner.internal', BAAS_BENCH_V4_RUNNER_ROOT: '/srv/runner', BAAS_BENCH_V4_BACKEND_TARGET: 'controller@172.233.137.153', BAAS_BENCH_V4_BACKEND_ROOT: '/srv/backend', BAAS_BENCH_V4_BACKEND_PRIVATE_IP: '10.0.0.10', BAAS_BENCH_V4_BACKEND_DOCKER_SSH_TARGET: 'bench@10.0.0.10', BAAS_BENCH_V4_RUNNER_SSH_KEY_FILE: runnerKey },
     });
     assert.equal(result.status, 0, result.stderr);
     const calls = await readFile(log, 'utf8');
     assert.match(calls, /node: .*admin\.mjs/);
     assert.match(calls, /node: .*remote-config\.mjs/);
     assert.match(calls, /ssh: .*runner\.internal/);
-    assert.match(calls, /rsync: -a --delete --exclude node_modules .*runner\.internal:\/srv\/runner\/\.runtime\/benchmarks\/realworld-api-v4\//);
+    assert.match(calls, /rsync: -e ssh -F .* -a --delete --exclude node_modules .*runner\.internal:\/srv\/runner\/\.runtime\/benchmarks\/realworld-api-v4\//);
     assert.match(calls, /ssh: .*runner\.internal .*id_ed25519/);
     assert.match(calls, /ssh: .*runner\.internal .*known_hosts/);
+    assert.ok(calls.split('\n').filter(line => line.startsWith('ssh:')).every(line => line.startsWith(`ssh: -F ${sshState.configPath} `)));
+    assert.equal(calls.includes('~/.ssh/known_hosts'), false);
+    assert.match(calls, /ssh_config.*chmod 600/);
+    assert.ok(calls.indexOf('rsync:') < calls.indexOf("cat > '/srv/runner/.runtime/benchmarks/realworld-api-v4/known_hosts'"));
+    assert.match(await readFile(join(sshState.directory, 'runner_known_hosts'), 'utf8'), /^10\.0\.0\.10 ssh-ed25519 AAAATESTHOSTKEY/);
+    assert.equal(await readFile(join(runnerSsh, 'known_hosts'), 'utf8'), await readFile(join(sshState.directory, 'runner_known_hosts'), 'utf8'));
+    assert.equal(await readFile(join(runnerSsh, 'ssh_config'), 'utf8'), await readFile(join(sshState.directory, 'runner_ssh_config'), 'utf8'));
+    assert.equal(await readFile(join(runnerSsh, 'id_ed25519'), 'utf8'), 'runner-private-key');
+    for (const file of ['known_hosts', 'ssh_config', 'id_ed25519']) assert.equal((await stat(join(runnerSsh, file))).mode & 0o777, 0o600);
     assert.match(calls, /ssh: .*runner\.internal .*npm ci --ignore-scripts --prefix/);
     assert.match(calls, /remote-config\.mjs create supabase .* 10\.0\.0\.10 bench@10\.0\.0\.10/);
     assert.ok(calls.indexOf('admin.mjs') < calls.indexOf('remote-config.mjs create'));
     assert.ok(calls.indexOf('remote-config.mjs create') < calls.lastIndexOf('rsync:'));
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally { await sshState.cleanup(); await rm(directory, { recursive: true, force: true }); }
 });
 
 test('dataset streams exactly one million deterministic valid records', async () => {
@@ -596,33 +617,47 @@ test('remote runner config is platform-scoped and requires HTTPS endpoints', asy
   const { applyRemoteConfig } = await import('../benchmark-sets/realworld-api-v4/shared/lib/remote-config.mjs');
   const env = {};
   applyRemoteConfig({
-    schema_version: 1, platform: 'supabase', docker_ssh_target: 'backend-telemetry', ca_file: '/tmp/private-ca.crt',
+    schema_version: 1, platform: 'supabase', docker_ssh_target: 'backend-telemetry', ca_file: '/tmp/private-ca.crt', ssh_config_file: '/tmp/ssh_config',
     env: { SUPABASE_URL: 'https://supabase.baas.internal:8443', SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_test' },
   }, 'supabase', env);
   assert.equal(env.SUPABASE_URL, 'https://supabase.baas.internal:8443');
   assert.equal(env.NODE_EXTRA_CA_CERTS, '/tmp/private-ca.crt');
   assert.equal(env.BAAS_BENCH_DOCKER_SSH_TARGET, 'backend-telemetry');
-  assert.throws(() => applyRemoteConfig({ schema_version: 1, platform: 'supabase', docker_ssh_target: 'backend-telemetry', ca_file: '/tmp/private-ca.crt', env: { SUPABASE_URL: 'http://backend:8000' } }, 'supabase', {}), /HTTPS/);
-  assert.throws(() => applyRemoteConfig({ schema_version: 1, platform: 'directus', docker_ssh_target: 'backend-telemetry', ca_file: '/tmp/private-ca.crt', env: { SUPABASE_URL: 'https://backend' } }, 'directus', {}), /not allowed/);
+  assert.equal(env.BAAS_BENCH_V4_SSH_CONFIG, '/tmp/ssh_config');
+  assert.throws(() => applyRemoteConfig({ schema_version: 1, platform: 'supabase', docker_ssh_target: 'backend-telemetry', ca_file: '/tmp/private-ca.crt', ssh_config_file: '/tmp/ssh_config', env: { SUPABASE_URL: 'http://backend:8000' } }, 'supabase', {}), /HTTPS/);
+  assert.throws(() => applyRemoteConfig({ schema_version: 1, platform: 'directus', docker_ssh_target: 'backend-telemetry', ca_file: '/tmp/private-ca.crt', ssh_config_file: '/tmp/ssh_config', env: { SUPABASE_URL: 'https://backend' } }, 'directus', {}), /not allowed/);
   assert.throws(() => applyRemoteConfig({ schema_version: 1, platform: 'supabase', docker_ssh_target: 'backend;id', env: {} }, 'supabase', {}), /invalid SSH target/);
 });
 
 test('remote runner loads only restrictive config and confirms its CA exists', async () => {
   const { loadRemoteConfig } = await import('../benchmark-sets/realworld-api-v4/shared/lib/remote-run.mjs');
   const directory = await mkdtemp(join(tmpdir(), 'rw-remote-run-'));
+  const { createSshConfig, bindBackend, prepareRunnerSsh } = await import('../benchmark-sets/realworld-api-v4/shared/lib/ssh-config.mjs');
+  const sshState = await createSshConfig();
+  await writeFile(sshState.knownHostsPath, '172.233.137.153 ssh-ed25519 AAAATESTHOSTKEY\n');
+  await bindBackend(sshState.configPath, { publicIpv4: '172.233.137.153', privateIpv4: '10.0.0.10' });
+  const pin = await prepareRunnerSsh({ configPath: sshState.configPath, backendTarget: 'root@172.233.137.153', backendPrivateIp: '10.0.0.10', runnerRoot: directory });
+  const runnerSshDir = join(directory, '.runtime/benchmarks/realworld-api-v4');
+  await mkdir(runnerSshDir, { recursive: true, mode: 0o700 });
+  await cp(pin.configPath, join(runnerSshDir, 'ssh_config'));
+  await cp(pin.knownHostsPath, join(runnerSshDir, 'known_hosts'));
+  await writeFile(join(runnerSshDir, 'id_ed25519'), 'synthetic-only', { mode: 0o600 });
   const configPath = join(directory, 'remote-config.json');
   const caPath = join(directory, 'ca.pem');
   try {
     await writeFile(caPath, 'private-ca');
-    const config = { schema_version: 1, platform: 'directus', docker_ssh_target: 'backend-telemetry', ca_file: caPath, env: { DIRECTUS_URL: 'https://directus.baas.internal:8443' } };
+    const config = { schema_version: 1, platform: 'directus', docker_ssh_target: 'backend-telemetry', ca_file: caPath, ssh_config_file: join(runnerSshDir, 'ssh_config'), env: { DIRECTUS_URL: 'https://directus.baas.internal:8443' } };
     await writeFile(configPath, JSON.stringify(config), { mode: 0o600 });
     const env = {};
     await loadRemoteConfig(configPath, 'directus', env);
     assert.equal(env.DIRECTUS_URL, 'https://directus.baas.internal:8443');
     assert.equal(env.NODE_EXTRA_CA_CERTS, caPath);
+    assert.equal(env.BAAS_BENCH_V4_SSH_CONFIG, join(runnerSshDir, 'ssh_config'));
+    await chmod(join(runnerSshDir, 'ssh_config'), 0o644);
+    await assert.rejects(loadRemoteConfig(configPath, 'directus', {}), /0600/);
     await chmod(configPath, 0o644);
     await assert.rejects(loadRemoteConfig(configPath, 'directus', {}), /permissions must be 0600/);
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally { await sshState.cleanup(); await rm(directory, { recursive: true, force: true }); }
 });
 
 test('remote setup creates a private Supabase runner config from backend-only inputs', async () => {
@@ -634,6 +669,7 @@ test('remote setup creates a private Supabase runner config from backend-only in
     const created = await createRemoteConfig({ platform: 'supabase', runtime: createdDirectory, runnerRoot: '/opt/runner', backendAddress: '10.0.0.10', dockerSshTarget: 'bench@10.0.0.10', publishableKey: 'sb_test_public_key' });
     assert.deepEqual(created.env, { SUPABASE_URL: 'https://10.0.0.10:8443', SUPABASE_PUBLISHABLE_KEY: 'sb_test_public_key' });
     assert.equal(created.ca_file, '/opt/runner/.runtime/benchmarks/realworld-api-v4/ca.pem');
+    assert.equal(created.ssh_config_file, '/opt/runner/.runtime/benchmarks/realworld-api-v4/ssh_config');
     assert.equal((await stat(join(createdDirectory, 'remote-config.json'))).mode & 0o077, 0);
     await assert.rejects(createRemoteConfig({ platform: 'supabase', runtime: createdDirectory, runnerRoot: '/opt/runner', backendAddress: 'backend.example.test', dockerSshTarget: 'bench@10.0.0.10', publishableKey: 'key' }), /private IPv4/);
     await assert.rejects(createRemoteConfig({ platform: 'supabase', runtime: createdDirectory, runnerRoot: '/opt/runner', backendAddress: '203.0.113.10', dockerSshTarget: 'bench@10.0.0.10', publishableKey: 'key' }), /private IPv4/);
@@ -650,7 +686,7 @@ test('remote setup prepares a private runner config with only the Supabase publi
     await mkdir(join(repo, '.runtime/supabase/docker'), { recursive: true });
     await writeFile(join(runtime, 'ca.pem'), 'private-ca');
     await writeFile(join(repo, '.runtime/supabase/docker/.env'), 'SUPABASE_PUBLISHABLE_KEY=sb_test_public_key\nJWT_SECRET=not-forwarded\n');
-    await writeFile(join(runtime, 'remote-config.json'), `${JSON.stringify({ schema_version: 1, platform: 'supabase', docker_ssh_target: 'backend-telemetry', ca_file: '/opt/bench/.runtime/benchmarks/realworld-api-v4/ca.pem', env: { SUPABASE_URL: 'https://supabase.baas.internal:8443' } })}\n`, { mode: 0o600 });
+    await writeFile(join(runtime, 'remote-config.json'), `${JSON.stringify({ schema_version: 1, platform: 'supabase', docker_ssh_target: 'backend-telemetry', ca_file: '/opt/bench/.runtime/benchmarks/realworld-api-v4/ca.pem', ssh_config_file: '/opt/bench/.runtime/benchmarks/realworld-api-v4/ssh_config', env: { SUPABASE_URL: 'https://supabase.baas.internal:8443' } })}\n`, { mode: 0o600 });
     const config = await prepareRemoteConfig({ platform: 'supabase', runtime, repoRoot: repo, runnerRoot: '/opt/bench' });
     assert.equal(config.env.SUPABASE_PUBLISHABLE_KEY, 'sb_test_public_key');
     assert.equal('JWT_SECRET' in config.env, false);
@@ -665,7 +701,7 @@ test('Neon runner trusts the per-observation CA for its native proxy', async () 
   try {
     await mkdir(runtime, { recursive: true });
     await writeFile(join(runtime, 'ca.pem'), 'campaign-root-ca');
-    const config = { schema_version: 1, platform: 'neon', docker_ssh_target: 'backend-telemetry', ca_file: '/srv/runner/.runtime/benchmarks/realworld-api-v4/ca.pem', env: { NEON_PROXY_URL: 'https://neon.baas.internal:4444/sql', NEON_DATABASE_URL: 'postgresql://cloud_admin:secret@localhost:5432/postgres' } };
+    const config = { schema_version: 1, platform: 'neon', docker_ssh_target: 'backend-telemetry', ca_file: '/srv/runner/.runtime/benchmarks/realworld-api-v4/ca.pem', ssh_config_file: '/srv/runner/.runtime/benchmarks/realworld-api-v4/ssh_config', env: { NEON_PROXY_URL: 'https://neon.baas.internal:4444/sql', NEON_DATABASE_URL: 'postgresql://cloud_admin:secret@localhost:5432/postgres' } };
     await writeFile(join(runtime, 'remote-config.json'), JSON.stringify(config), { mode: 0o600 });
     const prepared = await prepareRemoteConfig({ platform: 'neon', runtime, repoRoot: directory, runnerRoot: '/srv/runner' });
     assert.equal(prepared.env.NEON_PROXY_CA, config.ca_file);
