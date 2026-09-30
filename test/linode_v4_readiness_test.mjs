@@ -59,7 +59,25 @@ test('Supabase admin preserves an SSH timeout through real bin/baas and cleanup'
   try {
     await mkdir(fakeBin);
     const log = join(root, 'ssh.log');
-    await writeFile(join(fakeBin, 'ssh'), '#!/bin/sh\nset -eu\nprintf "%s\\n" "$*" >> "$SSH_LOG"\ncount=$(cat "$SSH_COUNT" 2>/dev/null || echo 0)\ncount=$((count + 1))\nprintf "%s" "$count" > "$SSH_COUNT"\nif [ "$count" -eq 1 ]; then echo "ssh_dispatch_run_fatal: Connection to 192.0.2.8 port 22: Operation timed out" >&2; exit 255; fi\nexit 0\n', { mode: 0o755 });
+    await writeFile(join(fakeBin, 'ssh'), `#!/bin/sh
+set -eu
+printf '%s\\n' "$*" >> "$SSH_LOG"
+count=$(cat "$SSH_COUNT" 2>/dev/null || echo 0)
+count=$((count + 1))
+printf '%s' "$count" > "$SSH_COUNT"
+if [ "$count" -eq 1 ]; then
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = -E ]; then
+      node -e 'if ((require("node:fs").statSync(process.argv[1]).mode & 511) !== 384) process.exit(9)' "$2"
+      printf '%s\\n' 'debug1: Connection established.' 'debug1: SSH2_MSG_KEXINIT sent' 'debug1: private debug material synthetic-secret' 'ssh_dispatch_run_fatal: Connection to 192.0.2.8 port 22: Operation timed out' > "$2"
+      break
+    fi
+    shift
+  done
+  exit 255
+fi
+exit 0
+`, { mode: 0o755 });
     const environment = {
       ...process.env,
       PATH: `${fakeBin}:${process.env.PATH}`,
@@ -76,8 +94,12 @@ test('Supabase admin preserves an SSH timeout through real bin/baas and cleanup'
     let caught;
     try { await createSupabaseAdmin({ root: repositoryRoot, runtime, run }).setup(); }
     catch (error) { caught = error; }
-    assert.match(caught?.message ?? '', /bin\/baas command failed \[255\].*ssh_dispatch_run_fatal/);
+    assert.match(caught?.message ?? '', /bin\/baas command failed \[255\]/);
     assert.equal(caught.cleanupError, undefined, 'the second, successful cleanup must not replace the original SSH failure');
+    assert.match(caught.message, /V4 backend SSH stage=key-exchange reason=timeout exit=255 target=root@192\.0\.2\.8 started_at=/);
+    assert.doesNotMatch(caught.message, /synthetic-secret/);
+    const { readdir } = await import('node:fs/promises');
+    assert.deepEqual((await readdir(sshState.directory)).sort(), ['known_hosts', 'ssh_config']);
     const calls = (await readFile(log, 'utf8')).trim().split('\n');
     assert.equal(calls.length, 2, 'the failing setup attempt and compensating cleanup both traverse the real CLI');
     assert.ok(calls.every(call => call.includes(`-F ${sshState.configPath}`)));
@@ -86,6 +108,84 @@ test('Supabase admin preserves an SSH timeout through real bin/baas and cleanup'
     await sshState.cleanup();
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('V4 backend SSH diagnostics preserve exits and expose only allowlisted milestones', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'v4-ssh-milestones-'));
+  const state = await createSshConfig();
+  const cli = fileURLToPath(new URL('../bin/baas', import.meta.url));
+  try {
+    await writeFile(join(root, 'ssh'), `#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = -E ]; then printf '%s\\n' "$SSH_TRACE_TEXT" > "$2"; break; fi
+  shift
+done
+printf 'remote-output'
+exit "$SSH_EXIT"
+`, { mode: 0o755 });
+    const env = { ...process.env, PATH: `${root}:${process.env.PATH}`, BAAS_VERSION_PROFILE: 'realworld-api-v4', BAAS_BENCH_V4_BACKEND_TARGET: 'root@192.0.2.8', BAAS_BENCH_V4_BACKEND_ROOT: '/opt/baas-bench', BAAS_BENCH_V4_SSH_CONFIG: state.configPath };
+    for (const [trace, stage, reason, status] of [
+      ['ssh: connect to host 192.0.2.8 port 22: Operation timed out', 'unknown', 'timeout', 255],
+      ['debug1: SSH2_MSG_KEXINIT sent\nHost key verification failed.', 'key-exchange', 'host-key', 255],
+      ['debug1: SSH2_MSG_NEWKEYS received\nroot@192.0.2.8: Permission denied (publickey).', 'authentication', 'authentication', 255],
+      ['Authenticated to 192.0.2.8\ndebug1: Sending command: synthetic-secret', 'command-sent', 'unknown', 42],
+    ]) {
+      await assert.rejects(runCommand(cli, ['stop', 'supabase'], { env: { ...env, SSH_TRACE_TEXT: trace, SSH_EXIT: String(status) } }), error => {
+        assert.ok(error.message.includes(`[${status}]`));
+        assert.ok(error.message.includes(`stage=${stage} reason=${reason} exit=${status}`));
+        assert.doesNotMatch(error.message, /synthetic-secret/);
+        return true;
+      });
+    }
+    const success = await runCommand(cli, ['stop', 'supabase'], { env: { ...env, SSH_TRACE_TEXT: 'debug1: Sending command: synthetic-secret', SSH_EXIT: '0' } });
+    assert.equal(success.stdout, 'remote-output');
+    assert.equal(success.stderr, '');
+    const { readdir } = await import('node:fs/promises');
+    assert.deepEqual((await readdir(state.directory)).sort(), ['known_hosts', 'ssh_config']);
+  } finally { await state.cleanup(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('Supabase setup reports the failed seeding phase without replaying COPY or losing cleanup errors', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'v4-seed-failure-'));
+  const failure = new Error('SSH transport timeout');
+  const calls = [];
+  const run = async (_command, args, options) => {
+    calls.push({ args, input: options.input });
+    if (calls.length === 4) throw failure;
+    if (calls.length === 5) throw new Error('cleanup failed');
+    return { stdout: '', stderr: '' };
+  };
+  try {
+    const admin = createSupabaseAdmin({ root, runtime: join(root, 'runtime'), run });
+    await assert.rejects(admin.setup(), error => {
+      assert.match(error.message, new RegExp(`Supabase setup phase=copy:users copied_batches=1 copied_rows=1000 input_bytes=${Buffer.byteLength(calls[3].input)} elapsed_ms=\\d+: SSH transport timeout`));
+      assert.equal(error.cause, failure);
+      assert.equal(error.cleanupError, 'cleanup failed');
+      return true;
+    });
+    assert.equal(calls.length, 5, 'one failing COPY plus one compensating cleanup, never SQL replay');
+    assert.equal(calls[2].args.at(-1), calls[3].args.at(-1));
+    assert.notEqual(calls[2].input, calls[3].input, 'the failing COPY is the second, distinct batch');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('backend failure snapshots are bounded, read-only and avoid SQL, environment and container secrets', async () => {
+  const { captureHostFailure } = await import('../benchmark-sets/realworld-api-v4/shared/lib/host-telemetry.mjs');
+  let calls = 0;
+  const command = async (name, args, options) => {
+    calls++;
+    assert.equal(name, 'ssh');
+    assert.equal(args.at(-2), 'root@198.51.100.10');
+    assert.equal(options.timeoutMs, 10_000);
+    const script = args.at(-1);
+    for (const section of ['/proc/loadavg', '/proc/meminfo', 'sshd -T', 'journalctl -u ssh', 'journalctl -k', 'docker ps']) assert.ok(script.includes(section));
+    assert.doesNotMatch(script, /printenv|docker inspect|docker logs|psql|SELECT|LINODE_TOKEN/);
+    return { stdout: 'synthetic host snapshot' };
+  };
+  assert.equal(await captureHostFailure('root@198.51.100.10', command), 'synthetic host snapshot');
+  assert.equal(calls, 1, 'diagnostics must not retry SSH or database commands');
+  await assert.rejects(captureHostFailure('-bad-target', command), /invalid.*target/);
+  assert.equal(calls, 1);
 });
 
 test('real rsync deployment excludes the controller token and preserves external tools', async () => {

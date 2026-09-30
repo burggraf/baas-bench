@@ -462,7 +462,34 @@ remote_backend() {
   remote_command="cd $(shell_quote "$remote_root") && BAAS_RUNTIME_DIR=$(shell_quote "$remote_root/.runtime") BAAS_VERSION_PROFILE=$(shell_quote "$VERSION_PROFILE") BAAS_BENCH_V4_BACKEND_PRIVATE_IP=$(shell_quote "$remote_private_ip") BAAS_BENCH_V4_BACKEND_TARGET='' ./bin/baas"
   for argument do remote_command="$remote_command $(shell_quote "$argument")"; done
   node "$ROOT/benchmark-sets/realworld-api-v4/shared/lib/ssh-config.mjs" validate "${BAAS_BENCH_V4_SSH_CONFIG:-}" || exit 2
-  ssh -F "$BAAS_BENCH_V4_SSH_CONFIG" -o BatchMode=yes -o ConnectTimeout=15 "$remote_target" "$remote_command"
+  ssh_trace=$(mktemp "${BAAS_BENCH_V4_SSH_CONFIG%/*}/trace.XXXXXX") || return $?
+  trap 'rm -f "$ssh_trace"' 0
+  ssh_started=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+  if ssh -F "$BAAS_BENCH_V4_SSH_CONFIG" -v -E "$ssh_trace" -o BatchMode=yes -o ConnectTimeout=15 "$remote_target" "$remote_command"; then
+    remote_status=0
+  else
+    remote_status=$?
+    # Emit only fixed milestones/reasons, never verbose commands, keys or SQL.
+    ssh_stage=$(awk '
+      BEGIN { stage = "unknown"; reason = "unknown" }
+      /^debug1: Connection established\.$/ { stage = "tcp-connected" }
+      /^debug1: Remote protocol version / { stage = "banner-received" }
+      /^debug1: SSH2_MSG_KEXINIT sent/ { stage = "key-exchange" }
+      /^debug1: SSH2_MSG_NEWKEYS received/ { stage = "authentication" }
+      /^Authenticated to / { stage = "authenticated" }
+      /^debug1: Sending command:/ { stage = "command-sent" }
+      /^(ssh_dispatch_run_fatal: Connection|Connection |ssh: connect to host ).*([Oo]peration timed out|timed out)/ { reason = "timeout" }
+      /^Host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED/ { reason = "host-key" }
+      /^[^[:space:]]+@[^[:space:]]+: Permission denied/ { reason = "authentication" }
+      END { printf "%s reason=%s", stage, reason }
+    ' "$ssh_trace") || ssh_stage='unknown reason=diagnostics-failed'
+    printf 'V4 backend SSH stage=%s exit=%s target=%s started_at=%s\n' "$ssh_stage" "$remote_status" "$remote_target" "$ssh_started" >&2
+  fi
+  if ! rm -f "$ssh_trace"; then
+    echo 'V4 SSH trace cleanup failed' >&2
+    [ "$remote_status" -ne 0 ] || remote_status=1
+  fi
+  return "$remote_status"
 }
 
 if [ -n "${BAAS_BENCH_V4_BACKEND_TARGET:-}" ] && [ "$command" != list ]; then

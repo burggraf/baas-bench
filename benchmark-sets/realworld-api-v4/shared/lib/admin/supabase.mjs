@@ -9,19 +9,30 @@ function jsonRows(stdout) { try { return JSON.parse(stdout.trim()); } catch { th
 export function createSupabaseAdmin({ run = runCommand, root, runtime, seed = 42, password = `Bb-v3-${seed}-capacity!` }) {
   const command = join(root, 'bin/baas');
   const state = join(runtime, 'state');
-  async function psql(sql, args = []) { return run(command, [...psqlArgs, ...args], { input: sql, timeoutMs: 600_000 }); }
+  let inputBytes = 0;
+  async function psql(sql, args = []) { inputBytes = Buffer.byteLength(sql); return run(command, [...psqlArgs, ...args], { input: sql, timeoutMs: 600_000 }); }
   async function query(sql) { const result = await psql(sql, ['-At']); return result.stdout; }
   async function countRows(sql) { return (await query(sql)).trim().split('\n').filter(Boolean).map(line => { const [table, row_count] = line.split(/[\t|]/); return { table, row_count }; }); }
   async function verify() { await verifyMinimumCounts(countRows); }
   async function teardown() { await psql("DO $$ BEGIN IF to_regclass('auth.users') IS NOT NULL THEN TRUNCATE TABLE auth.users CASCADE; END IF; END $$; DROP SCHEMA IF EXISTS benchmark_fixture CASCADE; DROP SCHEMA IF EXISTS benchmark_auth CASCADE; DROP TABLE IF EXISTS public.activities, public.comments, public.tasks, public.projects, public.memberships, public.organizations, public.users CASCADE; DROP SCHEMA IF EXISTS benchmark_private CASCADE; DROP SCHEMA IF EXISTS benchmark_extensions CASCADE;"); }
   return {
     async setup() {
+      let phase = 'cleanup-baseline'; let copiedBatches = 0; let copiedRows = 0;
+      const started = performance.now();
       try {
         await teardown();
+        phase = 'schema';
         await psql(await loadSchemaText());
-        await copyDataset({ batches: seedDataset(seed, 1000), maxBatchSize: 1000, copy: async ({ statement, data }) => { await psql(`${data}\\.\n`, ['-c', statement]); } });
+        await copyDataset({ batches: seedDataset(seed, 1000), maxBatchSize: 1000, copy: async ({ table, statement, data, rowCount }) => {
+          phase = `copy:${table}`;
+          await psql(`${data}\\.\n`, ['-c', statement]);
+          copiedBatches++; copiedRows += rowCount;
+        } });
+        phase = 'auth-subjects';
         await psql(`UPDATE public.users SET auth_subject = id WHERE auth_subject IS NULL;`);
+        phase = 'application-passwords';
         await createNeonPasswords(async (sql, params) => psql(sql.replace('$1', `'${params[0].replaceAll("'", "''")}'`)), password);
+        phase = 'auth-users';
         await psql(`DO $$ BEGIN
   IF to_regclass('auth.users') IS NOT NULL THEN
     INSERT INTO auth.users (id, instance_id, aud, role, email, encrypted_password, email_confirmed_at, confirmation_token, recovery_token, email_change_token_new, email_change, created_at, updated_at, raw_app_meta_data, raw_user_meta_data)
@@ -32,11 +43,18 @@ export function createSupabaseAdmin({ run = runCommand, root, runtime, seed = 42
     UPDATE public.users u SET auth_subject = a.id::text FROM auth.users a WHERE a.email = u.email;
   END IF;
 END $$;`);
+        phase = 'fixture-snapshot';
         await createFixtureState(async sql => psql(sql));
+        phase = 'runtime-config';
         await mkdir(state, { recursive: true });
         await writeFile(join(state, 'supabase-config.json'), `${JSON.stringify({ seed, password })}\n`, { mode: 0o600 });
+        phase = 'verify-counts';
         await verifyExactCounts(countRows);
-      } catch (error) { try { await teardown(); } catch (cleanup) { error.cleanupError = cleanup?.message ?? String(cleanup); } throw error; }
+      } catch (cause) {
+        const error = new Error(`Supabase setup phase=${phase} copied_batches=${copiedBatches} copied_rows=${copiedRows} input_bytes=${inputBytes} elapsed_ms=${Math.round(performance.now() - started)}: ${cause?.message ?? cause}`, { cause });
+        try { await teardown(); } catch (cleanup) { error.cleanupError = cleanup?.message ?? String(cleanup); }
+        throw error;
+      }
     },
     verify,
     async reset() { await resetFixtureState(sql => psql(sql)); await verifyExactCounts(countRows); },

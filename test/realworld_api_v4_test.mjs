@@ -119,7 +119,11 @@ test('V4 setup validates the runner before seeding and syncs after admin setup',
     await writeFile(join(fakeBin, 'node'), `#!/bin/sh
 [ "$1" = -p ] && { echo 22; exit 0; }
 echo "node: $*" >> "$FAKE_LOG"
-case "$1" in *ssh-config.mjs) exec "$REAL_NODE" "$@" ;; esac
+case "$1" in
+  *ssh-config.mjs) exec "$REAL_NODE" "$@" ;;
+  *admin.mjs) if [ "\${FAKE_ADMIN_STATUS:-0}" -ne 0 ]; then echo 'synthetic admin failure' >&2; exit "$FAKE_ADMIN_STATUS"; fi ;;
+  *host-telemetry.mjs) exit "\${FAKE_DIAGNOSTICS_STATUS:-0}" ;;
+esac
 `);
     await writeFile(join(fakeBin, 'ssh'), `#!/bin/sh
 echo "ssh: $*" >> "$FAKE_LOG"
@@ -160,6 +164,18 @@ echo "rsync: $*" >> "$FAKE_LOG"
     assert.match(calls, /remote-config\.mjs create supabase .* 10\.0\.0\.10 bench@10\.0\.0\.10/);
     assert.ok(calls.indexOf('admin.mjs') < calls.indexOf('remote-config.mjs create'));
     assert.ok(calls.indexOf('remote-config.mjs create') < calls.lastIndexOf('rsync:'));
+    await writeFile(log, '');
+    const failed = spawnSync('sh', [new URL('../benchmark-sets/realworld-api-v4/shared/case.sh', import.meta.url).pathname, 'setup', 'supabase'], {
+      encoding: 'utf8',
+      env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, FAKE_LOG: log, REAL_NODE: process.execPath, FAKE_ADMIN_STATUS: '7', FAKE_DIAGNOSTICS_STATUS: '9', BAAS_BENCH_V4_SSH_CONFIG: sshState.configPath, BAAS_RUNTIME_DIR: directory, BAAS_BENCH_V4_BACKEND_TARGET: 'controller@172.233.137.153' },
+    });
+    assert.equal(failed.status, 7, 'failed diagnostics must not replace the administrative failure');
+    assert.match(failed.stderr, /synthetic admin failure/);
+    assert.match(failed.stderr, /V4 backend failure diagnostics failed/);
+    const failedCalls = await readFile(log, 'utf8');
+    assert.match(failedCalls, /host-telemetry\.mjs diagnose controller@172\.233\.137\.153/);
+    assert.ok(failedCalls.indexOf('admin.mjs') < failedCalls.indexOf('host-telemetry.mjs diagnose'));
+    assert.doesNotMatch(failedCalls, /remote-config\.mjs|rsync:/);
   } finally { await sshState.cleanup(); await rm(directory, { recursive: true, force: true }); }
 });
 

@@ -112,7 +112,15 @@ if [ "$action" = run ]; then
   validate_runner
   exec node "$runtime/lib/remote-execution.mjs" "$platform" "$phase" "$trial" "$output_dir" "$runner_target" "$runner_root"
 fi
-node "$runtime/lib/admin.mjs" "$action" "$platform" "$phase" "$trial" "$output_dir"
+if node "$runtime/lib/admin.mjs" "$action" "$platform" "$phase" "$trial" "$output_dir"; then
+  :
+else
+  admin_status=$?
+  if [ "$action" = setup ] && [ "$platform" = supabase ] && [ -n "$backend_target" ]; then
+    node "$runtime/lib/host-telemetry.mjs" diagnose "$backend_target" || echo 'V4 backend failure diagnostics failed' >&2
+  fi
+  exit "$admin_status"
+fi
 if [ "$action" = setup ]; then
   validate_runner
   if [ "$platform" = supabase ]; then prepare_supabase_runner_config; fi
