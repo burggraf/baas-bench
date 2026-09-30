@@ -243,10 +243,12 @@ test('pair provisioning writes inventory before resources and cleanup deletes on
   const directory = await mkdtemp(join(tmpdir(), 'linode-v4-pair-'));
   const path = join(directory, 'inventory.json');
   const { api, calls } = fakeApi();
+  const accountKey = 'ssh-ed25519 AAAATEST mba-m1';
+  const config = { ...provisionConfig, additionalSshPublicKeys: [accountKey] };
   const saved = [];
   const save = async inventory => { saved.push(structuredClone(inventory)); };
   try {
-    const inventory = await provisionPair({ api, config: provisionConfig, inventoryPath: path, save });
+    const inventory = await provisionPair({ api, config, inventoryPath: path, save });
     assert.equal(inventory.status, 'ready');
     assert.equal(inventory.resources.backend.id, 15);
     assert.equal(inventory.resources.runner.id, 16);
@@ -260,6 +262,9 @@ test('pair provisioning writes inventory before resources and cleanup deletes on
     assert.deepEqual(firewalls.find(body => body.label === inventory.labels.publicFirewall).rules.inbound[0].addresses.ipv4, ['203.0.113.4/32']);
     assert.deepEqual(firewalls.find(body => body.label === inventory.labels.vpcFirewall).rules.inbound[0].addresses.ipv4, ['10.203.0.11/32']);
     const backendCreate = calls.find(([method, path, body]) => method === 'POST' && path === '/v4/linode/instances' && body.label.endsWith('-backend'))[2];
+    assert.deepEqual(backendCreate.authorized_keys, [config.sshPublicKey, accountKey]);
+    const runnerCreate = calls.find(([method, path, body]) => method === 'POST' && path === '/v4/linode/instances' && body.label.endsWith('-runner'))[2];
+    assert.deepEqual(runnerCreate.authorized_keys, [config.sshPublicKey, accountKey]);
     assert.deepEqual(backendCreate.interfaces.map(iface => iface.default_route.ipv4), [true, false]);
     assert.equal(backendCreate.interfaces[1].vpc.ipv4.addresses[0].address, '10.203.0.10');
     assert.equal(backendCreate.network_helper, true);
@@ -323,16 +328,30 @@ test('pilot workflow profiles, deploys, runs, and cleans its ephemeral SSH crede
   let sshConfigPath;
   const key = { privateKey: '/tmp/pilot-key', publicKey: 'ssh-ed25519 AAAATEST pilot', cleanup: async () => { events.push('key-cleanup'); } };
   const result = await runPilot({
-    api: { request() {} }, config: { runId: 'obs-20260929-abc123', image: 'linode/ubuntu24.04' }, repositoryRoot: '/repo', bootstrapScriptPath: fileURLToPath(new URL('../services/linode/bootstrap.sh', import.meta.url)), inventoryPath: '/tmp/inventory.json', campaignPath: '/tmp/ledger.json', controllerCidr: '203.0.113.4/32', maxHours: 2, transferReserveUsd: 1, liveApproval: 'approval', deleteConfirmation: 'obs-20260929-abc123',
+    api: { request() {}, list: async path => { assert.equal(path, '/v4/profile/sshkeys'); return [{ label: 'mba-m1', ssh_key: 'ssh-ed25519 AAAATEST mba-m1' }]; } }, config: { runId: 'obs-20260929-abc123', image: 'linode/ubuntu24.04' }, repositoryRoot: '/repo', bootstrapScriptPath: fileURLToPath(new URL('../services/linode/bootstrap.sh', import.meta.url)), inventoryPath: '/tmp/inventory.json', campaignPath: '/tmp/ledger.json', controllerCidr: '203.0.113.4/32', maxHours: 2, transferReserveUsd: 1, liveApproval: 'approval', deleteConfirmation: 'obs-20260929-abc123',
     selectProfile: async () => ({ region: 'us-lax', type: { id: 'g6-dedicated-4', transfer: 5000 }, hourlyUsd: .1 }), createKey: async () => key,
     startAgent: async () => ({ env: { SSH_AUTH_SOCK: '/tmp/agent' }, stop: async () => { events.push('agent-stop'); } }),
     deploy: async ({ inventory, runnerKeyFile }) => { events.push('deploy'); assert.equal(runnerKeyFile, key.privateKey); return { environment: { DEPLOYED: inventory.resources.backend.privateIpv4, BAAS_BENCH_V4_SSH_CONFIG: '/stale/ssh_config' }, hostProvenance: { backend: { dockerService: 'active' }, runner: { dockerService: 'active' } } }; },
     executeBench: async ({ environment }) => { sshConfigPath = environment.BAAS_BENCH_V4_SSH_CONFIG; assert.equal((await stat(sshConfigPath)).mode & 0o777, 0o600); events.push('run'); assert.equal(environment.DEPLOYED, '10.203.0.10'); return '/tmp/bundle'; }, verifyBench: async result => { events.push(`verify:${result}`); },
-    observe: async options => { assert.equal(options.transferReserveUsd, 0); const inventory = { status: 'bootstrapping', resources: { backend: { publicIpv4: '172.233.137.153', privateIpv4: '10.203.0.10' } } }; await options.bootstrap({ inventory }); assert.equal(inventory.hardware_profile.type.id, 'g6-dedicated-4'); assert.equal(inventory.host_provenance.runner.dockerService, 'active'); return { result: await options.run({ inventory, signal: new AbortController().signal }) }; },
+    observe: async options => { assert.equal(options.transferReserveUsd, 0); assert.deepEqual(options.config.additionalSshPublicKeys, ['ssh-ed25519 AAAATEST mba-m1']); const inventory = { status: 'bootstrapping', resources: { backend: { publicIpv4: '172.233.137.153', privateIpv4: '10.203.0.10' } } }; await options.bootstrap({ inventory }); assert.equal(inventory.hardware_profile.type.id, 'g6-dedicated-4'); assert.equal(inventory.host_provenance.runner.dockerService, 'active'); return { result: await options.run({ inventory, signal: new AbortController().signal }) }; },
   });
   assert.equal(result.profile.region, 'us-lax');
   assert.deepEqual(events, ['deploy', 'run', 'agent-stop', 'key-cleanup']);
   await assert.rejects(stat(sshConfigPath), { code: 'ENOENT' });
+});
+
+test('pilot fails before creating its run key when the named Linode SSH key is absent', async () => {
+  const { runPilot } = await import('../benchmark-sets/realworld-api-v4/shared/lib/pilot-workflow.mjs');
+  let keyCreated = false;
+  await assert.rejects(runPilot({
+    api: { request() {}, list: async () => [] },
+    config: { runId: 'obs-20260929-abc123', image: 'linode/ubuntu24.04' },
+    repositoryRoot: '/repo', bootstrapScriptPath: '/repo/services/linode/bootstrap.sh',
+    inventoryPath: '/tmp/inventory.json', campaignPath: '/tmp/ledger.json', controllerCidr: '203.0.113.4/32',
+    selectProfile: async () => ({ region: 'us-lax', type: { id: 'g6-dedicated-4', transfer: 5000 }, hourlyUsd: .1 }),
+    createKey: async () => { keyCreated = true; throw new Error('must not generate a run key'); },
+  }), /Linode account SSH key "mba-m1" is missing or ambiguous/);
+  assert.equal(keyCreated, false);
 });
 
 test('observation reserves campaign budget, verifies evidence before cleanup, then notifies', async () => {
@@ -517,7 +536,7 @@ for (const failure of [false, true]) {
     const primary = new Error('primary observation failure');
     const agentError = new Error('agent cleanup failed');
     let keyCleaned = false;
-    await assert.rejects(runPilot({ api: { request() {} }, config: { runId: 'obs-test123' }, repositoryRoot: '/repo', bootstrapScriptPath: '/script', controllerCidr: '203.0.113.4/32',
+    await assert.rejects(runPilot({ api: { request() {}, list: async () => [{ label: 'mba-m1', ssh_key: 'ssh-ed25519 AAAATEST mba-m1' }] }, config: { runId: 'obs-test123' }, repositoryRoot: '/repo', bootstrapScriptPath: '/script', controllerCidr: '203.0.113.4/32',
       selectProfile: async () => ({ type: { transfer: 1 } }),
       createKey: async () => ({ cleanup: async () => { keyCleaned = true; if (failure) throw new Error('key cleanup failed'); } }),
       startAgent: async () => ({ stop: async () => { throw agentError; } }),
@@ -649,7 +668,7 @@ test('pilot preserves primary and all cleanup failures while attempting private 
   const primary = new Error('observation failed');
   let cleaned = false;
   try {
-    await assert.rejects(runPilot({ api: { request() {} }, config: { runId: 'obs-test123' }, repositoryRoot: '/repo', bootstrapScriptPath: '/script', controllerCidr: '203.0.113.4/32',
+    await assert.rejects(runPilot({ api: { request() {}, list: async () => [{ label: 'mba-m1', ssh_key: 'ssh-ed25519 AAAATEST mba-m1' }] }, config: { runId: 'obs-test123' }, repositoryRoot: '/repo', bootstrapScriptPath: '/script', controllerCidr: '203.0.113.4/32',
       selectProfile: async () => ({ type: { transfer: 1 } }),
       createKey: async () => ({ cleanup: async () => { throw new Error('key cleanup failed'); } }),
       createSshConfig: async () => ({ ...state, cleanup: async () => { cleaned = true; await state.cleanup(); throw new Error('SSH state cleanup failed'); } }),

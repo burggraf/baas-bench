@@ -7,6 +7,7 @@ import { hostname } from 'node:os';
 const API_BASE = 'https://api.linode.com';
 export const LIVE_APPROVAL_PHRASE = 'I_APPROVE_V4_LINODE_ACTIONS_UP_TO_USD_30';
 const REGIONS = ['us-west', 'us-lax', 'us-sea'];
+const validSshPublicKey = value => typeof value === 'string' && /^ssh-(?:ed25519|rsa) [A-Za-z0-9+/=]+(?: [^\r\n\0]+)?$/.test(value);
 const RESOURCES = {
   vpc: { path: '/v4/vpcs', endpoint: id => `/v4/vpcs/${id}` },
   publicFirewall: { path: '/v4/networking/firewalls', endpoint: id => `/v4/networking/firewalls/${id}` },
@@ -206,7 +207,8 @@ function privateV4Pair(cidr) {
 
 function validateProvisionConfig(config) {
   if (!config || typeof config !== 'object' || !/^[a-z0-9][a-z0-9-]{5,40}$/.test(config.runId ?? '') || !/^[a-z0-9][a-z0-9.-]*$/.test(config.region ?? '') || !/^[a-z0-9][a-z0-9.-]*$/.test(config.type ?? '') || !/^linode\/[a-z0-9.-]+$/.test(config.image ?? '')) throw new Error('invalid V4 provision profile');
-  if (!validCidr(config.controllerCidr, true) || !validCidr(config.subnetCidr) || !/^ssh-(?:ed25519|rsa) [A-Za-z0-9+/=]+(?: [^\r\n\0]+)?$/.test(config.sshPublicKey ?? '')) throw new Error('invalid V4 network or SSH configuration');
+  const additionalKeys = config.additionalSshPublicKeys ?? [];
+  if (!validCidr(config.controllerCidr, true) || !validCidr(config.subnetCidr) || !validSshPublicKey(config.sshPublicKey) || !Array.isArray(additionalKeys) || !additionalKeys.every(validSshPublicKey)) throw new Error('invalid V4 network or SSH configuration');
 }
 
 function errorText(error) { return String(error?.message ?? error).slice(0, 300); }
@@ -253,7 +255,7 @@ function resourcePayloads(config, runTag) {
     booted: true,
     network_helper: true,
     interface_generation: 'linode',
-    authorized_keys: [config.sshPublicKey],
+    authorized_keys: [...new Set([config.sshPublicKey, ...(config.additionalSshPublicKeys ?? [])])],
     tags: ['baas-bench-v4', runTag],
     interfaces: [
       { public: { ipv4: { addresses: [{ address: 'auto', primary: true }] } }, default_route: { ipv4: true }, firewall_id: publicFirewallId },

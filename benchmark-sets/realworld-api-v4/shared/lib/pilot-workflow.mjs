@@ -18,6 +18,9 @@ export async function runPilot(options) {
   const verifyBench = options.verifyBench ?? verifyPilotBundle;
   if (typeof executeBench !== 'function' || typeof verifyBench !== 'function') throw new Error('V4 pilot requires benchmark execution and verification');
   const profile = await selectProfile(api);
+  if (typeof api.list !== 'function') throw new Error('Linode account SSH key listing is unavailable');
+  const accountKeys = (await api.list('/v4/profile/sshkeys')).filter(item => item?.label === 'mba-m1');
+  if (accountKeys.length !== 1 || typeof accountKeys[0].ssh_key !== 'string') throw new Error('Linode account SSH key "mba-m1" is missing or ambiguous');
   const transferReserve = Number(profile.type.transfer) > 0 ? 0 : transferReserveUsd;
   const key = await createKey();
   let agent;
@@ -31,7 +34,7 @@ export async function runPilot(options) {
     const outcome = await observe({
       ...options,
       api,
-      config: { ...config, region: profile.region, type: profile.type.id, controllerCidr, sshPublicKey: key.publicKey },
+      config: { ...config, region: profile.region, type: profile.type.id, controllerCidr, sshPublicKey: key.publicKey, additionalSshPublicKeys: [accountKeys[0].ssh_key] },
       inventoryPath, campaignPath, hourlyUsd: profile.hourlyUsd, maxHours, transferReserveUsd: transferReserve, liveApproval, deleteConfirmation,
       bootstrap: async ({ inventory, signal }) => {
         await bindBackend(sshState.configPath, inventory.resources.backend);
