@@ -692,6 +692,18 @@ test('remote setup creates a private Supabase runner config from backend-only in
   } finally { await rm(createdDirectory, { recursive: true, force: true }); }
 });
 
+test('remote-config CLI reads the Supabase publishable key from stdin', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'rw-config-stdin-'));
+  const cli = fileURLToPath(new URL('../benchmark-sets/realworld-api-v4/shared/lib/remote-config.mjs', import.meta.url));
+  try {
+    const { runCommand } = await import('../benchmark-sets/realworld-api-v4/shared/lib/command.mjs');
+    await runCommand(process.execPath, [cli, 'create', 'supabase', root, '/opt/runner', '10.0.0.10', 'bench@10.0.0.10'], { input: 'sb_test_public_key\n', timeoutMs: 5_000 });
+    const config = JSON.parse(await readFile(join(root, 'remote-config.json'), 'utf8'));
+    assert.equal(config.env.SUPABASE_PUBLISHABLE_KEY, 'sb_test_public_key');
+    assert.equal((await stat(join(root, 'remote-config.json'))).mode & 0o077, 0);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test('remote setup prepares a private runner config with only the Supabase public key', async () => {
   const { prepareRemoteConfig } = await import('../benchmark-sets/realworld-api-v4/shared/lib/remote-config.mjs');
   const directory = await mkdtemp(join(tmpdir(), 'rw-remote-config-'));

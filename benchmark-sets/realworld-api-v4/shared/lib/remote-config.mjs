@@ -52,6 +52,16 @@ export function applyRemoteConfig(config, platform, env = process.env) {
   return env;
 }
 
+async function readStandardInput(maxBytes = 16_384) {
+  let value = '';
+  process.stdin.setEncoding('utf8');
+  for await (const chunk of process.stdin) {
+    value += chunk;
+    if (Buffer.byteLength(value) > maxBytes) throw new Error('stdin input exceeds the size limit');
+  }
+  return value;
+}
+
 async function readSupabasePublicKey(path) {
   const lines = (await readFile(path, 'utf8')).split('\n').map(line => line.endsWith('\r') ? line.slice(0, -1) : line);
   const matches = lines.filter(line => line.startsWith('SUPABASE_PUBLISHABLE_KEY='));
@@ -105,7 +115,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     task = prepareRemoteConfig({ platform, runtime, repoRoot, runnerRoot });
   } else if (action === 'create' && args.length === 5) {
     const [platform, runtime, runnerRoot, backendAddress, dockerSshTarget] = args;
-    task = readFile(0, 'utf8').then(publishableKey => createRemoteConfig({ platform, runtime, runnerRoot, backendAddress, dockerSshTarget, publishableKey: publishableKey.trim() }));
+    task = readStandardInput().then(publishableKey => createRemoteConfig({ platform, runtime, runnerRoot, backendAddress, dockerSshTarget, publishableKey: publishableKey.trim() }));
   } else {
     console.error('usage: remote-config.mjs {prepare <platform> <runtime> <repository-root> <runner-root>|create <platform> <runtime> <runner-root> <backend-private-ip> <backend-docker-ssh-target> < publishable-key}');
     process.exitCode = 2;
