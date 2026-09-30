@@ -5,6 +5,7 @@ import { accessSync, constants, readFileSync, statSync } from 'node:fs';
 import { chmod, cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 
 const setRoot = new URL('../benchmark-sets/realworld-api-v4/', import.meta.url);
@@ -44,7 +45,11 @@ test('real-world API capacity scaffold declares its lifecycle and metrics', () =
 
 test('V4 pins current platform and SDK releases without changing V3 pins', () => {
   const versions = text('versions.env');
-  for (const pin of ['TRAILBASE_VERSION=0.34.1', 'APPWRITE_VERSION=2.3.0', 'DIRECTUS_VERSION=12.4.1', 'POCKETBASE_VERSION=0.40.4', 'POSTGRES_VERSION=16.15-bookworm']) assert.ok(versions.includes(`${pin}\n`), pin);
+  for (const pin of ['NODE_VERSION=22.23.1', 'DOCKER_VERSION=29.5.0', 'DOCKER_COMPOSE_VERSION=5.1.2', 'SUPABASE_ENVOY_IMAGE=envoyproxy/envoy@sha256:57e14a549d7bd43c8d3f6d03e8cfa653e037d4b38e133acd9b54f38c524401b4', 'TRAILBASE_VERSION=0.34.1', 'APPWRITE_VERSION=2.3.0', 'DIRECTUS_VERSION=12.4.1', 'POCKETBASE_VERSION=0.40.4', 'POSTGRES_VERSION=16.15-bookworm']) assert.ok(versions.includes(`${pin}\n`), pin);
+  const bootstrap = text('../services/linode/bootstrap.sh', new URL('../', setRoot));
+  for (const pin of ['NODE_VERSION=22.23.1', 'DOCKER_VERSION=29.5.0', 'COMPOSE_VERSION=5.1.2', 'git iproute2 iptables openssh-client openssl rsync', 'sha256sum -c -', 'systemctl is-active --quiet docker', 'docker info', 'journalctl -u docker', 'docker compose version --short']) assert.ok(bootstrap.includes(pin), pin);
+  assert.ok(bootstrap.includes('tar -xJf "$work/node.tar.xz" -C /opt/baas-bench-tools'));
+  assert.ok(!bootstrap.includes('/opt/baas-bench/node-v'));
   assert.ok(text('versions.env', new URL('../../', setRoot)).includes('TRAILBASE_VERSION=0.33.10\n'));
   assert.ok(text('cases/trailbase/javascript-sdk/case.conf', benchmarkRoot).includes('client=trailbase@0.14.1\n'));
   assert.ok(text('shared/pocketbase-go/go.mod').includes('github.com/pocketbase/pocketbase v0.40.4'));
@@ -96,31 +101,44 @@ test('V4 setup validates the runner before seeding and syncs after admin setup',
   const runtime = join(directory, 'benchmarks/realworld-api-v4');
   const fakeBin = join(directory, 'bin');
   const log = join(directory, 'calls.log');
+  const runnerKey = join(directory, 'runner-id_ed25519');
   try {
     await mkdir(join(runtime, 'node_modules'), { recursive: true });
     await mkdir(fakeBin);
     await writeFile(join(runtime, 'package-lock.json'), text('shared/package-lock.json'));
+    await writeFile(runnerKey, 'runner-private-key', { mode: 0o600 });
     await writeFile(join(fakeBin, 'node'), `#!/bin/sh
 [ "$1" = -p ] && { echo 22; exit 0; }
 echo "node: $*" >> "$FAKE_LOG"
 `);
-    for (const name of ['ssh', 'rsync']) await writeFile(join(fakeBin, name), `#!/bin/sh
-echo "${name}: $*" >> "$FAKE_LOG"
+    await writeFile(join(fakeBin, 'ssh'), `#!/bin/sh
+echo "ssh: $*" >> "$FAKE_LOG"
+case "$*" in
+  *'ca.pem'*) printf '%s\\n' private-ca ;;
+  *'SUPABASE_PUBLISHABLE_KEY='*) printf '%s\\n' sb_test_public_key ;;
+  *'ssh_host_ed25519_key.pub'*) printf '%s\\n' 'ssh-ed25519 AAAATESTHOSTKEY' ;;
+esac
+`);
+    await writeFile(join(fakeBin, 'rsync'), `#!/bin/sh
+echo "rsync: $*" >> "$FAKE_LOG"
 `);
     for (const name of ['node', 'ssh', 'rsync']) await chmod(join(fakeBin, name), 0o755);
     const result = spawnSync('sh', [new URL('../benchmark-sets/realworld-api-v4/shared/case.sh', import.meta.url).pathname, 'setup', 'supabase'], {
       encoding: 'utf8',
-      env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, FAKE_LOG: log, BAAS_RUNTIME_DIR: directory, BAAS_BENCH_V4_RUNNER_TARGET: 'runner.internal', BAAS_BENCH_V4_RUNNER_ROOT: '/srv/runner' },
+      env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, FAKE_LOG: log, BAAS_RUNTIME_DIR: directory, BAAS_BENCH_V4_RUNNER_TARGET: 'runner.internal', BAAS_BENCH_V4_RUNNER_ROOT: '/srv/runner', BAAS_BENCH_V4_BACKEND_TARGET: 'controller@backend.internal', BAAS_BENCH_V4_BACKEND_ROOT: '/srv/backend', BAAS_BENCH_V4_BACKEND_PRIVATE_IP: '10.0.0.10', BAAS_BENCH_V4_BACKEND_DOCKER_SSH_TARGET: 'bench@10.0.0.10', BAAS_BENCH_V4_RUNNER_SSH_KEY_FILE: runnerKey },
     });
     assert.equal(result.status, 0, result.stderr);
     const calls = await readFile(log, 'utf8');
     assert.match(calls, /node: .*admin\.mjs/);
     assert.match(calls, /node: .*remote-config\.mjs/);
     assert.match(calls, /ssh: .*runner\.internal/);
-    assert.match(calls, /rsync: .*runner\.internal:\/srv\/runner\/\.runtime\/benchmarks\/realworld-api-v4\//);
-    assert.ok(calls.indexOf('remote-config.mjs') < calls.indexOf('admin.mjs'));
-    assert.ok(calls.indexOf('admin.mjs') < calls.indexOf('ssh:'));
-    assert.ok(calls.indexOf('ssh:') < calls.indexOf('rsync:'));
+    assert.match(calls, /rsync: -a --delete --exclude node_modules .*runner\.internal:\/srv\/runner\/\.runtime\/benchmarks\/realworld-api-v4\//);
+    assert.match(calls, /ssh: .*runner\.internal .*id_ed25519/);
+    assert.match(calls, /ssh: .*runner\.internal .*known_hosts/);
+    assert.match(calls, /ssh: .*runner\.internal .*npm ci --ignore-scripts --prefix/);
+    assert.match(calls, /remote-config\.mjs create supabase .* 10\.0\.0\.10 bench@10\.0\.0\.10/);
+    assert.ok(calls.indexOf('admin.mjs') < calls.indexOf('remote-config.mjs create'));
+    assert.ok(calls.indexOf('remote-config.mjs create') < calls.lastIndexOf('rsync:'));
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -462,6 +480,98 @@ test('resources select compose project containers and sum docker stats', async (
   assert.equal(stats.memoryBytes, 2 * 1024 * 1024);
 });
 
+test('pilot evidence verifier requires a complete V4 Supabase lifecycle bundle', async () => {
+  const { verifyPilotBundle } = await import('../benchmark-sets/realworld-api-v4/shared/lib/bench-execution.mjs');
+  const directory = await mkdtemp(join(tmpdir(), 'rw-pilot-bundle-'));
+  try {
+    await writeFile(join(directory, 'run.json'), JSON.stringify({ status: 'complete', set: 'realworld-api-v4', platform: 'supabase', variant: 'javascript-sdk', lifecycle: { start: 'complete', setup: 'complete', teardown: 'complete', stop: 'complete' } }));
+    assert.equal(await verifyPilotBundle(directory), directory);
+    await writeFile(join(directory, 'run.json'), JSON.stringify({ status: 'failed' }));
+    await assert.rejects(verifyPilotBundle(directory), /lifecycle is incomplete/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('ephemeral SSH agent state is parsed, scoped, and cleaned up', async () => {
+  const { startSshAgent } = await import('../benchmark-sets/realworld-api-v4/shared/lib/ephemeral-ssh.mjs');
+  const calls = [];
+  const agent = await startSshAgent({ privateKey: '/tmp/ephemeral-key', command: async (name, args, options = {}) => {
+    calls.push({ name, args, options });
+    if (name === 'ssh-agent' && args[0] === '-s') return { stdout: 'SSH_AUTH_SOCK=/tmp/agent.sock; export SSH_AUTH_SOCK;\nSSH_AGENT_PID=123; export SSH_AGENT_PID;\n' };
+    return { stdout: '' };
+  } });
+  assert.equal(agent.env.SSH_AUTH_SOCK, '/tmp/agent.sock');
+  assert.equal(calls[1].name, 'ssh-add');
+  await agent.stop();
+  assert.deepEqual(calls.at(-1).args, ['-k']);
+  await assert.rejects(startSshAgent({ privateKey: 'relative' }), /invalid SSH private key path/);
+});
+
+test('host bootstrap sends only the pinned script to validated fresh hosts', async () => {
+  const { bootstrapHosts, readBootstrapScript } = await import('../benchmark-sets/realworld-api-v4/shared/lib/remote-bootstrap.mjs');
+  const script = await readBootstrapScript(fileURLToPath(new URL('../services/linode/bootstrap.sh', import.meta.url)));
+  const calls = [];
+  await bootstrapHosts({ backendTarget: 'root@198.51.100.10', runnerTarget: 'root@198.51.100.11', script, command: async (name, args, options) => { calls.push({ name, args, options }); return { stdout: '' }; } });
+  assert.deepEqual(calls.map(call => call.name), ['ssh', 'ssh', 'ssh', 'ssh']);
+  assert.deepEqual(calls.map(call => call.args.at(-1)), ['true', 'true', 'sh -s', 'sh -s']);
+  assert.ok(calls.slice(2).every(call => call.options.input === script && call.options.timeoutMs === 600_000));
+  await assert.rejects(bootstrapHosts({ backendTarget: 'root@host;id', runnerTarget: 'root@198.51.100.11', script, command: async () => {} }), /invalid host bootstrap/);
+});
+
+test('observation deployment bootstraps both hosts and transfers no local runtime or results', async () => {
+  const { bootstrapAndDeploy } = await import('../benchmark-sets/realworld-api-v4/shared/lib/observation-workflow.mjs');
+  const calls = [];
+  const env = await bootstrapAndDeploy({
+    inventory: { resources: { backend: { publicIpv4: '198.51.100.10', privateIpv4: '10.203.0.10' }, runner: { publicIpv4: '198.51.100.11', privateIpv4: '10.203.0.11' } } },
+    repositoryRoot: '/opt/controller/baas-bench', backendRoot: '/opt/baas-bench', runnerRoot: '/opt/baas-bench', runnerKeyFile: '/opt/controller/key', script: '#!/bin/sh\nexit 0\n',
+    bootstrap: async value => { calls.push(['bootstrap', value]); },
+    healthProbe: async target => ({ target, dockerService: 'active' }),
+    command: async (name, args) => { calls.push([name, args]); return { stdout: '' }; },
+  });
+  assert.equal(calls[0][0], 'bootstrap');
+  const rsync = calls.filter(([name]) => name === 'rsync');
+  assert.equal(rsync.length, 2);
+  assert.ok(rsync.every(([, args]) => ['.git', '.runtime', '.results', 'results', 'node_modules', '.linode.env'].every(exclusion => args.includes(exclusion))));
+  assert.equal(env.environment.BAAS_BENCH_V4_BACKEND_DOCKER_SSH_TARGET, 'root@10.203.0.10');
+  assert.equal(env.environment.BAAS_BENCH_V4_RUNNER_SSH_KEY_FILE, '/opt/controller/key');
+  assert.deepEqual(env.hostProvenance, { backend: { target: 'root@198.51.100.10', dockerService: 'active' }, runner: { target: 'root@198.51.100.11', dockerService: 'active' } });
+  await assert.rejects(bootstrapAndDeploy({ inventory: { resources: { backend: {}, runner: {} } }, repositoryRoot: '/repo', backendRoot: '/backend', runnerRoot: '/runner', runnerKeyFile: '/key', script: '#!/bin/sh\n', command: async () => {} }), /missing host IP/);
+});
+
+test('host provenance requires active Docker and records fixed host facts', async () => {
+  const { inspectHost } = await import('../benchmark-sets/realworld-api-v4/shared/lib/observation-workflow.mjs');
+  const health = await inspectHost('root@198.51.100.10', async () => ({ stdout: 'architecture\tx86_64\nkernel\t6.8.0-1\nnode\t22.23.1\ndocker\t29.5.0\ncompose\t5.1.2\ndisk_kib\t1048576\nfree_kib\t524288\n' }));
+  assert.deepEqual(health, { architecture: 'x86_64', kernel: '6.8.0-1', node: '22.23.1', docker: '29.5.0', compose: '5.1.2', diskKiB: 1048576, freeKiB: 524288, dockerService: 'active' });
+  await assert.rejects(inspectHost('root@198.51.100.10', async () => ({ stdout: 'architecture\tx86_64\n' })), /invalid host provenance output/);
+});
+
+test('host telemetry records CPU steal, memory/swap, and non-loopback network counters', async () => {
+  const { parseHostTelemetry, sampleRemoteHost } = await import('../benchmark-sets/realworld-api-v4/shared/lib/host-telemetry.mjs');
+  const fixture = { stat: 'cpu  1 2 3 4 5 6 7 8 0 0\n', meminfo: 'MemTotal:       100 kB\nMemAvailable:   40 kB\nSwapTotal:      20 kB\nSwapFree:       10 kB\n', netdev: 'Inter-| Receive | Transmit\n face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\n lo: 10 0 0 9 0 0 0 0 10 0 0 9 0 0 0 0\n eth0: 100 0 0 2 0 0 0 0 200 0 0 3 0 0 0 0\n' };
+  const local = parseHostTelemetry(fixture);
+  assert.equal(local.cpu.steal, 8);
+  assert.equal(local.memory.availableBytes, 40 * 1024);
+  assert.deepEqual(local.network, { rxBytes: 100, txBytes: 200, rxDrops: 2, txDrops: 3, interfaces: 1 });
+  const calls = [];
+  const remote = await sampleRemoteHost('bench@10.0.0.10', async (name, args) => { calls.push([name, args]); return { stdout: `${fixture.stat}\x1e${fixture.meminfo}\x1e${fixture.netdev}` }; });
+  assert.deepEqual(remote, local);
+  assert.equal(calls[0][0], 'ssh');
+  await assert.rejects(sampleRemoteHost('bad;host'), /invalid host telemetry SSH target/);
+});
+
+test('resource collection invalidates missing runner or backend host telemetry', async () => {
+  const { collectResources } = await import('../benchmark-sets/realworld-api-v4/shared/lib/resources.mjs');
+  let now = 0;
+  const result = await collectResources({
+    samples: 1, intervalMs: 1_000, sleep: async () => {}, now: () => (now += 1_000),
+    cpuUsage: () => ({ user: 0, system: 0 }), memoryUsage: () => ({ rss: 1 }),
+    monitorFactory: () => ({ enable() {}, disable() {}, reset() {}, percentile: () => 0, max: 0 }),
+    runnerHostProbe: async () => ({ cpu: {}, memory: {}, network: {} }), backendHostProbe: async () => { throw new Error('unreachable'); },
+  });
+  assert.deepEqual(result.samples[0].hosts.runner, { cpu: {}, memory: {}, network: {} });
+  assert.equal(result.valid, false);
+  assert.match(result.validityReasons[0], /backend host telemetry failed: unreachable/);
+});
+
 test('remote container probes use a validated SSH target for backend telemetry', async () => {
   const { discoverPlatformContainers, collectResources } = await import('../benchmark-sets/realworld-api-v4/shared/lib/resources.mjs');
   const calls = [];
@@ -513,6 +623,21 @@ test('remote runner loads only restrictive config and confirms its CA exists', a
     await chmod(configPath, 0o644);
     await assert.rejects(loadRemoteConfig(configPath, 'directus', {}), /permissions must be 0600/);
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('remote setup creates a private Supabase runner config from backend-only inputs', async () => {
+  const { createRemoteConfig, prepareRemoteConfig } = await import('../benchmark-sets/realworld-api-v4/shared/lib/remote-config.mjs');
+  const createdDirectory = await mkdtemp(join(tmpdir(), 'rw-created-remote-config-'));
+  try {
+    await mkdir(createdDirectory, { recursive: true });
+    await writeFile(join(createdDirectory, 'ca.pem'), 'private-ca');
+    const created = await createRemoteConfig({ platform: 'supabase', runtime: createdDirectory, runnerRoot: '/opt/runner', backendAddress: '10.0.0.10', dockerSshTarget: 'bench@10.0.0.10', publishableKey: 'sb_test_public_key' });
+    assert.deepEqual(created.env, { SUPABASE_URL: 'https://10.0.0.10:8443', SUPABASE_PUBLISHABLE_KEY: 'sb_test_public_key' });
+    assert.equal(created.ca_file, '/opt/runner/.runtime/benchmarks/realworld-api-v4/ca.pem');
+    assert.equal((await stat(join(createdDirectory, 'remote-config.json'))).mode & 0o077, 0);
+    await assert.rejects(createRemoteConfig({ platform: 'supabase', runtime: createdDirectory, runnerRoot: '/opt/runner', backendAddress: 'backend.example.test', dockerSshTarget: 'bench@10.0.0.10', publishableKey: 'key' }), /private IPv4/);
+    await assert.rejects(createRemoteConfig({ platform: 'supabase', runtime: createdDirectory, runnerRoot: '/opt/runner', backendAddress: '203.0.113.10', dockerSshTarget: 'bench@10.0.0.10', publishableKey: 'key' }), /private IPv4/);
+  } finally { await rm(createdDirectory, { recursive: true, force: true }); }
 });
 
 test('remote setup prepares a private runner config with only the Supabase public key', async () => {
@@ -1486,10 +1611,10 @@ test('PocketBase adapter isolates auth stores and uses parameterized record filt
 test('Supabase teardown clears isolated auth users efficiently', async () => {
   const { readFile } = await import('node:fs/promises');
   const admin = await readFile(new URL('../benchmark-sets/realworld-api-v4/shared/lib/admin/supabase.mjs', import.meta.url), 'utf8');
-  const command = await readFile(new URL('../benchmark-sets/realworld-api-v4/shared/lib/command.mjs', import.meta.url), 'utf8');
+  const { runCommand } = await import('../benchmark-sets/realworld-api-v4/shared/lib/command.mjs');
   assert.match(admin, /TRUNCATE TABLE auth\.users CASCADE/);
   assert.match(admin, /timeoutMs: 600_000/);
-  assert.match(command, /timeout > 600_000/);
+  assert.throws(() => runCommand(process.execPath, [], { timeoutMs: 600_001 }), /invalid command timeout/);
 });
 
 test('PocketBase migration and admin expose collection lifecycle', async () => {

@@ -1,12 +1,29 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { LinodeApi } from '../benchmark-sets/realworld-api-v4/shared/lib/linode-controller.mjs';
 
 const load = () => import('../benchmark-sets/realworld-api-v4/shared/lib/linode-controller.mjs');
+
+test('Linode token file is parsed as restricted private data', async () => {
+  const { readLinodeToken } = await load();
+  const directory = await mkdtemp(join(tmpdir(), 'linode-v4-token-'));
+  const path = join(directory, '.linode.env');
+  try {
+    await writeFile(path, 'LINODE_TOKEN=controller-secret\n', { mode: 0o600 });
+    assert.equal(await readLinodeToken(path), 'controller-secret');
+    assert.equal(spawnSync('git', ['check-ignore', '-q', '.linode.env'], { cwd: fileURLToPath(new URL('../', import.meta.url)) }).status, 0);
+    await chmod(path, 0o644);
+    await assert.rejects(readLinodeToken(path), /private/);
+    await chmod(path, 0o600);
+    await writeFile(path, 'LINODE_TOKEN=$(touch /tmp/pwned)\n');
+    await assert.rejects(readLinodeToken(path), /invalid LINODE_TOKEN file/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
 
 test('Linode API uses controller-only bearer auth and paginates without leaking tokens', async () => {
   const { LinodeApi } = await load();
@@ -21,6 +38,8 @@ test('Linode API uses controller-only bearer auth and paginates without leaking 
   assert.match(calls[1][0], /page=2/);
   const failed = new LinodeApi({ token: 'controller-secret', fetchImpl: async () => new Response('controller-secret', { status: 403 }) });
   await assert.rejects(failed.request('GET', '/v4/regions'), error => error.status === 403 && !error.message.includes('controller-secret'));
+  const rejected = new LinodeApi({ token: 'controller-secret', fetchImpl: async () => new Response(JSON.stringify({ errors: [{ field: 'interfaces.1.vpc.ipv4.addresses.0.address', reason: 'must be within the subnet; controller-secret' }] }), { status: 400 }) });
+  await assert.rejects(rejected.request('POST', '/v4/linode/instances', {}), error => error.status === 400 && error.message.includes('interfaces.1.vpc.ipv4.addresses.0.address') && error.message.includes('must be within the subnet') && !error.message.includes('controller-secret'));
 });
 
 test('real Linode API client fails closed without spend and deletion approval', async () => {
@@ -34,16 +53,16 @@ test('real Linode API client fails closed without spend and deletion approval', 
   assert.equal(requests, 0);
 });
 
-test('hardware selection uses dedicated 8 GiB plans and the cheaper preferred region', async () => {
+test('hardware selection uses the cheapest available VPC-capable dedicated 8 GiB plan', async () => {
   const { selectHardwareProfile, estimatePairCost } = await load();
   const regions = [
     { id: 'us-west', status: 'ok', capabilities: ['Linodes', 'Linode Interfaces'] },
-    { id: 'us-lax', status: 'ok', capabilities: ['Linodes', 'Linode Interfaces'] },
+    { id: 'us-lax', status: 'ok', capabilities: ['Linodes', 'Linode Interfaces', 'VPCs'] },
     { id: 'us-east', status: 'ok', capabilities: ['Linodes'] },
   ];
   const types = [
     { id: 'g6-standard-4', class: 'standard', memory: 8192, price: { hourly: 0.08 } },
-    { id: 'g6-dedicated-4', class: 'dedicated', memory: 8192, price: { hourly: 0.12 }, region_prices: [{ id: 'us-west', hourly: 0.12 }, { id: 'us-lax', hourly: 0.1 }] },
+    { id: 'g6-dedicated-4', class: 'dedicated', memory: 8192, price: { hourly: 0.12 }, region_prices: [{ id: 'us-west', hourly: 0.05 }, { id: 'us-lax', hourly: 0.1 }] },
   ];
   const availability = [
     { region: 'us-west', plan: 'g6-dedicated-4', available: true },
@@ -56,6 +75,40 @@ test('hardware selection uses dedicated 8 GiB plans and the cheaper preferred re
   assert.equal(profile.hourlyUsd, 0.1);
   assert.equal(estimatePairCost(profile.hourlyUsd, 3, 1), 1.6);
   assert.throws(() => selectHardwareProfile(regions, types.slice(0, 1), availability), /dedicated 8192 MiB/);
+});
+
+test('hardware profile resolver reads current regions, types, and per-region availability', async () => {
+  const { resolveHardwareProfile } = await load();
+  const calls = [];
+  const api = {
+    async list(path) {
+      calls.push(path);
+      if (path === '/v4/regions') return [{ id: 'us-west', label: 'West', status: 'ok', capabilities: ['Linode Interfaces'] }, { id: 'us-lax', label: 'LAX', status: 'ok', capabilities: ['Linode Interfaces', 'VPCs'] }];
+      return [{ id: 'g6-dedicated-4', class: 'dedicated', memory: 8192, region_prices: [{ id: 'us-west', hourly: .12 }, { id: 'us-lax', hourly: .10 }] }];
+    },
+    async request(method, path) { calls.push(`${method} ${path}`); return [{ region: path.includes('us-west') ? 'us-west' : 'us-lax', plan: 'g6-dedicated-4', available: true }]; },
+  };
+  const profile = await resolveHardwareProfile(api);
+  assert.equal(profile.region, 'us-lax');
+  assert.deepEqual(calls, ['/v4/regions', '/v4/linode/types', 'GET /v4/regions/us-lax/availability']);
+});
+
+test('region resolution prefers west, lax, then sea, and falls back to any VPC-capable US region', async () => {
+  const { resolveHardwareProfile } = await load();
+  const regions = [
+    { id: 'us-west', country: 'us', status: 'ok', capabilities: ['Linode Interfaces'] },
+    { id: 'us-lax', country: 'us', status: 'ok', capabilities: ['Linode Interfaces', 'VPCs'] },
+    { id: 'us-sea', country: 'us', status: 'ok', capabilities: ['Linode Interfaces', 'VPCs'] },
+    { id: 'us-ord', country: 'us', status: 'ok', capabilities: ['Linode Interfaces', 'VPCs'] },
+  ];
+  let available = new Set(['us-sea', 'us-ord']);
+  const api = {
+    async list(path) { return path === '/v4/regions' ? regions : [{ id: 'g6-dedicated-4', class: 'dedicated', memory: 8192, price: { hourly: 0.1 }, region_prices: [{ id: 'us-sea', hourly: 0.12 }, { id: 'us-ord', hourly: 0.05 }] }]; },
+    async request(method, path) { const region = path.split('/')[3]; return [{ region, plan: 'g6-dedicated-4', available: available.has(region) }]; },
+  };
+  assert.equal((await resolveHardwareProfile(api)).region, 'us-sea');
+  available = new Set(['us-ord']);
+  assert.equal((await resolveHardwareProfile(api)).region, 'us-ord');
 });
 
 test('campaign reservations enforce the fixed spend cap and settle actual estimates', async () => {
@@ -87,6 +140,16 @@ test('recovery CLI fails closed without an explicit deletion confirmation', () =
   assert.match(output.stderr, /--confirm-delete/);
 });
 
+test('pilot CLI fails before API work without approval or deletion confirmation', () => {
+  const cli = fileURLToPath(new URL('../bin/bench-v4-linode.mjs', import.meta.url));
+  const noApproval = spawnSync(process.execPath, [cli, 'pilot', '/tmp/pilot-inventory.json', '--run-id', 'obs-20260929-abc123', '--campaign', '/tmp/pilot-ledger.json', '--controller-cidr', '203.0.113.4/32', '--confirm-delete', 'obs-20260929-abc123'], { encoding: 'utf8', env: { ...process.env, LINODE_TOKEN: 'controller-secret', LIVE_APPROVAL_PHRASE: '' } });
+  assert.notEqual(noApproval.status, 0);
+  assert.match(noApproval.stderr, /LIVE_APPROVAL_PHRASE/);
+  const wrongDelete = spawnSync(process.execPath, [cli, 'pilot', '/tmp/pilot-inventory.json', '--run-id', 'obs-20260929-abc123', '--campaign', '/tmp/pilot-ledger.json', '--controller-cidr', '203.0.113.4/32', '--confirm-delete', 'other-run'], { encoding: 'utf8', env: { ...process.env, LINODE_TOKEN: 'controller-secret', LIVE_APPROVAL_PHRASE: 'I_APPROVE_V4_LINODE_ACTIONS_UP_TO_USD_30' } });
+  assert.notEqual(wrongDelete.status, 0);
+  assert.match(wrongDelete.stderr, /confirm-delete/);
+});
+
 test('private inventory persistence is atomic, restrictive, and round-trips', async () => {
   const { writePrivateJson, readPrivateJson } = await load();
   const directory = await mkdtemp(join(tmpdir(), 'linode-v4-inventory-'));
@@ -106,14 +169,15 @@ function fakeApi(options = {}) {
   const resources = new Map();
   let nextId = 10;
   const api = {
-    async request(method, path, body) {
-      calls.push([method, path, body]);
+    async request(method, path, body, signal) {
+      calls.push([method, path, body, signal]);
       if (method === 'POST' && path === '/v4/vpcs') {
         const item = { id: ++nextId, label: body.label, description: body.description, subnets: [{ id: ++nextId, ...body.subnets[0] }] };
         resources.set(pathFor('vpc', item.id), item); return item;
       }
       if (method === 'POST' && path === '/v4/networking/firewalls') {
-        const item = { id: ++nextId, label: body.label }; resources.set(pathFor('firewall', item.id), item); return item;
+        assert.equal(body.status, undefined, 'firewall status is read-only');
+        const item = { id: ++nextId, label: body.label, status: 'enabled' }; resources.set(pathFor('firewall', item.id), item); return item;
       }
       if (method === 'POST' && path === '/v4/linode/instances') {
         if (settings.failRunner && body.label.endsWith('-runner')) {
@@ -121,8 +185,27 @@ function fakeApi(options = {}) {
           resources.set(pathFor('linode', item.id), item);
           throw new Error('simulated create timeout');
         }
-        const item = { id: ++nextId, label: body.label, tags: body.tags, status: 'running' };
+        const item = { id: ++nextId, label: body.label, tags: body.tags, status: 'running', ipv4: ['10.203.0.99', '172.232.100.100'],
+          interfaces: body.interfaces.map((iface, index) => { const { firewall_id, ...network } = structuredClone(iface);
+            if (network.public) network.public.ipv4.addresses[0].address = '172.232.100.100';
+            if (network.vpc) network.vpc.vpc_id = 11;
+            return { id: 1000 + nextId * 2 + index, public: null, vpc: null, vlan: null, ...network }; }).reverse(),
+          firewallIds: body.interfaces.map(iface => iface.firewall_id).reverse() };
         resources.set(pathFor('linode', item.id), item); return item;
+      }
+      const interfaces = path.match(/^\/v4\/linode\/instances\/(\d+)\/interfaces$/);
+      if (method === 'GET' && interfaces) {
+        const envelope = { interfaces: structuredClone(resources.get(pathFor('linode', Number(interfaces[1]))).interfaces) };
+        return settings.changeInterfaces ? settings.changeInterfaces(envelope) : envelope;
+      }
+      const attachment = path.match(/^\/v4\/linode\/instances\/(\d+)\/interfaces\/(\d+)\/firewalls\?page=(\d+)&page_size=100$/);
+      if (method === 'GET' && attachment) {
+        const host = resources.get(pathFor('linode', Number(attachment[1])));
+        const index = host.interfaces.findIndex(iface => iface.id === Number(attachment[2]));
+        const firewalls = [structuredClone(resources.get(pathFor('firewall', host.firewallIds[index])))];
+        const data = settings.changeFirewalls ? settings.changeFirewalls(firewalls, host.interfaces[index]) : firewalls;
+        const envelope = { data, page: Number(attachment[3]), pages: 1, results: data.length };
+        return settings.changeAttachmentEnvelope ? settings.changeAttachmentEnvelope(envelope) : envelope;
       }
       const match = path.match(/^\/v4\/(?:linode\/instances|networking\/firewalls|vpcs)\/(\d+)$/);
       if (match && method === 'GET') {
@@ -136,8 +219,9 @@ function fakeApi(options = {}) {
       }
       throw new Error(`unexpected API call ${method} ${path}`);
     },
-    async list(path) {
-      calls.push(['LIST', path]);
+    async list(path, signal) {
+      calls.push(['LIST', path, signal]);
+      if (/\/interfaces\/\d+\/firewalls$/.test(path)) return LinodeApi.prototype.list.call(api, path, signal);
       const prefix = path.endsWith('/') ? path : `${path}/`;
       return [...resources.entries()].filter(([key]) => key.startsWith(prefix)).map(([, value]) => value);
     },
@@ -172,12 +256,17 @@ test('pair provisioning writes inventory before resources and cleanup deletes on
     assert.equal(calls.filter(([method]) => method === 'POST').length, 5);
     const firewalls = calls.filter(([method, path]) => method === 'POST' && path === '/v4/networking/firewalls').map(([, , body]) => body);
     assert.equal(firewalls.length, 2);
-    assert.deepEqual(firewalls.find(body => body.label.endsWith('publicFirewall')).rules.inbound[0].addresses.ipv4, ['203.0.113.4/32']);
-    assert.deepEqual(firewalls.find(body => body.label.endsWith('vpcFirewall')).rules.inbound[0].addresses.ipv4, ['10.203.0.11/32']);
+    assert.ok(firewalls.every(body => body.label.length <= 32));
+    assert.deepEqual(firewalls.find(body => body.label === inventory.labels.publicFirewall).rules.inbound[0].addresses.ipv4, ['203.0.113.4/32']);
+    assert.deepEqual(firewalls.find(body => body.label === inventory.labels.vpcFirewall).rules.inbound[0].addresses.ipv4, ['10.203.0.11/32']);
     const backendCreate = calls.find(([method, path, body]) => method === 'POST' && path === '/v4/linode/instances' && body.label.endsWith('-backend'))[2];
     assert.deepEqual(backendCreate.interfaces.map(iface => iface.default_route.ipv4), [true, false]);
     assert.equal(backendCreate.interfaces[1].vpc.ipv4.addresses[0].address, '10.203.0.10');
+    assert.equal(backendCreate.network_helper, true);
+    assert.equal(inventory.resources.backend.publicIpv4, '172.232.100.100');
+    assert.ok(saved.filter(item => item.status === 'provisioning').every(item => !item.resources.backend?.publicIpv4 && !item.resources.backend?.privateIpv4));
     assert.equal(inventory.resources.runner.privateIpv4, '10.203.0.11');
+    assert.equal(calls.filter(([method, path]) => method === 'GET' && /interfaces\/\d+\/firewalls\?page=1/.test(path)).length, 4);
     const cleaned = await cleanupPair({ api, inventory, save, sleep: async () => {} });
     assert.equal(cleaned.status, 'deleted');
     const deletedIds = calls.filter(([method]) => method === 'DELETE').map(([, path]) => Number(path.split('/').at(-1)));
@@ -228,6 +317,22 @@ test('ambiguous creation is reconciled by unique run label; primary create error
   assert.match(String(error.cleanupError), /simulated delete failure/);
 });
 
+test('pilot workflow profiles, deploys, runs, and cleans its ephemeral SSH credential', async () => {
+  const { runPilot } = await import('../benchmark-sets/realworld-api-v4/shared/lib/pilot-workflow.mjs');
+  const events = [];
+  const key = { privateKey: '/tmp/pilot-key', publicKey: 'ssh-ed25519 AAAATEST pilot', cleanup: async () => { events.push('key-cleanup'); } };
+  const result = await runPilot({
+    api: { request() {} }, config: { runId: 'obs-20260929-abc123', image: 'linode/ubuntu24.04' }, repositoryRoot: '/repo', bootstrapScriptPath: fileURLToPath(new URL('../services/linode/bootstrap.sh', import.meta.url)), inventoryPath: '/tmp/inventory.json', campaignPath: '/tmp/ledger.json', controllerCidr: '203.0.113.4/32', maxHours: 2, transferReserveUsd: 1, liveApproval: 'approval', deleteConfirmation: 'obs-20260929-abc123',
+    selectProfile: async () => ({ region: 'us-lax', type: { id: 'g6-dedicated-4', transfer: 5000 }, hourlyUsd: .1 }), createKey: async () => key,
+    startAgent: async () => ({ env: { SSH_AUTH_SOCK: '/tmp/agent' }, stop: async () => { events.push('agent-stop'); } }),
+    deploy: async ({ inventory, runnerKeyFile }) => { events.push('deploy'); assert.equal(runnerKeyFile, key.privateKey); return { environment: { DEPLOYED: inventory.resources.backend.privateIpv4 }, hostProvenance: { backend: { dockerService: 'active' }, runner: { dockerService: 'active' } } }; },
+    executeBench: async ({ environment }) => { events.push('run'); assert.equal(environment.DEPLOYED, '10.203.0.10'); return '/tmp/bundle'; }, verifyBench: async result => { events.push(`verify:${result}`); },
+    observe: async options => { assert.equal(options.transferReserveUsd, 0); const inventory = { status: 'bootstrapping', resources: { backend: { privateIpv4: '10.203.0.10' } } }; await options.bootstrap({ inventory }); assert.equal(inventory.hardware_profile.type.id, 'g6-dedicated-4'); assert.equal(inventory.host_provenance.runner.dockerService, 'active'); return { result: await options.run({ inventory, signal: new AbortController().signal }) }; },
+  });
+  assert.equal(result.profile.region, 'us-lax');
+  assert.deepEqual(events, ['deploy', 'run', 'agent-stop', 'key-cleanup']);
+});
+
 test('observation reserves campaign budget, verifies evidence before cleanup, then notifies', async () => {
   const { runObservation, readPrivateJson } = await load();
   const directory = await mkdtemp(join(tmpdir(), 'linode-v4-run-'));
@@ -240,15 +345,42 @@ test('observation reserves campaign budget, verifies evidence before cleanup, th
     const outcome = await runObservation({
       api, config: provisionConfig, inventoryPath, campaignPath, hourlyUsd: 0.1, maxHours: 2, transferReserveUsd: 1,
       now: () => now, sleep: async () => {},
+      bootstrap: async ({ inventory, signal }) => { events.push('bootstrap'); assert.equal(inventory.status, 'bootstrapping'); assert.equal(signal.aborted, false); },
       run: async ({ signal }) => { events.push('run'); assert.equal(signal.aborted, false); now = 3_600_000; return { result: 'evidence' }; },
       verify: async value => { events.push('verify'); assert.equal(value.result, 'evidence'); },
       notify: async message => { events.push(`notify:${message.status}:${message.cleanup}`); throw new Error('ntfy offline'); },
     });
-    assert.deepEqual(events, ['run', 'verify', 'notify:success:complete']);
+    assert.deepEqual(events, ['bootstrap', 'run', 'verify', 'notify:success:complete']);
     assert.equal(outcome.actualUsd, 1.2);
     assert.equal(outcome.inventory.status, 'deleted');
     assert.equal((await readPrivateJson(campaignPath)).spentUsd, 1.2);
     assert.deepEqual(calls.filter(([method]) => method === 'DELETE').length, 5);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('observation waits for cancelled bootstrap to settle before deleting hosts', async () => {
+  const { runObservation } = await load();
+  const directory = await mkdtemp(join(tmpdir(), 'linode-v4-cancel-'));
+  const { api } = fakeApi();
+  let settled = false;
+  const request = api.request;
+  api.request = async (method, ...args) => {
+    if (method === 'DELETE') assert.equal(settled, true, 'cleanup must follow bootstrap cancellation');
+    return request(method, ...args);
+  };
+  try {
+    await assert.rejects(runObservation({
+      api, config: provisionConfig, inventoryPath: join(directory, 'run.json'), campaignPath: join(directory, 'ledger.json'),
+      hourlyUsd: 0.1, maxHours: 0.0002, transferReserveUsd: 0, sleep: async () => {},
+      bootstrap: async ({ signal }) => {
+        if (!signal.aborted) await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));
+        await new Promise(resolve => setTimeout(resolve, 20));
+        settled = true;
+        signal.throwIfAborted();
+      },
+      run: async () => assert.fail('cancelled bootstrap must not start benchmark'), verify: async () => {},
+    }), /maximum duration/);
+    assert.equal(settled, true);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -317,4 +449,192 @@ test('cleanup refuses a mismatched instance owner label', async () => {
   };
   await assert.rejects(cleanupPair({ api, inventory, save: async () => {}, sleep: async () => {} }), /ownership check failed/);
   assert.equal(calls.some(([method, path]) => method === 'DELETE' && path === pathFor('linode', ownedId)), false);
+});
+
+for (const [name, changeInterfaces, changeFirewalls] of [
+  ['paginated interfaces envelope', () => ({ data: [], pages: 1 })],
+  ['missing interface', e => ({ interfaces: e.interfaces.slice(0, 1) })],
+  ['invalid interface ID', e => { e.interfaces[0].id = '123'; return e; }],
+  ['duplicate interface ID', e => { e.interfaces[0].id = e.interfaces[1].id; return e; }],
+  ['wrong subnet', e => { e.interfaces[0].vpc.subnet_id++; return e; }],
+  ['wrong VPC', e => { e.interfaces[0].vpc.vpc_id++; return e; }],
+  ['wrong role address', e => { e.interfaces[0].vpc.ipv4.addresses[0].address = '10.203.0.99'; return e; }],
+  ['no VPC primary address', e => { e.interfaces[0].vpc.ipv4.addresses[0].primary = false; return e; }],
+  ['duplicate public interfaces', e => { e.interfaces[0] = { ...structuredClone(e.interfaces[1]), id: e.interfaces[0].id }; return e; }],
+  ['wrong VPC route', e => { e.interfaces[0].default_route.ipv4 = true; return e; }],
+  ['wrong public route', e => { e.interfaces[1].default_route.ipv4 = false; return e; }],
+  ['no primary address', e => { e.interfaces[1].public.ipv4.addresses[0].primary = false; return e; }],
+  ['multiple primary addresses', e => { e.interfaces[1].public.ipv4.addresses.push({ address: '172.232.100.101', primary: true }); return e; }],
+  ...['10.0.0.1', '172.16.0.1', '192.168.1.1', '127.0.0.1', '169.254.1.1', '100.64.0.1', '198.51.100.10', '224.0.0.1', '0.0.0.0', '255.255.255.255'].map(address => [`nonpublic ${address}`, e => { e.interfaces[1].public.ipv4.addresses[0].address = address; return e; }]),
+  ['absent firewall', undefined, () => []],
+  ['disabled VPC firewall', undefined, (f, iface) => { if (iface.vpc) f[0].status = 'disabled'; return f; }],
+  ['disabled firewall', undefined, f => { f[0].status = 'disabled'; return f; }],
+  ['wrong firewall ID', undefined, f => { f[0].id++; return f; }],
+  ['wrong firewall label', undefined, f => { f[0].label = 'not-owned'; return f; }],
+  ['unexpected firewall', undefined, f => [...f, { ...f[0], id: 999 }]],
+]) {
+  test(`network readiness rejects ${name} and cleans owned resources`, async () => {
+    const { provisionPair } = await load();
+    const { api, resources, calls } = fakeApi({ changeInterfaces, changeFirewalls });
+    let latest;
+    await assert.rejects(provisionPair({ api, config: provisionConfig, save: async value => { latest = structuredClone(value); }, sleep: async () => {} }), /interface|firewall|address|route|network/i);
+    assert.equal(latest.status, 'deleted');
+    assert.equal(resources.size, 0);
+    assert.equal(calls.filter(([method]) => method === 'DELETE').length, 5);
+    assert.equal(latest.resources.backend.publicIpv4, undefined);
+  });
+}
+
+test('observation joins cancelled run and records its secondary failure before deletion', async () => {
+  const { runObservation, readPrivateJson } = await load();
+  const directory = await mkdtemp(join(tmpdir(), 'v4-run-cancel-'));
+  const { api } = fakeApi();
+  const request = api.request;
+  let settled = false;
+  api.request = async (method, ...args) => {
+    if (method === 'DELETE') assert.equal(settled, true, 'cleanup must follow run settlement');
+    return request(method, ...args);
+  };
+  try {
+    await assert.rejects(runObservation({ api, config: provisionConfig, inventoryPath: join(directory, 'run.json'), campaignPath: join(directory, 'ledger.json'), hourlyUsd: .1, maxHours: .0001, transferReserveUsd: 0, sleep: async () => {},
+      run: async ({ signal }) => {
+        if (!signal.aborted) await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));
+        await new Promise(resolve => setTimeout(resolve, 30));
+        settled = true;
+        throw new Error('run terminated');
+      }, verify: async () => assert.fail('cancelled run must not verify'),
+    }), error => /maximum duration/.test(error.message) && error.runError === 'run terminated');
+    assert.equal(settled, true);
+    assert.equal((await readPrivateJson(join(directory, 'run.json'))).status, 'deleted');
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+for (const failure of [false, true]) {
+  test(`pilot always cleans key after agent stop fails (${failure ? 'primary failure' : 'success'})`, async () => {
+    const { runPilot } = await import('../benchmark-sets/realworld-api-v4/shared/lib/pilot-workflow.mjs');
+    const primary = new Error('primary observation failure');
+    const agentError = new Error('agent cleanup failed');
+    let keyCleaned = false;
+    await assert.rejects(runPilot({ api: { request() {} }, config: { runId: 'obs-test123' }, repositoryRoot: '/repo', bootstrapScriptPath: '/script', controllerCidr: '203.0.113.4/32',
+      selectProfile: async () => ({ type: { transfer: 1 } }),
+      createKey: async () => ({ cleanup: async () => { keyCleaned = true; if (failure) throw new Error('key cleanup failed'); } }),
+      startAgent: async () => ({ stop: async () => { throw agentError; } }),
+      observe: async () => { if (failure) throw primary; return {}; },
+    }), error => failure ? error === primary && error.agentCleanupError === 'agent cleanup failed' && error.keyCleanupError === 'key cleanup failed' : error === agentError);
+    assert.equal(keyCleaned, true);
+  });
+}
+
+test('API list passes cancellation to every attachment page and rejects malformed envelopes', async () => {
+  const { LinodeApi } = await load();
+  const controller = new AbortController();
+  const path = '/v4/linode/instances/15/interfaces/1030/firewalls';
+  let pages = 0;
+  const api = new LinodeApi({ token: 'synthetic-token', fetchImpl: async (url, options) => {
+    assert.match(url, /interfaces\/1030\/firewalls\?page=/);
+    assert.equal(options.signal.aborted, false);
+    if (++pages === 2) { controller.abort(); assert.equal(options.signal.aborted, true); }
+    return new Response(JSON.stringify({ data: [{ id: pages }], pages: 2, page: pages, results: 2 }));
+  } });
+  assert.deepEqual(await api.list(path, controller.signal), [{ id: 1 }, { id: 2 }]);
+  const malformed = new LinodeApi({ token: 'synthetic-token', fetchImpl: async () => new Response(JSON.stringify({ interfaces: [] })) });
+  await assert.rejects(malformed.list(path), /paginated response/);
+});
+
+
+test('malformed attachment envelopes fail readiness and still delete owned resources', async () => {
+  const { provisionPair } = await load();
+  const { api, resources } = fakeApi({ changeAttachmentEnvelope: () => ({ interfaces: [] }) });
+  let latest;
+  await assert.rejects(provisionPair({ api, config: provisionConfig, save: async value => { latest = structuredClone(value); }, sleep: async () => {} }), /paginated response/);
+  assert.equal(latest.status, 'deleted');
+  assert.equal(resources.size, 0);
+});
+
+test('network readiness requests carry the provisioning signal', async () => {
+  const { provisionPair } = await load();
+  const controller = new AbortController();
+  const { api, calls } = fakeApi();
+  await provisionPair({ api, config: provisionConfig, signal: controller.signal });
+  const readiness = calls.filter(([method, path]) => method === 'GET' && path.includes('/interfaces'));
+  assert.equal(readiness.length, 6);
+  assert.ok(readiness.every(call => call[3] === controller.signal));
+});
+
+
+test('observation resource cleanup follows real process-tree cancellation and pipe closure', async () => {
+  const { runObservation } = await load();
+  const { runCommand } = await import('../benchmark-sets/realworld-api-v4/shared/lib/command.mjs');
+  const directory = await mkdtemp(join(tmpdir(), 'v4-observation-tree-'));
+  const stoppedFile = join(directory, 'stopped');
+  const { api, calls } = fakeApi();
+  const request = api.request;
+  let settled = false;
+  let naturalExpiry = false;
+  api.request = async (method, ...args) => {
+    if (method === 'DELETE') {
+      assert.equal(settled, true, 'cleanup must follow work settlement');
+      assert.equal(await readFile(stoppedFile, 'utf8'), 'TERM', 'descendant must receive cancellation before cloud cleanup');
+    }
+    return request(method, ...args);
+  };
+  const descendant = `const fs = require('node:fs');
+    process.on('SIGTERM', () => { fs.writeFileSync(${JSON.stringify(stoppedFile)}, 'TERM'); process.exit(0); });
+    setTimeout(() => { fs.writeFileSync(${JSON.stringify(stoppedFile)}, 'natural'); process.exit(0); }, 1500);`;
+  const script = `const { spawn } = require('node:child_process');
+    spawn(process.execPath, ['-e', ${JSON.stringify(descendant)}], { stdio: ['ignore', 'inherit', 'inherit'] }).unref();
+    setInterval(() => {}, 1000);`;
+  try {
+    await assert.rejects(runObservation({ api, config: provisionConfig, inventoryPath: join(directory, 'run.json'), campaignPath: join(directory, 'ledger.json'), hourlyUsd: .1, maxHours: .0002, transferReserveUsd: 0, sleep: async () => {},
+      run: async ({ signal }) => {
+        try { await runCommand(process.execPath, ['-e', script], { signal }); }
+        finally { settled = true; naturalExpiry = (await readFile(stoppedFile, 'utf8')) === 'natural'; }
+      }, verify: async () => assert.fail('cancelled tree must not verify'),
+    }), /maximum duration/);
+    assert.equal(naturalExpiry, false);
+    assert.equal(calls.filter(([method]) => method === 'DELETE').length, 5);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+
+test('root observation deadline terminates nested local-timeout pipe holders before resource cleanup', async () => {
+  const { runObservation } = await load();
+  const { runCommand } = await import('../benchmark-sets/realworld-api-v4/shared/lib/command.mjs');
+  const commandModule = new URL('../benchmark-sets/realworld-api-v4/shared/lib/command.mjs', import.meta.url).href;
+  const directory = await mkdtemp(join(tmpdir(), 'v4-nested-deadline-'));
+  const pidFile = join(directory, 'grandchild');
+  const localTermFile = join(directory, 'local-term');
+  const heartbeat = join(directory, 'ancestor-alive');
+  let pid; let settled = false;
+  const { api, calls } = fakeApi();
+  const request = api.request;
+  const running = value => { const state = spawnSync('ps', ['-o', 'stat=', '-p', String(value)], { encoding: 'utf8' }); return state.status === 0 && !/^Z/.test(state.stdout.trim()); };
+  api.request = async (method, ...args) => {
+    if (method === 'DELETE') {
+      assert.equal(settled, true);
+      assert.equal(running(pid), false, 'grandchild must terminate before cloud cleanup');
+    }
+    return request(method, ...args);
+  };
+  const grandchild = `require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); process.on('SIGTERM', () => {}); setTimeout(() => process.exit(0), 4000);`;
+  const child = `const fs = require('node:fs');
+    process.on('SIGTERM', () => { fs.writeFileSync(${JSON.stringify(localTermFile)}, 'local'); process.exit(0); });
+    require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(grandchild)}], { stdio: ['ignore', 'inherit', 'inherit'] }).unref();
+    setInterval(() => {}, 1000);`;
+  const outer = `import { runCommand } from ${JSON.stringify(commandModule)};
+    import { writeFileSync } from 'node:fs';
+    setTimeout(() => writeFileSync(${JSON.stringify(heartbeat)}, 'alive'), 1000);
+    await runCommand(process.execPath, ['-e', ${JSON.stringify(child)}], { timeoutMs: 500, env: {} });`;
+  try {
+    await assert.rejects(runObservation({ api, config: provisionConfig, inventoryPath: join(directory, 'run.json'), campaignPath: join(directory, 'ledger.json'), hourlyUsd: .1, maxHours: .0006, transferReserveUsd: 0, sleep: async () => {},
+      run: async ({ signal }) => {
+        try { await runCommand(process.execPath, ['--input-type=module', '-e', outer], { timeoutMs: 10_000, signal }); }
+        finally { pid = Number(await readFile(pidFile, 'utf8')); settled = true; }
+      }, verify: async () => assert.fail('cancelled tree must not verify'),
+    }), /maximum duration/);
+    assert.equal(await readFile(localTermFile, 'utf8'), 'local', 'nested local timeout must target its child');
+    assert.equal(await readFile(heartbeat, 'utf8'), 'alive', 'nested local timeout must not kill the ancestor group');
+    assert.equal(calls.filter(([method]) => method === 'DELETE').length, 5);
+    assert.equal(running(pid), false);
+  } finally { if (pid && running(pid)) process.kill(pid, 'SIGKILL'); await rm(directory, { recursive: true, force: true }); }
 });

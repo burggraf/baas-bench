@@ -82,9 +82,15 @@ export async function collectResources(options) {
           validityReasons.push(`sample ${index + 1}: container probe failed: ${String(error?.message ?? error).slice(0, 300)}`);
         }
       }
+      const hosts = {};
+      for (const [name, probe] of [['runner', options.runnerHostProbe], ['backend', options.backendHostProbe]]) {
+        if (typeof probe !== 'function') continue;
+        try { hosts[name] = await probe(); }
+        catch (error) { validityReasons.push(`sample ${index + 1}: ${name} host telemetry failed: ${String(error?.message ?? error).slice(0, 300)}`); }
+      }
       const p99 = monitor.percentile(99) / 1e6;
       const max = (typeof monitor.max === 'function' ? monitor.max() : monitor.max) / 1e6;
-      samples.push({ timestampMs, runner, eventLoop: { p99Ms: Number.isFinite(p99) ? p99 : null, maxMs: Number.isFinite(max) ? max : null }, containers });
+      samples.push({ timestampMs, runner, eventLoop: { p99Ms: Number.isFinite(p99) ? p99 : null, maxMs: Number.isFinite(max) ? max : null }, containers, hosts });
       monitor.reset();
       previousCpu = currentCpu; previousTime = timestampMs;
     }

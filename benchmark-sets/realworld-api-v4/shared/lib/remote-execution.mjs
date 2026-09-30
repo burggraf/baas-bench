@@ -1,7 +1,6 @@
-import { spawn } from 'node:child_process';
 import { isAbsolute } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { runCommand } from './command.mjs';
+import { runCommand, spawnManaged, waitForChild } from './command.mjs';
 import { verifyTransferManifest } from './transfer.mjs';
 
 const PLATFORMS = new Set(['supabase', 'convex', 'appwrite', 'nhost', 'directus', 'pocketbase', 'trailbase', 'neon']);
@@ -14,23 +13,12 @@ const safeLocalPath = value => typeof value === 'string' && isAbsolute(value) &&
 export function runLongCommand(command, args, options = {}) {
   const timeoutMs = options.timeoutMs ?? MAX_RUN_MS;
   if (!/^[A-Za-z0-9._/-]+$/.test(command) || !Array.isArray(args) || args.some(arg => typeof arg !== 'string' || arg.includes('\0')) || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_RUN_MS) throw new Error('invalid long command');
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: 'ignore', env: options.env, cwd: options.cwd });
-    let timedOut = false;
-    let aborted = false;
-    let killTimer;
-    const stop = () => { if (aborted) return; aborted = true; child.kill('SIGTERM'); killTimer = setTimeout(() => child.kill('SIGKILL'), 10_000); };
-    const timer = setTimeout(() => { timedOut = true; stop(); }, timeoutMs);
-    if (options.signal?.aborted) stop();
-    else options.signal?.addEventListener('abort', stop, { once: true });
-    child.once('error', error => { clearTimeout(timer); clearTimeout(killTimer); options.signal?.removeEventListener('abort', stop); reject(error); });
-    child.once('close', (code, signal) => {
-      clearTimeout(timer); clearTimeout(killTimer); options.signal?.removeEventListener('abort', stop);
-      if (timedOut) reject(new Error(`remote command timed out after ${timeoutMs}ms`));
-      else if (aborted) reject(new Error('remote command aborted'));
-      else if (code !== 0) reject(new Error(`remote command failed${code === null ? ` (${signal ?? 'signal'})` : ` (${code})`}`));
-      else resolve({ stdout: '', stderr: '' });
-    });
+  return Promise.resolve().then(async () => {
+    options.signal?.throwIfAborted();
+    const child = spawnManaged(command, args, { stdio: 'ignore', env: options.env, cwd: options.cwd });
+    const { code, signal } = await waitForChild(child, { timeoutMs, signal: options.signal, label: 'remote command' });
+    if (code !== 0) throw new Error(`remote command failed${code === null ? ` (${signal ?? 'signal'})` : ` (${code})`}`);
+    return { stdout: '', stderr: '' };
   });
 }
 

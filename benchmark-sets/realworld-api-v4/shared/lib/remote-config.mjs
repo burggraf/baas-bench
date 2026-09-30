@@ -1,5 +1,6 @@
 import { chmod, readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { isIP } from 'node:net';
 import { pathToFileURL } from 'node:url';
 
 const PLATFORMS = new Set(['supabase', 'convex', 'appwrite', 'nhost', 'directus', 'pocketbase', 'trailbase', 'neon']);
@@ -17,6 +18,12 @@ const HTTPS_KEYS = new Set(['SUPABASE_URL', 'CONVEX_URL', 'CONVEX_AUTH_ISSUER', 
 const validTarget = value => typeof value === 'string' && /^(?:[A-Za-z0-9_.-]+@)?[A-Za-z0-9][A-Za-z0-9.-]*$/.test(value);
 const safeLocalPath = value => typeof value === 'string' && value.startsWith('/') && !value.includes('\0') && !value.split('/').includes('..');
 const safeRemotePath = value => typeof value === 'string' && value.startsWith('/') && !value.includes('//') && !value.endsWith('/') && value.split('/').every(part => part !== '.' && part !== '..' && [...part].every(char => /[A-Za-z0-9._-]/.test(char)));
+
+function isPrivateIpv4(value) {
+  if (isIP(value) !== 4) return false;
+  const [first, second] = value.split('.').map(Number);
+  return first === 10 || (first === 172 && second >= 16 && second <= 31) || (first === 192 && second === 168 && Number(value.split('.')[2]) < 128);
+}
 
 function isHttpsEndpoint(value) {
   try {
@@ -53,6 +60,21 @@ async function readSupabasePublicKey(path) {
   return value;
 }
 
+export async function createRemoteConfig({ platform, runtime, runnerRoot, backendAddress, dockerSshTarget, publishableKey }) {
+  if (platform !== 'supabase' || !safeLocalPath(runtime) || !safeRemotePath(runnerRoot) || !isPrivateIpv4(backendAddress) || !validTarget(dockerSshTarget) || typeof publishableKey !== 'string' || !publishableKey || publishableKey.length > 4096 || /[\r\n\0]/.test(publishableKey)) throw new Error('invalid Supabase private IPv4 remote configuration');
+  const config = {
+    schema_version: 1,
+    platform,
+    docker_ssh_target: dockerSshTarget,
+    ca_file: join(runnerRoot, '.runtime/benchmarks/realworld-api-v4/ca.pem'),
+    env: { SUPABASE_URL: `https://${backendAddress}:8443`, SUPABASE_PUBLISHABLE_KEY: publishableKey },
+  };
+  applyRemoteConfig(config, platform, {});
+  await writeFile(join(runtime, 'remote-config.json'), `${JSON.stringify(config)}\n`, { mode: 0o600 });
+  await chmod(join(runtime, 'remote-config.json'), 0o600);
+  return config;
+}
+
 export async function prepareRemoteConfig({ platform, runtime, repoRoot, runnerRoot }) {
   if (!PLATFORMS.has(platform) || !safeLocalPath(runtime) || !safeLocalPath(repoRoot) || !safeRemotePath(runnerRoot)) throw new Error('invalid remote setup paths');
   const remoteRuntime = join(runnerRoot, '.runtime/benchmarks/realworld-api-v4');
@@ -64,7 +86,7 @@ export async function prepareRemoteConfig({ platform, runtime, repoRoot, runnerR
   const caInfo = await stat(join(runtime, 'ca.pem'));
   if (!caInfo.isFile() || caInfo.size === 0) throw new Error('private CA certificate is missing');
   config.env ??= {};
-  if (platform === 'supabase') config.env.SUPABASE_PUBLISHABLE_KEY = await readSupabasePublicKey(join(repoRoot, '.runtime/supabase/docker/.env'));
+  if (platform === 'supabase' && !config.env.SUPABASE_PUBLISHABLE_KEY) config.env.SUPABASE_PUBLISHABLE_KEY = await readSupabasePublicKey(join(repoRoot, '.runtime/supabase/docker/.env'));
   if (platform === 'neon') config.env.NEON_PROXY_CA = config.ca_file;
   applyRemoteConfig(config, platform, {});
   await writeFile(configPath, `${JSON.stringify(config)}\n`, { mode: 0o600 });
@@ -73,11 +95,17 @@ export async function prepareRemoteConfig({ platform, runtime, repoRoot, runnerR
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const [action, platform, runtime, repoRoot, runnerRoot] = process.argv.slice(2);
-  if (action !== 'prepare' || process.argv.length !== 7) {
-    console.error('usage: remote-config.mjs prepare <platform> <runtime> <repository-root> <runner-root>');
-    process.exitCode = 2;
+  const [action, ...args] = process.argv.slice(2);
+  let task;
+  if (action === 'prepare' && args.length === 4) {
+    const [platform, runtime, repoRoot, runnerRoot] = args;
+    task = prepareRemoteConfig({ platform, runtime, repoRoot, runnerRoot });
+  } else if (action === 'create' && args.length === 5) {
+    const [platform, runtime, runnerRoot, backendAddress, dockerSshTarget] = args;
+    task = readFile(0, 'utf8').then(publishableKey => createRemoteConfig({ platform, runtime, runnerRoot, backendAddress, dockerSshTarget, publishableKey: publishableKey.trim() }));
   } else {
-    void prepareRemoteConfig({ platform, runtime, repoRoot, runnerRoot }).catch(error => { console.error(String(error?.message ?? error).slice(0, 300)); process.exitCode = 1; });
+    console.error('usage: remote-config.mjs {prepare <platform> <runtime> <repository-root> <runner-root>|create <platform> <runtime> <runner-root> <backend-private-ip> <backend-docker-ssh-target> < publishable-key}');
+    process.exitCode = 2;
   }
+  if (task) void task.catch(error => { console.error(String(error?.message ?? error).slice(0, 300)); process.exitCode = 1; });
 }

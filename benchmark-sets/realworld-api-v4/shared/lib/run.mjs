@@ -6,6 +6,7 @@ import { StageMetricsAccumulator } from './metrics.mjs';
 import { evaluateCapacity, nextCapacityStage } from './capacity.mjs';
 import { runWorkload } from './workload.mjs';
 import { collectResources, discoverPlatformContainers, evaluateRunnerOverload } from './resources.mjs';
+import { sampleLocalHost, sampleRemoteHost } from './host-telemetry.mjs';
 import { summarize } from './summary.mjs';
 
 const PLATFORMS = new Set(['supabase', 'convex', 'appwrite', 'nhost', 'directus', 'pocketbase', 'trailbase', 'neon']);
@@ -103,7 +104,11 @@ export async function executeRun(context, dependencies) {
     const result = await workloadFn(backend, config, {
       users: users.slice(0, requestedUsers), durationMs, graceMs: config.timeoutMs,
       onSample: sample => accumulator.record(sample),
-      onMeasuredStart: async () => { start = monotonic(); resourcePromise = resourcesFn({ platform: context.platform, containerIds, dockerSshTarget, samples: resourceSamples, intervalMs: 1_000 }); },
+      onMeasuredStart: async () => {
+        start = monotonic();
+        const hostTelemetry = dockerSshTarget ? { runnerHostProbe: () => sampleLocalHost(), backendHostProbe: () => sampleRemoteHost(dockerSshTarget) } : {};
+        resourcePromise = resourcesFn({ platform: context.platform, containerIds, dockerSshTarget, samples: resourceSamples, intervalMs: 1_000, ...hostTelemetry });
+      },
       onMeasuredEnd: async () => { end = monotonic(); },
     });
     let resource;

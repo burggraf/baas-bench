@@ -70,6 +70,61 @@ download_at_ref() {
   curl -fsSL "https://raw.githubusercontent.com/$repo/$ref/$path" -o "$output"
 }
 
+valid_ipv4() {
+  printf '%s\n' "$1" | awk -F. 'NF != 4 { bad = 1 } { for (i = 1; i <= 4; i++) if ($i !~ /^[0-9]+$/ || $i > 255) bad = 1 } END { exit bad }'
+}
+
+valid_private_ipv4() {
+  valid_ipv4 "$1" && printf '%s\n' "$1" | awk -F. '{ exit !($1 == 10 || ($1 == 172 && $2 >= 16 && $2 <= 31) || ($1 == 192 && $2 == 168 && $3 < 128)) }'
+}
+
+setup_v4_supabase_tls() {
+  [ "$VERSION_PROFILE" = realworld-api-v4 ] || return 0
+  private_ip=${BAAS_BENCH_V4_BACKEND_PRIVATE_IP:-}
+  valid_private_ipv4 "$private_ip" || { echo "V4 Supabase requires a private BAAS_BENCH_V4_BACKEND_PRIVATE_IP" >&2; exit 1; }
+  runtime=$RUNTIME/benchmarks/realworld-api-v4
+  tls_dir=$dir/volumes/api/envoy/tls
+  stamp=$tls_dir/.baas-v4-private-ip
+  mkdir -p "$runtime" "$tls_dir"
+  chmod 700 "$runtime" "$tls_dir"
+  if [ ! -f "$stamp" ] || [ "$(cat "$stamp")" != "$private_ip" ]; then rm -f "$runtime/ca.pem" "$runtime/ca.key" "$tls_dir/server.crt" "$tls_dir/server.key" "$stamp"; fi
+  if [ ! -f "$runtime/ca.pem" ] || [ ! -f "$runtime/ca.key" ] || [ ! -f "$tls_dir/server.crt" ] || [ ! -f "$tls_dir/server.key" ]; then
+    umask 077
+    openssl req -x509 -newkey rsa:2048 -sha256 -days 7 -nodes -keyout "$runtime/ca.key" -out "$runtime/ca.pem" -subj '/CN=baas-bench-v4-private-ca' >/dev/null 2>&1
+    openssl req -newkey rsa:2048 -nodes -keyout "$tls_dir/server.key" -out "$tls_dir/server.csr" -subj "/CN=$private_ip" >/dev/null 2>&1
+    printf 'subjectAltName=IP:%s\n' "$private_ip" > "$tls_dir/server.ext"
+    openssl x509 -req -in "$tls_dir/server.csr" -CA "$runtime/ca.pem" -CAkey "$runtime/ca.key" -CAcreateserial -out "$tls_dir/server.crt" -days 7 -sha256 -extfile "$tls_dir/server.ext" >/dev/null 2>&1
+    rm -f "$tls_dir/server.csr" "$tls_dir/server.ext" "$runtime/ca.srl"
+    printf '%s\n' "$private_ip" > "$stamp"
+  fi
+  chmod 600 "$runtime/ca.pem" "$runtime/ca.key" "$tls_dir/server.crt" "$tls_dir/server.key" "$stamp"
+  cp "$ROOT/services/supabase/envoy-tls-entrypoint.sh" "$dir/volumes/api/envoy/docker-entrypoint.sh"
+  chmod 700 "$dir/volumes/api/envoy/docker-entrypoint.sh"
+  if ! grep -Fq "image: $SUPABASE_ENVOY_IMAGE" "$dir/docker-compose.yml"; then
+    grep -q 'image: envoyproxy/envoy:v1.39.1' "$dir/docker-compose.yml" || { echo "unexpected Supabase Envoy image" >&2; exit 1; }
+    sed -i.baas "s|image: envoyproxy/envoy:v1.39.1|image: $SUPABASE_ENVOY_IMAGE|" "$dir/docker-compose.yml"
+    rm -f "$dir/docker-compose.yml.baas"
+  fi
+  grep -Fq "image: $SUPABASE_ENVOY_IMAGE" "$dir/docker-compose.yml" || { echo "Supabase Envoy image pin did not apply" >&2; exit 1; }
+  if ! grep -q 'API_GW_HTTPS_PORT' "$dir/docker-compose.yml"; then
+    sed -i.baas '/^[[:space:]]*- .*:8000\/tcp$/a\
+      - ${API_GW_HTTPS_BIND_IP:-127.0.0.1}:${API_GW_HTTPS_PORT:-8443}:8443/tcp' "$dir/docker-compose.yml"
+    rm -f "$dir/docker-compose.yml.baas"
+  fi
+  if ! grep -q '/etc/envoy/tls:ro' "$dir/docker-compose.yml"; then
+    sed -i.baas '/docker-entrypoint.sh:\/docker-entrypoint.sh:ro$/a\
+      - ./volumes/api/envoy/tls:/etc/envoy/tls:ro' "$dir/docker-compose.yml"
+    rm -f "$dir/docker-compose.yml.baas"
+  fi
+  grep -q 'API_GW_HTTPS_PORT' "$dir/docker-compose.yml" && grep -q '/etc/envoy/tls:ro' "$dir/docker-compose.yml" || { echo "Supabase Envoy TLS patch did not apply" >&2; exit 1; }
+  set_env "$dir/.env" API_GW_HTTP_PORT 127.0.0.1:8000
+  set_env "$dir/.env" API_GW_HTTPS_BIND_IP "$private_ip"
+  set_env "$dir/.env" API_GW_HTTPS_PORT 8443
+  set_env "$dir/.env" API_EXTERNAL_URL "https://$private_ip:8443"
+  set_env "$dir/.env" SUPABASE_PUBLIC_URL "https://$private_ip:8443"
+  set_env "$dir/.env" SITE_URL "https://$private_ip:8443"
+}
+
 setup_supabase() {
   sparse_checkout supabase supabase/supabase "$SUPABASE_REF" docker
   dir="$RUNTIME/supabase/docker"
@@ -91,6 +146,7 @@ setup_supabase() {
 }' "$dir/docker-compose.yml"
     rm -f "$dir/docker-compose.yml.baas"
   fi
+  setup_v4_supabase_tls
   chmod 600 "$dir/.env"
 }
 
@@ -303,7 +359,13 @@ smoke_one() {
   case "$1" in
     supabase)
       key=$(grep '^SUPABASE_PUBLISHABLE_KEY=' "$RUNTIME/supabase/docker/.env" | cut -d= -f2-)
-      curl -fsS -H "apikey: $key" http://localhost:8000/auth/v1/health >/dev/null
+      if [ "$VERSION_PROFILE" = realworld-api-v4 ]; then
+        private_ip=${BAAS_BENCH_V4_BACKEND_PRIVATE_IP:-}
+        valid_private_ipv4 "$private_ip" || { echo "V4 Supabase requires a private BAAS_BENCH_V4_BACKEND_PRIVATE_IP" >&2; return 1; }
+        curl -fsS --cacert "$RUNTIME/benchmarks/realworld-api-v4/ca.pem" -H "apikey: $key" "https://$private_ip:8443/auth/v1/health" >/dev/null
+      else
+        curl -fsS -H "apikey: $key" http://localhost:8000/auth/v1/health >/dev/null
+      fi
       ;;
     neon)
       curl -fsS --cacert "$RUNTIME/neon/proxy-certs/localhost.crt" -X POST \
@@ -382,6 +444,30 @@ status_all() {
 
 command=${1:-}
 target=${2:-}
+
+shell_quote() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+remote_backend() {
+  remote_target=${BAAS_BENCH_V4_BACKEND_TARGET:-}
+  remote_root=${BAAS_BENCH_V4_BACKEND_ROOT:-}
+  remote_private_ip=${BAAS_BENCH_V4_BACKEND_PRIVATE_IP:-}
+  [ "$VERSION_PROFILE" = realworld-api-v4 ] || { echo "remote backend is restricted to the V4 profile" >&2; exit 2; }
+  printf '%s' "$remote_target" | grep -Eq '^([A-Za-z0-9][A-Za-z0-9_.-]*@)?[A-Za-z0-9][A-Za-z0-9.-]*$' || { echo "invalid backend SSH target" >&2; exit 2; }
+  case "$remote_root" in /*) ;; *) echo "backend root must be absolute" >&2; exit 2 ;; esac
+  case "$remote_root" in *[!A-Za-z0-9_./-]*|*../*|*/..|*/./*|*/.|*/|*//*) echo "invalid backend root" >&2; exit 2 ;; esac
+  case "$command" in setup|start|smoke|stop|status|compose) ;; *) usage ;; esac
+  case "$command" in setup|start|smoke) valid_private_ipv4 "$remote_private_ip" || { echo "V4 backend requires a private BAAS_BENCH_V4_BACKEND_PRIVATE_IP" >&2; exit 2; } ;; esac
+  remote_command="cd $(shell_quote "$remote_root") && BAAS_RUNTIME_DIR=$(shell_quote "$remote_root/.runtime") BAAS_VERSION_PROFILE=$(shell_quote "$VERSION_PROFILE") BAAS_BENCH_V4_BACKEND_PRIVATE_IP=$(shell_quote "$remote_private_ip") BAAS_BENCH_V4_BACKEND_TARGET='' ./bin/baas"
+  for argument do remote_command="$remote_command $(shell_quote "$argument")"; done
+  ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=yes "$remote_target" "$remote_command"
+}
+
+if [ -n "${BAAS_BENCH_V4_BACKEND_TARGET:-}" ] && [ "$command" != list ]; then
+  remote_backend "$@"
+  exit $?
+fi
 
 case "$command" in
   list) printf '%s\n' $SERVICES ;;

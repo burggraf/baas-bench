@@ -82,6 +82,24 @@ case "$docker_args" in
 esac
 exit 0
 EOF
+cat > "$TMP/bin/envoy" <<'EOF'
+#!/bin/sh
+[ "$1" = -c ] || exit 1
+config=$(dirname "$2")/lds.yaml
+grep -q '^version_info: "1"$' "$config" || exit 1
+grep -q '^resources:$' "$config" || exit 1
+grep -q '^    name: supabase$' "$config" || exit 1
+grep -q '^    name: supabase_tls$' "$config" || exit 1
+grep -q 'envoy.filters.listener.tls_inspector' "$config" || exit 1
+grep -q 'transport_protocol: tls' "$config" || exit 1
+grep -q 'filename: .*/tls/server.crt' "$config" || exit 1
+EOF
+cat > "$TMP/bin/ssh" <<'EOF'
+#!/bin/sh
+printf 'ssh' >> "$BAAS_TEST_SSH_LOG"
+for argument do printf ' <%s>' "$argument" >> "$BAAS_TEST_SSH_LOG"; done
+printf '\n' >> "$BAAS_TEST_SSH_LOG"
+EOF
 cat > "$TMP/bin/curl" <<'EOF'
 #!/bin/sh
 echo "curl $*" >> "$BAAS_TEST_LOG"
@@ -118,7 +136,7 @@ cat > "$TMP/bin/openssl" <<'EOF'
 echo "openssl $*" >> "$BAAS_TEST_LOG"
 case "$1" in
   rand) printf '%064d\n' 0 ;;
-  req)
+  req|x509)
     output=
     keyout=
     while [ "$#" -gt 0 ]; do
@@ -129,15 +147,31 @@ case "$1" in
       esac
     done
     printf '%s\n' 'test certificate' > "$output"
-    printf '%s\n' 'test private key' > "$keyout"
+    if [ -n "$keyout" ]; then printf '%s\n' 'test private key' > "$keyout"; fi
     ;;
 esac
 EOF
-chmod +x "$TMP/bin/docker" "$TMP/bin/curl" "$TMP/bin/openssl"
+chmod +x "$TMP/bin/docker" "$TMP/bin/envoy" "$TMP/bin/ssh" "$TMP/bin/curl" "$TMP/bin/openssl"
 
 export PATH="$TMP/bin:$PATH"
 export BAAS_RUNTIME_DIR="$TMP/runtime"
 export BAAS_TEST_LOG="$TMP/calls"
+export BAAS_TEST_SSH_LOG="$TMP/ssh-calls"
+mkdir -p "$TMP/envoy"
+cat > "$TMP/envoy/lds.template.yaml" <<'EOF'
+resources:
+  - '@type': type.googleapis.com/envoy.config.listener.v3.Listener
+    name: supabase
+    address:
+      socket_address:
+        address: 0.0.0.0
+        port_value: 8000
+    filter_chains:
+      - filters:
+          - name: envoy.filters.network.http_connection_manager
+EOF
+sed "s|/etc/envoy|$TMP/envoy|g" "$ROOT/services/supabase/envoy-tls-entrypoint.sh" > "$TMP/envoy-entrypoint.sh"
+DASHBOARD_USERNAME=admin DASHBOARD_PASSWORD=password ANON_KEY=anon ANON_KEY_ASYMMETRIC=anon SERVICE_ROLE_KEY=service SERVICE_ROLE_KEY_ASYMMETRIC=service SUPABASE_PUBLISHABLE_KEY=publishable SUPABASE_SECRET_KEY=secret sh "$TMP/envoy-entrypoint.sh" || fail "V4 Supabase Envoy TLS config did not render"
 "$BAAS" start directus >/dev/null
 
 stop_line=$(grep -n ' stop' "$BAAS_TEST_LOG" | head -1 | cut -d: -f1)
@@ -154,6 +188,46 @@ grep -q '^trailbase-resolved-version=0.34.1$' "$BAAS_TEST_LOG" || fail "V4 Trail
 : > "$BAAS_TEST_LOG"
 BAAS_VERSION_PROFILE=realworld-api-v4 "$BAAS" setup pocketbase >/dev/null
 grep -q '^pocketbase-resolved-dockerfile=benchmark-sets/realworld-api-v4/shared/pocketbase-go/Dockerfile$' "$BAAS_TEST_LOG" || fail "V4 PocketBase helper was not selected"
+mkdir -p "$BAAS_RUNTIME_DIR/supabase/docker/volumes/api/envoy"
+SUPABASE_V4_REF=$(awk -F= '$1 == "SUPABASE_REF" { print $2 }' "$ROOT/benchmark-sets/realworld-api-v4/versions.env")
+printf '%s\n' "$SUPABASE_V4_REF" > "$BAAS_RUNTIME_DIR/supabase/.baas-ref"
+cat > "$BAAS_RUNTIME_DIR/supabase/docker/docker-compose.yml" <<'EOF'
+services:
+  api-gw:
+    image: envoyproxy/envoy:v1.39.1
+    ports:
+      - ${API_GW_HTTP_PORT:-${KONG_HTTP_PORT:-8000}}:8000/tcp
+    volumes:
+      - ./volumes/api/envoy/docker-entrypoint.sh:/docker-entrypoint.sh:ro
+EOF
+printf '%s\n' 'SUPABASE_PUBLISHABLE_KEY=test-key' > "$BAAS_RUNTIME_DIR/supabase/docker/.env"
+BAAS_VERSION_PROFILE=realworld-api-v4 BAAS_BENCH_V4_BACKEND_PRIVATE_IP=10.0.0.10 "$BAAS" setup supabase >/dev/null
+BAAS_VERSION_PROFILE=realworld-api-v4 BAAS_BENCH_V4_BACKEND_PRIVATE_IP=10.0.0.10 "$BAAS" setup supabase >/dev/null
+grep -Fq '${API_GW_HTTPS_BIND_IP:-127.0.0.1}:${API_GW_HTTPS_PORT:-8443}:8443/tcp' "$BAAS_RUNTIME_DIR/supabase/docker/docker-compose.yml" || fail "V4 Supabase HTTPS port missing"
+grep -Fq './volumes/api/envoy/tls:/etc/envoy/tls:ro' "$BAAS_RUNTIME_DIR/supabase/docker/docker-compose.yml" || fail "V4 Supabase TLS mount missing"
+grep -Fq 'image: envoyproxy/envoy@sha256:57e14a549d7bd43c8d3f6d03e8cfa653e037d4b38e133acd9b54f38c524401b4' "$BAAS_RUNTIME_DIR/supabase/docker/docker-compose.yml" || fail "V4 Supabase Envoy image is not digest-pinned"
+grep -Fq 'API_GW_HTTP_PORT=127.0.0.1:8000' "$BAAS_RUNTIME_DIR/supabase/docker/.env" || fail "V4 Supabase HTTP listener is public"
+grep -Fq 'API_EXTERNAL_URL=https://10.0.0.10:8443' "$BAAS_RUNTIME_DIR/supabase/docker/.env" || fail "V4 Supabase native HTTPS URL missing"
+[ -f "$BAAS_RUNTIME_DIR/benchmarks/realworld-api-v4/ca.pem" ] || fail "V4 Supabase private CA missing"
+[ -f "$BAAS_RUNTIME_DIR/supabase/docker/volumes/api/envoy/tls/server.crt" ] || fail "V4 Supabase native TLS certificate missing"
+grep -Fq 'envoy.filters.listener.tls_inspector' "$BAAS_RUNTIME_DIR/supabase/docker/volumes/api/envoy/docker-entrypoint.sh" || fail "V4 Supabase Envoy TLS listener missing"
+grep -Fq 'transport_protocol: tls' "$BAAS_RUNTIME_DIR/supabase/docker/volumes/api/envoy/docker-entrypoint.sh" || fail "V4 Supabase TLS filter chain is not selected"
+: > "$BAAS_TEST_LOG"
+: > "$BAAS_TEST_SSH_LOG"
+BAAS_VERSION_PROFILE=realworld-api-v4 BAAS_BENCH_V4_BACKEND_TARGET=root@192.0.2.8 BAAS_BENCH_V4_BACKEND_ROOT=/opt/baas-bench BAAS_BENCH_V4_BACKEND_PRIVATE_IP=10.0.0.10 "$BAAS" start supabase >/dev/null
+[ ! -s "$BAAS_TEST_LOG" ] || fail "remote backend start touched local Docker"
+grep -Fq 'root@192.0.2.8' "$BAAS_TEST_SSH_LOG" || fail "V4 backend command did not use SSH"
+grep -Fq "BAAS_RUNTIME_DIR='/opt/baas-bench/.runtime'" "$BAAS_TEST_SSH_LOG" || fail "V4 backend runtime path was not forwarded"
+grep -Fq "BAAS_VERSION_PROFILE='realworld-api-v4'" "$BAAS_TEST_SSH_LOG" || fail "V4 profile was not forwarded to backend"
+grep -Fq "BAAS_BENCH_V4_BACKEND_PRIVATE_IP='10.0.0.10'" "$BAAS_TEST_SSH_LOG" || fail "V4 backend private IP was not forwarded"
+grep -Fq "./bin/baas 'start' 'supabase'" "$BAAS_TEST_SSH_LOG" || fail "remote start command or arguments were not preserved"
+: > "$BAAS_TEST_SSH_LOG"
+if BAAS_VERSION_PROFILE=realworld-api-v3 BAAS_BENCH_V4_BACKEND_TARGET=root@192.0.2.8 BAAS_BENCH_V4_BACKEND_ROOT=/opt/baas-bench "$BAAS" stop supabase >/dev/null 2>&1; then fail "remote backend proxy was accepted outside V4"; fi
+if BAAS_VERSION_PROFILE=realworld-api-v4 BAAS_BENCH_V4_BACKEND_TARGET='root@host;touch' BAAS_BENCH_V4_BACKEND_ROOT=/opt/baas-bench "$BAAS" stop supabase >/dev/null 2>&1; then fail "unsafe SSH target was accepted"; fi
+if BAAS_VERSION_PROFILE=realworld-api-v4 BAAS_BENCH_V4_BACKEND_TARGET='-root@host' BAAS_BENCH_V4_BACKEND_ROOT=/opt/baas-bench "$BAAS" stop supabase >/dev/null 2>&1; then fail "option-like SSH target was accepted"; fi
+if BAAS_VERSION_PROFILE=realworld-api-v4 BAAS_BENCH_V4_BACKEND_TARGET=root@192.0.2.8 BAAS_BENCH_V4_BACKEND_ROOT=/opt/../tmp "$BAAS" stop supabase >/dev/null 2>&1; then fail "unsafe backend root was accepted"; fi
+if BAAS_VERSION_PROFILE=realworld-api-v4 BAAS_BENCH_V4_BACKEND_TARGET=root@192.0.2.8 BAAS_BENCH_V4_BACKEND_ROOT=/opt/baas-bench BAAS_BENCH_V4_BACKEND_PRIVATE_IP=203.0.113.10 "$BAAS" start supabase >/dev/null 2>&1; then fail "public backend IP was accepted"; fi
+[ ! -s "$BAAS_TEST_SSH_LOG" ] || fail "invalid remote backend configuration invoked SSH"
 
 "$BAAS" setup appwrite >/dev/null
 [ -f "$BAAS_RUNTIME_DIR/appwrite/mongo-entrypoint.sh" ] || fail "Appwrite Mongo entrypoint was not downloaded"

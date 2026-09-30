@@ -102,6 +102,7 @@ EOF
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/docker" <<'EOF'
 #!/bin/sh
+printf '%s\n' "$*" >> "$BENCH_TEST_DOCKER_LOG"
 case "$*" in
   'version --format {{.Server.Version}}') printf '%s\n' 29.4.0 ;;
   'compose version --short') printf '%s\n' 5.1.2 ;;
@@ -110,9 +111,24 @@ case "$*" in
   *) exit 1 ;;
 esac
 EOF
-chmod +x "$FAKE_BAAS" "$TMP/bin/docker"
-export PATH="$TMP/bin:$PATH"
-export BENCH_BAAS_BIN="$FAKE_BAAS" BENCH_TEST_LOG="$TMP/log"
+mkdir -p "$TMP/remote-bin"
+cat > "$TMP/remote-bin/ssh" <<'EOF'
+#!/bin/sh
+for argument do remote_command=$argument; done
+printf '%s\n' "$remote_command" >> "$BENCH_TEST_SSH_LOG"
+case "$remote_command" in
+  'uname -s') printf '%s\n' Linux ;;
+  'uname -m') printf '%s\n' x86_64 ;;
+  "docker version --format '{{.Server.Version}}'") printf '%s\n' 29.5.0 ;;
+  'docker compose version --short') printf '%s\n' 5.2.0 ;;
+  "docker info --format '{{.NCPU}}'") printf '%s\n' 8 ;;
+  "docker info --format '{{.MemTotal}}'") printf '%s\n' 8589934592 ;;
+  *) exit 2 ;;
+esac
+EOF
+chmod +x "$FAKE_BAAS" "$TMP/bin/docker" "$TMP/remote-bin/ssh"
+export PATH="$TMP/remote-bin:$TMP/bin:$PATH"
+export BENCH_BAAS_BIN="$FAKE_BAAS" BENCH_TEST_LOG="$TMP/log" BENCH_TEST_DOCKER_LOG="$TMP/docker-calls" BENCH_TEST_SSH_LOG="$TMP/ssh-calls"
 # Dirty definitions require explicit opt-in.
 if BENCH_ALLOW_DIRTY=0 "$BENCH" run core-v1 read-throughput supabase rest-api >/dev/null 2>&1; then fail "dirty definitions accepted"; fi
 export BENCH_ALLOW_DIRTY=1
@@ -186,6 +202,21 @@ teardown:teardown:0
 stop supabase'
 actual_lifecycle=$(cut -d: -f1-3 "$TMP/log")
 [ "$actual_lifecycle" = "$expected_lifecycle" ] || fail "unexpected lifecycle order"
+
+# V4 backend mode records Docker provenance from the backend, not the controller.
+V4_SET=$BENCH_SETS_DIR/realworld-api-v4
+cp -R "$SET" "$V4_SET"
+sed -i.bench_test 's/^id=core-v1$/id=realworld-api-v4/' "$V4_SET/set.conf"
+rm -f "$V4_SET/set.conf.bench_test"
+: > "$BENCH_TEST_SSH_LOG"
+if BAAS_BENCH_V4_BACKEND_TARGET=root@192.0.2.8 BAAS_BENCH_V4_BACKEND_ROOT=/opt/baas-bench "$BENCH" run core-v1 read-throughput supabase rest-api >/dev/null 2>&1; then fail "remote backend mode was accepted for a non-V4 set"; fi
+[ ! -s "$BENCH_TEST_SSH_LOG" ] || fail "invalid remote backend profile invoked SSH"
+: > "$BENCH_TEST_DOCKER_LOG"
+: > "$BENCH_TEST_SSH_LOG"
+remote_bundle=$(BAAS_BENCH_V4_BACKEND_TARGET=root@192.0.2.8 BAAS_BENCH_V4_BACKEND_ROOT=/opt/baas-bench BENCH_LOCAL_RESULTS_DIR="$TMP/v4-remote-results" "$BENCH" run realworld-api-v4 read-throughput supabase rest-api --allow-dirty)
+jq -e '.os == "Linux" and .architecture == "x86_64" and .docker_server_version == "29.5.0" and .docker_compose_version == "5.2.0" and .docker_cpus == 8 and .docker_memory_bytes == 8589934592' "$remote_bundle/environment.json" >/dev/null || fail "remote environment manifest did not capture backend provenance"
+[ ! -s "$BENCH_TEST_DOCKER_LOG" ] || fail "remote backend run queried controller Docker"
+[ "$(wc -l < "$BENCH_TEST_SSH_LOG" | tr -d ' ')" -eq 6 ] || fail "remote backend provenance queries were incomplete"
 
 # Every path component is validated before any case path is resolved.
 if "$BENCH" validate 'core-v1/read-throughput/supabase/../rest-api' >/dev/null 2>&1; then

@@ -43,9 +43,22 @@ require_command() {
 }
 
 require_result_tools() {
-  for tool in jq git docker; do require_command "$tool" || return 1; done
+  for tool in jq git; do require_command "$tool" || return 1; done
+  if [ -n "${BAAS_BENCH_V4_BACKEND_TARGET:-}" ]; then require_command ssh || return 1; else require_command docker || return 1; fi
   command -v shasum >/dev/null 2>&1 || command -v sha256sum >/dev/null 2>&1 ||
     error "missing required tool: shasum or sha256sum"
+}
+
+validate_remote_backend() {
+  [ -n "${BAAS_BENCH_V4_BACKEND_TARGET:-}" ] || return 0
+  [ "${BAAS_VERSION_PROFILE:-}" = realworld-api-v4 ] || { error "remote backend is restricted to realworld-api-v4"; return 1; }
+  printf '%s' "$BAAS_BENCH_V4_BACKEND_TARGET" | grep -Eq '^([A-Za-z0-9][A-Za-z0-9_.-]*@)?[A-Za-z0-9][A-Za-z0-9.-]*$' || { error "invalid backend SSH target"; return 1; }
+  case "${BAAS_BENCH_V4_BACKEND_ROOT:-}" in /*) ;; *) error "backend root must be absolute"; return 1 ;; esac
+  case "$BAAS_BENCH_V4_BACKEND_ROOT" in *[!A-Za-z0-9_./-]*|*../*|*/..|*/./*|*/.|*/|*//*) error "invalid backend root"; return 1 ;; esac
+}
+
+backend_ssh() {
+  ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=yes "$BAAS_BENCH_V4_BACKEND_TARGET" "$1"
 }
 
 sha256() {
@@ -360,13 +373,24 @@ hook() {
 }
 
 write_environment() {
-  docker_version=$(docker version --format '{{.Server.Version}}')
-  compose_version=$(docker compose version --short)
-  docker_cpus=$(docker info --format '{{.NCPU}}')
-  docker_memory=$(docker info --format '{{.MemTotal}}')
+  if [ -n "${BAAS_BENCH_V4_BACKEND_TARGET:-}" ]; then
+    os=$(backend_ssh 'uname -s')
+    architecture=$(backend_ssh 'uname -m')
+    docker_version=$(backend_ssh "docker version --format '{{.Server.Version}}'")
+    compose_version=$(backend_ssh 'docker compose version --short')
+    docker_cpus=$(backend_ssh "docker info --format '{{.NCPU}}'")
+    docker_memory=$(backend_ssh "docker info --format '{{.MemTotal}}'")
+  else
+    os=$(uname -s)
+    architecture=$(uname -m)
+    docker_version=$(docker version --format '{{.Server.Version}}')
+    compose_version=$(docker compose version --short)
+    docker_cpus=$(docker info --format '{{.NCPU}}')
+    docker_memory=$(docker info --format '{{.MemTotal}}')
+  fi
   jq -n \
-    --arg os "$(uname -s)" \
-    --arg architecture "$(uname -m)" \
+    --arg os "$os" \
+    --arg architecture "$architecture" \
     --arg git_commit "$DEFINITION_COMMIT" \
     --arg versions_sha256 "$(versions_digest "$SET_ID")" \
     --arg utc_timestamp "$STARTED_AT" \
@@ -475,6 +499,7 @@ run_case() {
   validate_case "$SET_ID" "$BENCHMARK_ID" "$PLATFORM" "$VARIANT"
   unset BAAS_VERSION_PROFILE
   if [ -f "$ROOT/benchmark-sets/$SET_ID/versions.env" ]; then BAAS_VERSION_PROFILE=$SET_ID; export BAAS_VERSION_PROFILE; fi
+  validate_remote_backend
   require_result_tools
   if definition_state "$SET_ID"; then
     :

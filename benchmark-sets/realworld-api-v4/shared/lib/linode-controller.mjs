@@ -1,12 +1,12 @@
-import { randomBytes } from 'node:crypto';
-import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { createHash, randomBytes } from 'node:crypto';
+import { chmod, lstat, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { isIP } from 'node:net';
 import { hostname } from 'node:os';
 
 const API_BASE = 'https://api.linode.com';
 export const LIVE_APPROVAL_PHRASE = 'I_APPROVE_V4_LINODE_ACTIONS_UP_TO_USD_30';
-const REGIONS = ['us-west', 'us-lax'];
+const REGIONS = ['us-west', 'us-lax', 'us-sea'];
 const RESOURCES = {
   vpc: { path: '/v4/vpcs', endpoint: id => `/v4/vpcs/${id}` },
   publicFirewall: { path: '/v4/networking/firewalls', endpoint: id => `/v4/networking/firewalls/${id}` },
@@ -15,9 +15,21 @@ const RESOURCES = {
   runner: { path: '/v4/linode/instances', endpoint: id => `/v4/linode/instances/${id}` },
 };
 
+function apiErrorDetails(text, token) {
+  let errors;
+  try { errors = JSON.parse(text).errors; } catch { return ''; }
+  if (!Array.isArray(errors)) return '';
+  return errors.slice(0, 5).map(error => {
+    const clean = value => typeof value === 'string' ? value.replace(/[\r\n\t\0-\x1f\x7f]/g, ' ').split(token).join('[REDACTED]').slice(0, 180) : '';
+    const field = clean(error?.field);
+    const reason = clean(error?.reason);
+    return reason ? `${field ? `${field}: ` : ''}${reason}` : '';
+  }).filter(Boolean).join('; ').slice(0, 700);
+}
+
 export class LinodeApiError extends Error {
-  constructor(method, path, status) {
-    super(`Linode API ${method} ${path} failed (${status})`);
+  constructor(method, path, status, details = '') {
+    super(`Linode API ${method} ${path} failed (${status})${details ? `: ${details}` : ''}`);
     this.name = 'LinodeApiError';
     this.method = method;
     this.path = path;
@@ -43,17 +55,21 @@ export class LinodeApi {
     const options = { method, headers, signal: signal ? AbortSignal.any([timeoutSignal, signal]) : timeoutSignal };
     if (body !== undefined) { headers['Content-Type'] = 'application/json'; options.body = JSON.stringify(body); }
     const response = await this.fetchImpl(`${this.baseUrl}${path}`, options);
-    if (!response.ok) throw new LinodeApiError(method, path, response.status);
+    if (!response.ok) {
+      let text = '';
+      try { text = (await response.text()).slice(0, 8_192); } catch { /* keep the API status */ }
+      throw new LinodeApiError(method, path, response.status, apiErrorDetails(text, this.token));
+    }
     if (response.status === 204) return null;
     const text = await response.text();
     return text ? JSON.parse(text) : null;
   }
 
-  async list(path) {
+  async list(path, signal) {
     const items = [];
     for (let page = 1; ; page++) {
       const separator = path.includes('?') ? '&' : '?';
-      const response = await this.request('GET', `${path}${separator}page=${page}&page_size=100`);
+      const response = await this.request('GET', `${path}${separator}page=${page}&page_size=100`, undefined, signal);
       if (!response || !Array.isArray(response.data) || !Number.isSafeInteger(response.pages) || response.pages < page) throw new Error('invalid Linode paginated response');
       items.push(...response.data);
       if (page >= response.pages) return items;
@@ -72,7 +88,7 @@ export function selectHardwareProfile(regions, types, availability, options = {}
   const candidates = [];
   for (let preference = 0; preference < preferred.length; preference++) {
     const regionId = preferred[preference];
-    const region = regions.find(item => item.id === regionId && item.status === 'ok' && item.capabilities?.includes('Linode Interfaces'));
+    const region = regions.find(item => item.id === regionId && item.status === 'ok' && item.capabilities?.includes('Linode Interfaces') && item.capabilities?.includes('VPCs'));
     if (!region) continue;
     for (const type of types) {
       if (type.class !== 'dedicated' || type.memory !== 8192 || !available.has(`${regionId}/${type.id}`)) continue;
@@ -80,10 +96,23 @@ export function selectHardwareProfile(regions, types, availability, options = {}
       if (hourlyUsd !== null) candidates.push({ region: regionId, regionLabel: region.label, type, hourlyUsd, preference });
     }
   }
-  if (!candidates.length) throw new Error('no available dedicated 8192 MiB Linode type in preferred regions');
-  candidates.sort((a, b) => a.hourlyUsd - b.hourlyUsd || a.preference - b.preference || a.type.id.localeCompare(b.type.id));
-  const { preference, ...selected } = candidates[0];
+  if (!candidates.length) throw new Error('no available dedicated 8192 MiB Linode type in preferred VPC regions');
+  const preferredCandidates = candidates.filter(candidate => candidate.preference < REGIONS.length);
+  const eligible = preferredCandidates.length ? preferredCandidates : candidates;
+  eligible.sort((a, b) => a.hourlyUsd - b.hourlyUsd || a.preference - b.preference || a.type.id.localeCompare(b.type.id));
+  const { preference, ...selected } = eligible[0];
   return selected;
+}
+
+export async function resolveHardwareProfile(api) {
+  if (!api?.list || !api?.request) throw new Error('invalid Linode profile API');
+  const [regions, types] = await Promise.all([api.list('/v4/regions'), api.list('/v4/linode/types')]);
+  const preferred = [...REGIONS, ...regions.filter(item => item?.country?.toLowerCase() === 'us' && !REGIONS.includes(item.id)).map(item => item.id).sort()];
+  const vpcRegions = preferred.filter(id => regions.some(item => item.id === id && item.status === 'ok' && item.capabilities?.includes('Linode Interfaces') && item.capabilities?.includes('VPCs')));
+  const availabilityByRegion = await Promise.all(vpcRegions.map(region => api.request('GET', `/v4/regions/${region}/availability`)));
+  const availability = availabilityByRegion.flat();
+  if (!availability.every(item => item && typeof item.region === 'string' && typeof item.plan === 'string' && typeof item.available === 'boolean')) throw new Error('invalid Linode regional availability response');
+  return selectHardwareProfile(regions, types, availability, { regions: preferred });
 }
 
 export function estimatePairCost(hourlyUsd, maxHours, transferReserveUsd) {
@@ -139,6 +168,15 @@ export async function readPrivateJson(path) {
   return JSON.parse(await readFile(path, 'utf8'));
 }
 
+export async function readLinodeToken(path) {
+  if (!isAbsolute(path)) throw new Error('LINODE_TOKEN file path must be absolute');
+  const info = await lstat(path);
+  if (!info.isFile() || (info.mode & 0o077) !== 0) throw new Error('LINODE_TOKEN file must be a private regular file');
+  const match = /^LINODE_TOKEN=([^\r\n]+)\r?\n?$/.exec(await readFile(path, 'utf8'));
+  if (!match || /\s/.test(match[1])) throw new Error('invalid LINODE_TOKEN file');
+  return match[1];
+}
+
 function validCidr(value, hostOnly = false) {
   if (typeof value !== 'string') return false;
   const [address, prefix, extra] = value.split('/');
@@ -179,8 +217,19 @@ async function persist(inventory, options) {
   else if (options.inventoryPath) await writePrivateJson(options.inventoryPath, inventory);
 }
 
+function resourceLabels(runId) {
+  const short = kind => createHash('sha256').update(`${runId}:${kind}`).digest('hex').slice(0, 24);
+  return {
+    vpc: `bv4-${runId}-vpc`,
+    publicFirewall: `b4-pub-${short('publicFirewall')}`,
+    vpcFirewall: `b4-vpc-${short('vpcFirewall')}`,
+    backend: `bv4-${runId}-backend`,
+    runner: `bv4-${runId}-runner`,
+  };
+}
+
 function resourcePayloads(config, runTag) {
-  const labels = Object.fromEntries(Object.keys(RESOURCES).map(kind => [kind, `bv4-${config.runId}-${kind}`]));
+  const labels = resourceLabels(config.runId);
   const privateIps = privateV4Pair(config.subnetCidr);
   const vpc = {
     label: labels.vpc,
@@ -202,6 +251,7 @@ function resourcePayloads(config, runTag) {
     type: config.type,
     image: config.image,
     booted: true,
+    network_helper: true,
     interface_generation: 'linode',
     authorized_keys: [config.sshPublicKey],
     tags: ['baas-bench-v4', runTag],
@@ -260,10 +310,6 @@ export async function provisionPair(options) {
       if (!subnet?.id) throw new Error('Linode VPC response omitted the requested subnet');
       resource.subnetId = subnet.id;
     }
-    if (kind === 'backend' || kind === 'runner') {
-      resource.publicIpv4 = Array.isArray(response.ipv4) ? response.ipv4.find(value => isIP(value) === 4) : undefined;
-      resource.privateIpv4 = privateIps[kind];
-    }
     inventory.resources[kind] = resource;
     inventory.pending = null;
     await persist(inventory, options);
@@ -315,10 +361,6 @@ async function reconcilePending({ api, inventory, options }) {
     if (!subnet?.id) throw new Error('recovered VPC is missing its expected subnet');
     resource.subnetId = subnet.id;
   }
-  if (pending.kind === 'backend' || pending.kind === 'runner') {
-    resource.publicIpv4 = Array.isArray(item.ipv4) ? item.ipv4.find(value => isIP(value) === 4) : undefined;
-    resource.privateIpv4 = inventory.private_ips?.[pending.kind];
-  }
   inventory.resources[pending.kind] = resource;
   inventory.pending = null;
   await persist(inventory, options);
@@ -331,6 +373,45 @@ function ownsResource(kind, actual, expected, inventory) {
   return true;
 }
 
+function publicIpv4(address) {
+  if (isIP(address) !== 4) return false;
+  const [a, b, c] = address.split('.').map(Number);
+  return !(a === 0 || a === 10 || a === 127 || a >= 224 ||
+    (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && (b === 168 || (b === 0 && (c === 0 || c === 2)) || (b === 88 && c === 99))) ||
+    (a === 198 && (b === 18 || b === 19 || (b === 51 && c === 100))) ||
+    (a === 203 && b === 0 && c === 113));
+}
+
+async function verifyInstanceNetwork(api, path, inventory, kind, signal) {
+  const envelope = await api.request('GET', `${path}/interfaces`, undefined, signal);
+  if (!envelope || !Array.isArray(envelope.interfaces) || Object.keys(envelope).some(key => key !== 'interfaces')) throw new Error(`invalid interfaces envelope for ${kind}`);
+  const interfaces = envelope.interfaces;
+  if (interfaces.length !== 2 || interfaces.some(iface => !Number.isSafeInteger(iface?.id) || iface.id < 1) || new Set(interfaces.map(iface => iface.id)).size !== 2) throw new Error(`invalid network interface IDs for ${kind}`);
+  const publicInterface = interfaces.filter(iface => iface.public && !iface.vpc && !iface.vlan);
+  const vpcInterface = interfaces.filter(iface => iface.vpc && !iface.public && !iface.vlan);
+  if (publicInterface.length !== 1 || vpcInterface.length !== 1) throw new Error(`expected unique public and VPC interfaces for ${kind}`);
+  const primaryAddress = network => {
+    const addresses = network?.ipv4?.addresses;
+    if (!Array.isArray(addresses)) throw new Error(`missing interface addresses for ${kind}`);
+    const primary = addresses.filter(item => item?.primary === true);
+    if (primary.length !== 1 || isIP(primary[0].address) !== 4) throw new Error(`invalid primary interface address for ${kind}`);
+    return primary[0].address;
+  };
+  const publicAddress = primaryAddress(publicInterface[0].public);
+  const privateAddress = primaryAddress(vpcInterface[0].vpc);
+  const vpc = inventory.resources.vpc;
+  if (!publicIpv4(publicAddress) || publicInterface[0].default_route?.ipv4 !== true) throw new Error(`invalid public interface address or route for ${kind}`);
+  if (vpcInterface[0].vpc.subnet_id !== vpc.subnetId || vpcInterface[0].vpc.vpc_id !== vpc.id || privateAddress !== inventory.private_ips[kind] || vpcInterface[0].default_route?.ipv4 !== false) throw new Error(`invalid VPC interface network for ${kind}`);
+  for (const [iface, firewallKind] of [[publicInterface[0], 'publicFirewall'], [vpcInterface[0], 'vpcFirewall']]) {
+    const attached = await api.list(`${path}/interfaces/${iface.id}/firewalls`, signal);
+    const expected = inventory.resources[firewallKind];
+    if (!Array.isArray(attached) || attached.length !== 1 || !ownsResource(firewallKind, attached[0], expected, inventory) || attached[0].status !== 'enabled') throw new Error(`invalid ${firewallKind} interface firewall attachment for ${kind}`);
+  }
+  return { publicIpv4: publicAddress, privateIpv4: privateAddress };
+}
+
 async function waitForInstance({ api, inventory, kind, sleep, readyTimeoutMs, pollIntervalMs, options }) {
   const resource = inventory.resources[kind];
   const path = endpointFor(kind, resource);
@@ -340,8 +421,9 @@ async function waitForInstance({ api, inventory, kind, sleep, readyTimeoutMs, po
     if (!ownsResource(kind, actual, resource, inventory)) throw new Error(`ownership check failed while waiting for ${kind} ${resource.id}`);
     if (options.signal?.aborted) throw options.signal.reason ?? new Error('Linode provisioning cancelled');
     if (actual.status === 'running') {
+      const addresses = await verifyInstanceNetwork(api, path, inventory, kind, options.signal);
       resource.status = 'running';
-      resource.publicIpv4 = Array.isArray(actual.ipv4) ? actual.ipv4.find(value => isIP(value) === 4) : resource.publicIpv4;
+      Object.assign(resource, addresses);
       await persist(inventory, options);
       return;
     }
@@ -380,11 +462,11 @@ function validateInventory(inventory) {
   if (!inventory || inventory.schema_version !== 1 || !/^[a-z0-9][a-z0-9-]{5,40}$/.test(inventory.run_id ?? '') || inventory.run_tag !== `run-${inventory.run_id}` || !inventory.resources || typeof inventory.resources !== 'object' || Array.isArray(inventory.resources)) throw new Error('invalid V4 inventory for cleanup');
   for (const kind of Object.keys(RESOURCES)) {
     const resource = inventory.resources[kind];
-    if (resource && (!Number.isSafeInteger(resource.id) || resource.id < 1 || resource.label !== `bv4-${inventory.run_id}-${kind}`)) throw new Error(`invalid ownership record for ${kind}`);
+    if (resource && (!Number.isSafeInteger(resource.id) || resource.id < 1 || resource.label !== resourceLabels(inventory.run_id)[kind])) throw new Error(`invalid ownership record for ${kind}`);
   }
   if (inventory.pending) {
     const pendingKind = inventory.pending.kind;
-    if (!RESOURCES[pendingKind] || inventory.pending.endpoint !== RESOURCES[pendingKind].path || inventory.pending.label !== `bv4-${inventory.run_id}-${pendingKind}`) throw new Error('invalid pending ownership record');
+    if (!RESOURCES[pendingKind] || inventory.pending.endpoint !== RESOURCES[pendingKind].path || inventory.pending.label !== resourceLabels(inventory.run_id)[pendingKind]) throw new Error('invalid pending ownership record');
   }
 }
 
@@ -414,8 +496,8 @@ export async function cleanupPair({ api, inventory, save, inventoryPath, sleep =
 }
 
 export async function runObservation(options) {
-  const { api, config, inventoryPath, campaignPath, hourlyUsd, maxHours, transferReserveUsd, run, verify, notify, now = Date.now } = options;
-  if (!api?.request || typeof run !== 'function' || typeof verify !== 'function' || !isAbsolute(inventoryPath ?? '') || !isAbsolute(campaignPath ?? '') || resolve(inventoryPath) === resolve(campaignPath) || !Number.isFinite(maxHours) || maxHours <= 0 || maxHours > 24) throw new Error('invalid V4 observation configuration');
+  const { api, config, inventoryPath, campaignPath, hourlyUsd, maxHours, transferReserveUsd, run, verify, bootstrap, notify, now = Date.now } = options;
+  if (!api?.request || typeof run !== 'function' || typeof verify !== 'function' || (bootstrap !== undefined && typeof bootstrap !== 'function') || !isAbsolute(inventoryPath ?? '') || !isAbsolute(campaignPath ?? '') || resolve(inventoryPath) === resolve(campaignPath) || !Number.isFinite(maxHours) || maxHours <= 0 || maxHours > 24) throw new Error('invalid V4 observation configuration');
   validateProvisionConfig(config);
   if (api instanceof LinodeApi && (options.liveApproval !== LIVE_APPROVAL_PHRASE || options.deleteConfirmation !== config.runId)) throw new Error('explicit live approval and run-ID deletion confirmation are required');
   // ponytail: reserve one hour for provisioning and teardown; overruns retain the lock and budget reservation until recovery.
@@ -432,6 +514,8 @@ export async function runObservation(options) {
   let ledger;
   let inventory;
   let result;
+  let bootstrapWork;
+  let runWork;
   let primary;
   let cleanupError;
   const startedAt = now();
@@ -449,12 +533,24 @@ export async function runObservation(options) {
     reserveCampaignSpend(ledger, config.runId, estimateUsd);
     await writePrivateJson(campaignPath, ledger);
     inventory = await provisionPair({ ...options, save, signal: controller.signal });
+    if (bootstrap) {
+      inventory.status = 'bootstrapping';
+      await save(inventory);
+      bootstrapWork = Promise.resolve().then(() => bootstrap({ inventory, signal: controller.signal }));
+      await Promise.race([bootstrapWork, aborted]);
+    }
     inventory.status = 'running';
     await save(inventory);
-    result = await Promise.race([Promise.resolve().then(() => run({ inventory, signal: controller.signal })), aborted]);
+    runWork = Promise.resolve().then(() => run({ inventory, signal: controller.signal }));
+    result = await Promise.race([runWork, aborted]);
     if (controller.signal.aborted) throw controller.signal.reason;
     await verify(result, inventory);
-  } catch (error) { primary = error; }
+  } catch (error) {
+    primary = error;
+    for (const [key, work] of [['bootstrapError', bootstrapWork], ['runError', runWork]]) {
+      if (work) await work.catch(secondary => { if (secondary !== primary) attachError(primary, key, secondary); });
+    }
+  }
   clearTimeout(timeout);
 
   if (inventory && inventory.status !== 'deleted') {
