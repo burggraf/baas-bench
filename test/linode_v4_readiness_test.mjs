@@ -127,7 +127,7 @@ exit "$SSH_EXIT"
     for (const [trace, stage, reason, status] of [
       ['ssh: connect to host 192.0.2.8 port 22: Operation timed out', 'unknown', 'timeout', 255],
       ['debug1: SSH2_MSG_KEXINIT sent\nHost key verification failed.', 'key-exchange', 'host-key', 255],
-      ['debug1: SSH2_MSG_NEWKEYS received\nroot@192.0.2.8: Permission denied (publickey).', 'authentication', 'authentication', 255],
+      ['debug1: SSH2_MSG_NEWKEYS received\ndebug1: Next authentication method: publickey\nroot@192.0.2.8: Permission denied (publickey).', 'authentication', 'authentication', 255],
       ['Authenticated to 192.0.2.8\ndebug1: Sending command: synthetic-secret', 'command-sent', 'unknown', 42],
     ]) {
       await assert.rejects(runCommand(cli, ['stop', 'supabase'], { env: { ...env, SSH_TRACE_TEXT: trace, SSH_EXIT: String(status) } }), error => {

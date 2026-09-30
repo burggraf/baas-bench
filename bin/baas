@@ -475,7 +475,8 @@ remote_backend() {
       /^debug1: Connection established\.$/ { stage = "tcp-connected" }
       /^debug1: Remote protocol version / { stage = "banner-received" }
       /^debug1: SSH2_MSG_KEXINIT sent/ { stage = "key-exchange" }
-      /^debug1: SSH2_MSG_NEWKEYS received/ { stage = "authentication" }
+      /^debug1: SSH2_MSG_NEWKEYS received/ { stage = "kex-complete" }
+      /^debug1: Next authentication method:|^debug1: Offering public key:|^[^[:space:]]+@[^[:space:]]+: Permission denied/ { stage = "authentication" }
       /^Authenticated to / { stage = "authenticated" }
       /^debug1: Sending command:/ { stage = "command-sent" }
       /^(ssh_dispatch_run_fatal: Connection|Connection |ssh: connect to host ).*([Oo]peration timed out|timed out)/ { reason = "timeout" }
