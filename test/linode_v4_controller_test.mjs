@@ -322,6 +322,36 @@ test('ambiguous creation is reconciled by unique run label; primary create error
   assert.match(String(error.cleanupError), /simulated delete failure/);
 });
 
+test('pilot preflight checks local tools, validated definitions, and tracked/untracked launch changes', async () => {
+  const { preflightPilot } = await import('../benchmark-sets/realworld-api-v4/shared/lib/bench-execution.mjs');
+  for (const dirty of ['', ' M benchmark-sets/realworld-api-v4/shared/lib/run.mjs\n', '?? benchmark-sets/realworld-api-v4/shared/new.mjs\n', ' M bin/bench\n']) {
+    const calls = [];
+    const task = preflightPilot({ repositoryRoot: '/repo', command: async (name, args, options) => {
+      calls.push([name, args]); assert.equal(options.cwd, '/repo'); assert.equal(options.timeoutMs, 30_000);
+      return { stdout: name === 'git' ? dirty : 'PASS\n' };
+    } });
+    if (dirty) await assert.rejects(task, /dirty; commit them before provisioning/); else await task;
+    assert.equal(calls[0][0], 'sh');
+    assert.deepEqual(calls[1], ['/repo/bin/bench', ['validate', 'realworld-api-v4/project-management-capacity/supabase/javascript-sdk']]);
+    assert.ok(calls[2][1].includes('--porcelain'));
+    assert.ok(calls[2][1].includes('bin/bench-v4-linode.mjs'));
+  }
+  await assert.rejects(preflightPilot({ repositoryRoot: '/repo', command: async () => { throw new Error('missing controller tool'); } }), /missing controller tool/);
+});
+
+test('pilot rejects a failed local preflight before querying Linode or creating credentials', async () => {
+  const { runPilot } = await import('../benchmark-sets/realworld-api-v4/shared/lib/pilot-workflow.mjs');
+  let paidWork = false;
+  await assert.rejects(runPilot({
+    api: { request() {}, list: async () => { paidWork = true; } },
+    config: { runId: 'obs-preflight123' }, repositoryRoot: '/repo', bootstrapScriptPath: '/script', controllerCidr: '203.0.113.4/32',
+    preflight: async () => { throw new Error('pilot definitions are dirty'); },
+    selectProfile: async () => { paidWork = true; throw new Error('must not reach Linode'); },
+    createKey: async () => { paidWork = true; throw new Error('must not create credentials'); },
+  }), /pilot definitions are dirty/);
+  assert.equal(paidWork, false);
+});
+
 test('pilot workflow profiles, deploys, runs, and cleans its ephemeral SSH credential', async () => {
   const { runPilot } = await import('../benchmark-sets/realworld-api-v4/shared/lib/pilot-workflow.mjs');
   const events = [];
@@ -329,6 +359,7 @@ test('pilot workflow profiles, deploys, runs, and cleans its ephemeral SSH crede
   const key = { privateKey: '/tmp/pilot-key', publicKey: 'ssh-ed25519 AAAATEST pilot', cleanup: async () => { events.push('key-cleanup'); } };
   const result = await runPilot({
     api: { request() {}, list: async path => { assert.equal(path, '/v4/profile/sshkeys'); return [{ label: 'mba-m1', ssh_key: 'ssh-ed25519 AAAATEST mba-m1' }]; } }, config: { runId: 'obs-20260929-abc123', image: 'linode/ubuntu24.04' }, repositoryRoot: '/repo', bootstrapScriptPath: fileURLToPath(new URL('../services/linode/bootstrap.sh', import.meta.url)), inventoryPath: '/tmp/inventory.json', campaignPath: '/tmp/ledger.json', controllerCidr: '203.0.113.4/32', maxHours: 2, transferReserveUsd: 1, liveApproval: 'approval', deleteConfirmation: 'obs-20260929-abc123',
+    preflight: async () => {},
     selectProfile: async () => ({ region: 'us-lax', type: { id: 'g6-dedicated-4', transfer: 5000 }, hourlyUsd: .1 }), createKey: async () => key,
     startAgent: async () => ({ env: { SSH_AUTH_SOCK: '/tmp/agent' }, stop: async () => { events.push('agent-stop'); } }),
     deploy: async ({ inventory, runnerKeyFile }) => { events.push('deploy'); assert.equal(runnerKeyFile, key.privateKey); return { environment: { DEPLOYED: inventory.resources.backend.privateIpv4, BAAS_BENCH_V4_SSH_CONFIG: '/stale/ssh_config' }, hostProvenance: { backend: { dockerService: 'active' }, runner: { dockerService: 'active' } } }; },
@@ -348,6 +379,7 @@ test('pilot fails before creating its run key when the named Linode SSH key is a
     config: { runId: 'obs-20260929-abc123', image: 'linode/ubuntu24.04' },
     repositoryRoot: '/repo', bootstrapScriptPath: '/repo/services/linode/bootstrap.sh',
     inventoryPath: '/tmp/inventory.json', campaignPath: '/tmp/ledger.json', controllerCidr: '203.0.113.4/32',
+    preflight: async () => {},
     selectProfile: async () => ({ region: 'us-lax', type: { id: 'g6-dedicated-4', transfer: 5000 }, hourlyUsd: .1 }),
     createKey: async () => { keyCreated = true; throw new Error('must not generate a run key'); },
   }), /Linode account SSH key "mba-m1" is missing or ambiguous/);
@@ -537,6 +569,7 @@ for (const failure of [false, true]) {
     const agentError = new Error('agent cleanup failed');
     let keyCleaned = false;
     await assert.rejects(runPilot({ api: { request() {}, list: async () => [{ label: 'mba-m1', ssh_key: 'ssh-ed25519 AAAATEST mba-m1' }] }, config: { runId: 'obs-test123' }, repositoryRoot: '/repo', bootstrapScriptPath: '/script', controllerCidr: '203.0.113.4/32',
+      preflight: async () => {},
       selectProfile: async () => ({ type: { transfer: 1 } }),
       createKey: async () => ({ cleanup: async () => { keyCleaned = true; if (failure) throw new Error('key cleanup failed'); } }),
       startAgent: async () => ({ stop: async () => { throw agentError; } }),
@@ -669,6 +702,7 @@ test('pilot preserves primary and all cleanup failures while attempting private 
   let cleaned = false;
   try {
     await assert.rejects(runPilot({ api: { request() {}, list: async () => [{ label: 'mba-m1', ssh_key: 'ssh-ed25519 AAAATEST mba-m1' }] }, config: { runId: 'obs-test123' }, repositoryRoot: '/repo', bootstrapScriptPath: '/script', controllerCidr: '203.0.113.4/32',
+      preflight: async () => {},
       selectProfile: async () => ({ type: { transfer: 1 } }),
       createKey: async () => ({ cleanup: async () => { throw new Error('key cleanup failed'); } }),
       createSshConfig: async () => ({ ...state, cleanup: async () => { cleaned = true; await state.cleanup(); throw new Error('SSH state cleanup failed'); } }),

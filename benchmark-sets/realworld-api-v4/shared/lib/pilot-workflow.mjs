@@ -4,7 +4,7 @@ import { createEphemeralSshKey, startSshAgent } from './ephemeral-ssh.mjs';
 import { readBootstrapScript } from './remote-bootstrap.mjs';
 import { bootstrapAndDeploy } from './observation-workflow.mjs';
 import { resolveHardwareProfile, runObservation } from './linode-controller.mjs';
-import { runBench, verifyPilotBundle } from './bench-execution.mjs';
+import { preflightPilot, runBench, verifyPilotBundle } from './bench-execution.mjs';
 import { createProgress, emitProgress } from './progress.mjs';
 
 export async function runPilot(options) {
@@ -26,6 +26,7 @@ export async function runPilot(options) {
   let primary;
   progress.phase('preflight');
   try {
+    await (options.preflight ?? preflightPilot)({ repositoryRoot });
     const profile = await selectProfile(api);
     if (typeof api.list !== 'function') throw new Error('Linode account SSH key listing is unavailable');
     const accountKeys = (await api.list('/v4/profile/sshkeys')).filter(item => item?.label === 'mba-m1');

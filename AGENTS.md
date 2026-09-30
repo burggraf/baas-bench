@@ -94,3 +94,15 @@ Generated `TODO` markers and failing hooks are intentional. A new scaffold must 
 Measured runs must write the normalized `summary.json` contract documented in `docs/benchmarks.md`. Native output belongs in the trial's `raw/` directory.
 
 Never commit `.runtime/`, `.results/`, credentials, connection strings, or raw benchmark output. Publish only through `bin/bench publish`; it rejects dirty, debug, failed, invalid, stale, malformed, or tampered bundles. Do not hand-edit published evidence or calculate cross-case rankings unless an approved reporting methodology exists.
+
+## V4 live pilot progress
+
+While an authorized Linode V4 pilot is running, inspect its local status without a token, SSH, or another monitoring connection:
+
+```sh
+node bin/bench-v4-linode.mjs status .runtime/linode-v4/runs/RUN_ID/inventory.json
+```
+
+Replace `RUN_ID` with the pilot's run ID. The command reads the sibling private `progress.json` and reports the latest phase/counters per source, heartbeat and activity ages, phase-only estimates, controller liveness, and stale warnings. A stale runner/seed heartbeat means progress is unconfirmed—not that the process is dead. Do not retry work or recover/delete resources based on that warning alone; inspect the inventory and follow the existing approval/recovery safeguards. The V4 README's [Live progress](benchmark-sets/realworld-api-v4/README.md#live-progress) section documents fields, phases, and transport behavior.
+
+For an assigned live pilot, schedule local status snapshots at the requested interval (currently 20 minutes), not a wake-up on every heartbeat. Keep the owning Pi process running: managed-process shutdown kills its jobs and removes temporary logs. Retain controller/monitor logs privately in the run directory. If the controller disappears, inspect inventory ownership and cleanup state as well as progress; recovered resources may be deleted while the last progress event still says deployment. Never automatically restart a paid attempt.

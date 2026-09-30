@@ -1,11 +1,20 @@
 import { spawn } from 'node:child_process';
-import { spawnManaged, waitForChild } from './command.mjs';
+import { runCommand, spawnManaged, waitForChild } from './command.mjs';
 import { readFile, stat } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import { progressDecoder } from './progress.mjs';
 import { verifyTransferManifest } from './transfer.mjs';
 
 const MAX_RUN_MS = 12 * 60 * 60 * 1_000;
+
+export async function preflightPilot({ repositoryRoot, command = runCommand }) {
+  if (!isAbsolute(repositoryRoot ?? '') || repositoryRoot.includes('\0')) throw new Error('invalid pilot repository path');
+  const options = { cwd: repositoryRoot, timeoutMs: 30_000 };
+  await command('sh', ['-c', 'for tool in git jq ssh rsync node; do command -v "$tool" >/dev/null || { printf "missing controller tool: %s\\n" "$tool" >&2; exit 1; }; done; command -v shasum >/dev/null || command -v sha256sum >/dev/null'], options);
+  await command(join(repositoryRoot, 'bin/bench'), ['validate', 'realworld-api-v4/project-management-capacity/supabase/javascript-sdk'], options);
+  const { stdout } = await command('git', ['-C', repositoryRoot, 'status', '--porcelain', '--', 'benchmark-sets/realworld-api-v4', 'bin/baas', 'bin/bench', 'bin/bench-v4-linode.mjs'], options);
+  if (stdout.trim()) throw new Error('V4 pilot definitions or launch scripts are dirty; commit them before provisioning');
+}
 
 export function runBench({ repositoryRoot, environment = {}, signal, spawnImpl = spawn, timeoutMs = MAX_RUN_MS, onProgress = () => {} } = {}) {
   if (!isAbsolute(repositoryRoot) || repositoryRoot.includes('\0') || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_RUN_MS) throw new Error('invalid benchmark execution configuration');
