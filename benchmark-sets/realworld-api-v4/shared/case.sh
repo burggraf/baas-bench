@@ -122,6 +122,7 @@ else
   exit "$admin_status"
 fi
 if [ "$action" = setup ]; then
+  node "$runtime/lib/progress.mjs" lifecycle sync-runner || :
   validate_runner
   if [ "$platform" = supabase ]; then prepare_supabase_runner_config; fi
   node "$runtime/lib/remote-config.mjs" prepare "$platform" "$runtime" "$repo_root" "$runner_root"

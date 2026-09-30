@@ -521,7 +521,15 @@ export async function runObservation(options) {
   let primary;
   let cleanupError;
   const startedAt = now();
-  const save = async value => { inventory = value; await writePrivateJson(inventoryPath, value); };
+  let lastStatus;
+  const save = async value => {
+    inventory = value;
+    await writePrivateJson(inventoryPath, value);
+    if (value.status !== lastStatus) {
+      lastStatus = value.status;
+      try { options.onStatus?.(lastStatus); } catch { /* monitoring does not change lifecycle outcomes */ }
+    }
+  };
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(new Error('V4 observation exceeded its maximum duration')), maxHours * 3_600_000);
   const aborted = new Promise((_, reject) => controller.signal.addEventListener('abort', () => reject(controller.signal.reason), { once: true }));

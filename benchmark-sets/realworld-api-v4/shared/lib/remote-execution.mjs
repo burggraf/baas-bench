@@ -3,6 +3,7 @@ import { pathToFileURL } from 'node:url';
 import { runCommand, spawnManaged, waitForChild } from './command.mjs';
 import { sshTransportArgs } from './ssh-config.mjs';
 import { verifyTransferManifest } from './transfer.mjs';
+import { emitProgress, progressDecoder, createProgress } from './progress.mjs';
 
 const PLATFORMS = new Set(['supabase', 'convex', 'appwrite', 'nhost', 'directus', 'pocketbase', 'trailbase', 'neon']);
 const SSH_OPTIONS = ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5'];
@@ -17,8 +18,8 @@ export function runLongCommand(command, args, options = {}) {
   return Promise.resolve().then(async () => {
     options.signal?.throwIfAborted();
     const transportArgs = await sshTransportArgs(command, args, options.env ?? process.env);
-    const child = spawnManaged(command, transportArgs, { stdio: 'ignore', env: options.env, cwd: options.cwd });
-    const { code, signal } = await waitForChild(child, { timeoutMs, signal: options.signal, label: 'remote command' });
+    const child = spawnManaged(command, transportArgs, { stdio: ['ignore', 'pipe', 'pipe'], env: options.env, cwd: options.cwd });
+    const { code, signal } = await waitForChild(child, { timeoutMs, signal: options.signal, label: 'remote command', tailOutput: true, onStderr: progressDecoder(event => { if (event.source === 'runner') emitProgress(event); }) });
     if (code !== 0) throw new Error(`remote command failed${code === null ? ` (${signal ?? 'signal'})` : ` (${code})`}`);
     return { stdout: '', stderr: '' };
   });
@@ -38,6 +39,7 @@ export async function runRemoteTrial(context, dependencies = {}) {
   const command = dependencies.runCommand ?? runCommand;
   const longCommand = dependencies.runLongCommand ?? runLongCommand;
   const ssh = (remoteCommand, timeout = 30_000) => command('ssh', [...SSH_OPTIONS, target, remoteCommand], { timeoutMs: timeout });
+  const progress = createProgress('lifecycle');
   let remoteOutput;
   let primary;
   let transferred = false;
@@ -50,11 +52,13 @@ export async function runRemoteTrial(context, dependencies = {}) {
     } catch (error) { primary = error; }
 
     if (remoteOutput) {
-      const remoteCommand = `umask 077 && BAAS_BENCH_ROOT=${remoteRoot} BAAS_BENCH_RUNTIME=${remoteRuntime} BAAS_BENCH_V4_REMOTE_CONFIG=${remoteRuntime}/remote-config.json node ${remoteRuntime}/lib/remote-run.mjs ${platform} ${phase} ${trial} ${remoteOutput}`;
+      progress.phase('run');
+      const remoteCommand = `umask 077 && BAAS_BENCH_V4_PROGRESS_FD=2 BAAS_BENCH_ROOT=${remoteRoot} BAAS_BENCH_RUNTIME=${remoteRuntime} BAAS_BENCH_V4_REMOTE_CONFIG=${remoteRuntime}/remote-config.json node ${remoteRuntime}/lib/remote-run.mjs ${platform} ${phase} ${trial} ${remoteOutput}`;
       try { await longCommand('ssh', [...SSH_OPTIONS, target, remoteCommand], { timeoutMs, signal: context.signal }); }
       catch (error) { primary = error; }
 
       try {
+        progress.phase('transfer');
         await ssh(`node ${remoteRuntime}/lib/transfer.mjs seal ${remoteOutput}`, 300_000);
         await command('rsync', ['-a', '--', `${target}:${remoteOutput}/`, `${outputDir}/`], { timeoutMs: 300_000 });
         await verifyTransferManifest(outputDir);
@@ -70,6 +74,8 @@ export async function runRemoteTrial(context, dependencies = {}) {
       catch (error) { if (!primary) primary = error; else attachSecondary(primary, 'cleanupError', error); }
     }
   }
+  progress.phase(primary ? 'failed' : 'complete');
+  progress.stop();
   if (primary) throw primary;
   return { transferred, remoteOutputDir: remoteOutput };
 }

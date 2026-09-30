@@ -53,7 +53,9 @@ export async function runWorkload(backend, config, options) {
         await backend.prepareWorkload();
     const loopController = new AbortController();
     const requestController = new AbortController();
-    const summary = { requestedUsers: options.users.length, startedUsers: 0, completedWorkflowCount: 0, failedWorkflowCount: 0, lostUsers: 0, graceExpired: false, stageFailed: false, closeErrors: 0, preparationFailed: false, preparationFailureCount: 0 };
+    const summary = { requestedUsers: options.users.length, startedUsers: 0, completedWorkflowCount: 0, failedWorkflowCount: 0, lostUsers: 0, graceExpired: false, stageFailed: false, closeErrors: 0, preparationFailed: false, preparationFailureCount: 0, failureReasons: [] };
+    const fail = reason => { summary.stageFailed = true; if (!summary.failureReasons.includes(reason)) summary.failureReasons.push(reason); };
+    const progress = (phase, fields = {}) => { try { options.onProgress?.(phase, fields); } catch { /* diagnostic only */ } };
     const active = new Set();
     let requestsCancelled = false;
     const stopScheduling = () => { if (!loopController.signal.aborted)
@@ -69,9 +71,9 @@ export async function runWorkload(backend, config, options) {
     const abortWorkload = () => { stopScheduling(); cancelPending(); };
     let boundaryClosing = false;
     const stopFromParent = () => { if (boundaryClosing)
-        return; summary.stageFailed = true; abortWorkload(); };
+        return; fail('parent_cancelled'); abortWorkload(); };
     if (options.signal?.aborted) {
-        summary.stageFailed = true;
+        fail('parent_cancelled');
         abortWorkload();
     }
     else
@@ -111,7 +113,7 @@ export async function runWorkload(backend, config, options) {
         const unresolved = [...active].filter(session => !closed.has(session)).length;
         summary.closeErrors = unresolved;
         if (unresolved > 0)
-            summary.stageFailed = true;
+            fail('session_cleanup');
     };
     const awaitWorkersAfterDrainDeadline = async (workersDone) => {
         let settled = false;
@@ -123,7 +125,7 @@ export async function runWorkload(backend, config, options) {
         drainController.abort();
         if (!settled) {
             summary.graceExpired = true;
-            summary.stageFailed = true;
+            fail('drain_deadline');
             abortWorkload();
         }
         await workersDone;
@@ -141,14 +143,14 @@ export async function runWorkload(backend, config, options) {
         if (requestController.signal.aborted) {
             summary.preparationFailed = true;
             summary.preparationFailureCount = options.users.length;
-            summary.stageFailed = true;
+            fail('preparation_cancelled');
             return false;
         }
         for (let offset = 0; offset < options.users.length; offset += sessionPreparationConcurrency) {
             if (requestController.signal.aborted) {
                 summary.preparationFailed = true;
                 summary.preparationFailureCount = options.users.length - offset;
-                summary.stageFailed = true;
+                fail('preparation_cancelled');
                 return false;
             }
             const batch = options.users.slice(offset, offset + sessionPreparationConcurrency);
@@ -162,10 +164,11 @@ export async function runWorkload(backend, config, options) {
                 else
                     failures++;
             }
+            progress('prepare-sessions', { prepared_users: active.size });
             if (failures || requestController.signal.aborted) {
                 summary.preparationFailed = true;
                 summary.preparationFailureCount = failures + (requestController.signal.aborted ? 1 : 0);
-                summary.stageFailed = true;
+                fail('session_preparation');
                 return false;
             }
         }
@@ -216,7 +219,7 @@ export async function runWorkload(backend, config, options) {
             catch (error) {
                 summary.failedWorkflowCount++;
                 if (isIntegrityError(error) || options.stopOnError) {
-                    summary.stageFailed = true;
+                    fail(options.stopOnError ? 'stop_on_error' : 'integrity_error');
                     abortWorkload();
                     break;
                 }
@@ -238,7 +241,7 @@ export async function runWorkload(backend, config, options) {
             }
             catch (error) {
                 if (!isAbort(error))
-                    summary.stageFailed = true;
+                    fail('think_timer');
                 break;
             }
         }
@@ -262,7 +265,7 @@ export async function runWorkload(backend, config, options) {
         measurementStarted = true;
         measuring = true;
         const deadline = now() + durationMs;
-        const workers = users.map(({ spec, random }, index) => runUser(spec, random, [...active][index], deadline).catch(error => { summary.stageFailed = true; if (!isAbort(error))
+        const workers = users.map(({ spec, random }, index) => runUser(spec, random, [...active][index], deadline).catch(error => { fail('worker_exception'); if (!isAbort(error))
             summary.failedWorkflowCount++; }));
         allWorkers = Promise.all(workers).then(() => undefined);
         const workersDone = allWorkers;
@@ -277,7 +280,7 @@ export async function runWorkload(backend, config, options) {
         graceController.abort();
         if (!settled) {
             summary.graceExpired = true;
-            summary.stageFailed = true;
+            fail('grace_deadline');
             cancelPending();
         }
         if (!settled)
@@ -290,7 +293,7 @@ export async function runWorkload(backend, config, options) {
         await options.onMeasuredEnd?.();
     }
     catch (error) {
-        summary.stageFailed = true;
+        fail('measurement_exception');
         if (!isAbort(error))
             summary.failedWorkflowCount++;
         abortWorkload();
@@ -305,13 +308,14 @@ export async function runWorkload(backend, config, options) {
                 await options.onMeasuredEnd?.();
             }
             catch {
-                summary.stageFailed = true;
+                fail('measurement_boundary');
             }
         }
     }
     finally {
         cleanupStarted = true;
         measuring = false;
+        progress('close-sessions');
         await closeAll();
         options.signal?.removeEventListener("abort", stopFromParent);
     }

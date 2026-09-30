@@ -375,6 +375,31 @@ test('Supabase session timeout is per request, not session-wide', async () => {
   await assert.rejects(timeoutAdapter.listTasks({ organizationId: 'org', projectId: 'prj' }), /timed out/);
 });
 
+test('Supabase timeouts are scored errors, not integrity failures that abort the whole stage', async () => {
+  const { createSupabaseAdapter } = await import('../benchmark-sets/realworld-api-v4/shared/lib/adapters/supabase.mjs');
+  const { isIntegrityError } = await import('../benchmark-sets/realworld-api-v4/shared/lib/errors.mjs');
+  const { runWorkload } = await import('../benchmark-sets/realworld-api-v4/shared/lib/workload.mjs');
+  const builder = { select() { return this; }, eq() { return this; }, order() { return this; }, range() { return new Promise(() => {}); } };
+  const adapter = createSupabaseAdapter({ client: { from: () => builder }, timeoutMs: 2 });
+  await assert.rejects(adapter.listTasks({ organizationId: 'org', projectId: 'prj' }), error => error.classification === 'timeout' && !isIntegrityError(error));
+  const sdkTimeout = createSupabaseAdapter({ sdkCreateClient: () => ({ auth: { signInWithPassword: async () => ({ error: { status: 0, message: 'Supabase request timed out' } }) } }) });
+  await assert.rejects(sdkTimeout.createSession({ email: 'u@example.test', password: 'secret' }), error => error.classification === 'timeout' && !isIntegrityError(error));
+  const session = { listTasks: args => adapter.listTasks(args), cancelPending() {}, async close() {} };
+  const result = await runWorkload({ createSession: async () => session }, {
+    seed: 42, timeoutMs: 10, thinkTimeMs: { min: 0, max: 0 },
+    weights: { dashboard: 0, taskList: 100, taskDetail: 0, createTask: 0, updateTask: 0, addComment: 0, search: 0, profileUpdate: 0, signIn: 0 },
+  }, { users: [{ credentials: { email: 'u@example.test', password: 'secret' }, organizationId: 'org', projectId: 'prj', taskId: 'tsk' }], durationMs: 30 });
+  assert.equal(result.stageFailed, false);
+  assert.ok(result.failedWorkflowCount > 1);
+  assert.equal(isIntegrityError(new Error('Task crossed project boundary')), true);
+  const invalid = await runWorkload({ createSession: async () => ({ ...session, listTasks: async () => { throw new Error('Task crossed project boundary'); } }) }, {
+    seed: 42, timeoutMs: 10, thinkTimeMs: { min: 0, max: 0 },
+    weights: { dashboard: 0, taskList: 100, taskDetail: 0, createTask: 0, updateTask: 0, addComment: 0, search: 0, profileUpdate: 0, signIn: 0 },
+  }, { users: [{ credentials: { email: 'u@example.test', password: 'secret' }, organizationId: 'org', projectId: 'prj', taskId: 'tsk' }], durationMs: 30 });
+  assert.equal(invalid.stageFailed, true);
+  assert.deepEqual(invalid.failureReasons, ['integrity_error']);
+});
+
 test('workflow selection follows the approved application mix', async () => {
   const { selectWorkflow } = await import('../benchmark-sets/realworld-api-v4/shared/lib/workflows.mjs');
   const weights = { dashboard: 20, taskList: 25, taskDetail: 15, createTask: 10, updateTask: 12, addComment: 10, search: 5, profileUpdate: 1, signIn: 2 };
@@ -522,7 +547,20 @@ test('pilot evidence verifier requires a complete V4 Supabase lifecycle bundle',
   const directory = await mkdtemp(join(tmpdir(), 'rw-pilot-bundle-'));
   try {
     await writeFile(join(directory, 'run.json'), JSON.stringify({ status: 'complete', set: 'realworld-api-v4', platform: 'supabase', variant: 'javascript-sdk', lifecycle: { start: 'complete', setup: 'complete', teardown: 'complete', stop: 'complete' } }));
+    const { createTransferManifest } = await import('../benchmark-sets/realworld-api-v4/shared/lib/transfer.mjs');
+    const trial = join(directory, 'trials/001');
+    await mkdir(trial, { recursive: true });
+    const raw = { schemaVersion: 1, platform: 'supabase', trial: 1, correctness: { aborted: false, findings: [{ passed: true }] }, stages: [{ valid: true }], capacity: { stages: [{ invalid: false }] } };
+    await writeFile(join(trial, 'raw.json'), JSON.stringify(raw));
+    await writeFile(join(trial, 'summary.json'), '{}');
+    await createTransferManifest(trial);
     assert.equal(await verifyPilotBundle(directory), directory);
+    raw.stages[0].valid = false;
+    raw.capacity.stages[0].invalid = true;
+    await writeFile(join(trial, 'raw.json'), JSON.stringify(raw));
+    await rm(join(trial, '.transfer-manifest.json'));
+    await createTransferManifest(trial);
+    await assert.rejects(verifyPilotBundle(directory), /invalid measured stages/);
     await writeFile(join(directory, 'run.json'), JSON.stringify({ status: 'failed' }));
     await assert.rejects(verifyPilotBundle(directory), /lifecycle is incomplete/);
   } finally { await rm(directory, { recursive: true, force: true }); }

@@ -365,11 +365,17 @@ validate_summary() {
   IFS=$old_ifs
 }
 
+bench_progress() {
+  [ "${SET_ID:-}" = realworld-api-v4 ] && [ "${BAAS_BENCH_V4_PROGRESS_FD:-}" = 3 ] || return 0
+  node "$ROOT/benchmark-sets/realworld-api-v4/shared/lib/progress.mjs" lifecycle "$1" || :
+}
+
 hook() {
   name=$1
   phase=$2
   trial=$3
   output=$4
+  bench_progress "$name"
   BENCH_PHASE=$phase BENCH_TRIAL=$trial BENCH_OUTPUT_DIR=$output \
     "$CASE_DIR/$name.sh" >> "$TMP_RUN/logs/hooks.log" 2>&1
 }
@@ -451,6 +457,7 @@ cleanup_run() {
       if [ "$?" -eq 0 ]; then TEARDOWN_OUTCOME=complete; else TEARDOWN_OUTCOME=failed; cleanup_failed=1; fi
     fi
     if [ "$PLATFORM_STARTED" -eq 1 ]; then
+      bench_progress backend-stop
       "$BAAS" stop "$PLATFORM" >> "$TMP_RUN/logs/baas.log" 2>&1
       if [ "$?" -eq 0 ]; then STOP_OUTCOME=complete; else STOP_OUTCOME=failed; cleanup_failed=1; fi
     fi
@@ -543,10 +550,12 @@ run_case() {
 
   copy_definitions "$TMP_RUN/definitions" "$SET_ID" "$BENCHMARK_ID" "$PLATFORM" "$VARIANT"
   write_checksums "$TMP_RUN/definitions" "$TMP_RUN/definitions.sha256"
+  bench_progress environment
   write_environment
 
   PLATFORM_STARTED=1
   START_OUTCOME=failed
+  bench_progress backend-start
   "$BAAS" start "$PLATFORM" > "$TMP_RUN/logs/baas.log" 2>&1
   START_OUTCOME=complete
 

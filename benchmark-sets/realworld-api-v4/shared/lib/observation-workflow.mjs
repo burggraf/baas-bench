@@ -23,11 +23,12 @@ export async function inspectHost(target, command = runCommand, signal) {
   return { architecture: values.architecture, kernel: values.kernel, node: values.node, docker: values.docker, compose: values.compose, diskKiB: Number(values.disk_kib), freeKiB: Number(values.free_kib), dockerService: 'active' };
 }
 
-export async function bootstrapAndDeploy({ inventory, repositoryRoot, backendRoot, runnerRoot, script, runnerKeyFile, signal, command = runCommand, bootstrap = bootstrapHosts, healthProbe = inspectHost }) {
+export async function bootstrapAndDeploy({ inventory, repositoryRoot, backendRoot, runnerRoot, script, runnerKeyFile, signal, command = runCommand, bootstrap = bootstrapHosts, healthProbe = inspectHost, onPhase = () => {} }) {
   if (!safeRoot(repositoryRoot) || !safeRoot(backendRoot) || !safeRoot(runnerRoot) || typeof runnerKeyFile !== 'string' || !isAbsolute(runnerKeyFile) || runnerKeyFile.includes('\0')) throw new Error('invalid observation deployment configuration');
   const hosts = targets(inventory);
   if (!validTarget(hosts.backend) || !validTarget(hosts.runner)) throw new Error('invalid observation host target');
   await bootstrap({ backendTarget: hosts.backend, runnerTarget: hosts.runner, script, signal, command });
+  try { onPhase('deployment'); } catch { /* diagnostic only */ }
   for (const [target, root] of [[hosts.backend, backendRoot], [hosts.runner, runnerRoot]]) {
     signal?.throwIfAborted();
     await command('ssh', [...SSH_OPTIONS, target, `umask 077 && mkdir -p '${root}' && chmod 700 '${root}'`], { timeoutMs: 30_000, signal });

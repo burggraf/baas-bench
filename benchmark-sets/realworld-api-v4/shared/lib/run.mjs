@@ -8,6 +8,7 @@ import { runWorkload } from './workload.mjs';
 import { collectResources, discoverPlatformContainers, evaluateRunnerOverload } from './resources.mjs';
 import { sampleLocalHost, sampleRemoteHost } from './host-telemetry.mjs';
 import { summarize } from './summary.mjs';
+import { createProgress } from './progress.mjs';
 
 const PLATFORMS = new Set(['supabase', 'convex', 'appwrite', 'nhost', 'directus', 'pocketbase', 'trailbase', 'neon']);
 const DEFAULT_CONFIG = Object.freeze({
@@ -54,6 +55,16 @@ export async function preservePrimaryFailure(work, teardown) {
 }
 
 export async function executeRun(context, dependencies) {
+  const progress = dependencies.progress ?? createProgress('runner');
+  try {
+    const raw = await executeMeasuredRun(context, dependencies, progress);
+    progress.phase('complete', { stages_completed: raw.stages.length });
+    return raw;
+  } catch (error) { progress.phase('failed'); throw error; }
+  finally { progress.stop(); }
+}
+
+async function executeMeasuredRun(context, dependencies, progress) {
   const warmupMs = context.warmupMs ?? 120_000;
   const stageMs = context.stageMs ?? 300_000;
   if (!PLATFORMS.has(context.platform) || context.phase !== 'measure' || !Number.isSafeInteger(context.trial) || context.trial < 1 || !isAbsolute(context.outputDir)) throw new Error('invalid run context');
@@ -74,12 +85,19 @@ export async function executeRun(context, dependencies) {
   const chooseNext = dependencies.nextStage ?? nextCapacityStage;
   const monotonic = dependencies.monotonic ?? (() => performance.now());
   const dockerSshTarget = dependencies.dockerSshTarget ?? process.env.BAAS_BENCH_DOCKER_SSH_TARGET;
+  progress.phase('correctness');
   const correctness = await correctnessFn(backend, fixture);
   if (correctness.aborted || correctness.findings?.some(finding => !finding.passed)) throw new Error('correctness checks failed');
   if (users.length < 50) throw new Error('backend returned fewer than 50 virtual users');
 
   // Deliberately do not reset after this write-capable warm-up: its state remains for measured stages.
-  await workloadFn(backend, config, { users: users.slice(0, 50), durationMs: warmupMs, graceMs: config.timeoutMs });
+  progress.phase('prepare-sessions', { stage_users: 50 });
+  await workloadFn(backend, config, {
+    users: users.slice(0, 50), durationMs: warmupMs, graceMs: config.timeoutMs,
+    onProgress: (phase, fields) => phase === 'prepare-sessions' ? progress.count(fields) : progress.phase(phase, fields),
+    onMeasuredStart: () => progress.phase('warmup', { stage_users: 50, duration_ms: warmupMs }),
+    onSample: () => {},
+  });
 
   const stages = [];
   const resources = [];
@@ -101,13 +119,25 @@ export async function executeRun(context, dependencies) {
     const durationMs = capacityStageDurationMs(stageMs, requestedUsers);
     const resourceSamples = Math.max(1, Math.ceil(durationMs / 1_000));
     const containerIds = dependencies.containerIds ?? [];
+    const counters = { completed_operations: 0, failed_operations: 0, completed_workflows: 0, failed_workflows: 0, telemetry_samples: 0, telemetry_expected: resourceSamples };
+    const stageFields = { stage_users: requestedUsers, stage_index: stages.length + 1, stages_completed: stages.length };
+    progress.phase('prepare-sessions', stageFields);
     const result = await workloadFn(backend, config, {
       users: users.slice(0, requestedUsers), durationMs, graceMs: config.timeoutMs,
-      onSample: sample => accumulator.record(sample),
+      onProgress: (phase, fields) => phase === 'prepare-sessions' ? progress.count(fields) : progress.phase(phase, { ...stageFields, ...counters, ...fields }),
+      onSample: sample => {
+        accumulator.record(sample);
+        const key = sample.type === 'remote' ? (sample.success ? 'completed_operations' : 'failed_operations') : (sample.success ? 'completed_workflows' : 'failed_workflows');
+        counters[key]++;
+        progress.count({ [key]: counters[key] });
+      },
       onMeasuredStart: async () => {
         start = monotonic();
+        progress.phase('measure', { ...stageFields, ...counters, duration_ms: durationMs });
         const hostTelemetry = dockerSshTarget ? { runnerHostProbe: () => sampleLocalHost(), backendHostProbe: () => sampleRemoteHost(dockerSshTarget) } : {};
-        resourcePromise = resourcesFn({ platform: context.platform, containerIds, dockerSshTarget, samples: resourceSamples, intervalMs: 1_000, ...hostTelemetry });
+        resourcePromise = resourcesFn({ platform: context.platform, containerIds, dockerSshTarget, samples: resourceSamples, intervalMs: 1_000, ...hostTelemetry,
+          onProgress: count => { counters.telemetry_samples = count; progress.count({ telemetry_samples: count }); },
+        });
       },
       onMeasuredEnd: async () => { end = monotonic(); },
     });
@@ -126,6 +156,7 @@ export async function executeRun(context, dependencies) {
         valid: false, validityReasons: [`session preparation failed for ${failureCount} ${noun}`],
       };
     } else {
+      progress.phase('telemetry-drain', { ...stageFields, ...counters });
       resource = await resourcePromise;
       const elapsed = (end - start) / 1_000;
       stage = accumulator.finalize(elapsed, { requestedUsers, achievedUsers: Math.max(0, result.startedUsers - (result.lostUsers ?? 0)) });
@@ -138,10 +169,12 @@ export async function executeRun(context, dependencies) {
     stage.valid = stage.validityReasons.length === 0;
     failures.push(...(stage.errorExamples ?? []));
     stage.errorExamples = safeErrors(stage.errorExamples ?? []);
+    stage.workload = result;
     stages.push(stage); resources.push({ requestedUsers, samples: resource.samples ?? [] }); measuredUsers.push(requestedUsers);
     stages.sort((a, b) => a.requestedUsers - b.requestedUsers);
     capacity = evaluate(stages, config, { minSamples: 20 });
     const current = capacity.stages.find(item => item.requestedUsers === requestedUsers);
+    progress.phase('stage-complete', { ...stageFields, stages_completed: stages.length, outcome: current?.passed ? 'pass' : current?.invalid ? 'invalid' : 'fail', ...counters });
     if (current?.passed) lowerPass = Math.max(lowerPass ?? 0, requestedUsers);
     else if (current && (!current.invalid || Object.values(current.operationClasses ?? {}).some(metric => metric.passed === false))) {
       upperFailure = Math.min(upperFailure ?? requestedUsers, requestedUsers);

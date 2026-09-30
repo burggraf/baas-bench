@@ -94,6 +94,7 @@ export async function collectResources(options) {
       const p99 = monitor.percentile(99) / 1e6;
       const max = (typeof monitor.max === 'function' ? monitor.max() : monitor.max) / 1e6;
       samples.push({ timestampMs, runner, eventLoop: { p99Ms: Number.isFinite(p99) ? p99 : null, maxMs: Number.isFinite(max) ? max : null }, containers, hosts });
+      try { options.onProgress?.(samples.length); } catch { /* diagnostic only */ }
       monitor.reset();
       previousCpu = currentCpu; previousTime = timestampMs;
     }

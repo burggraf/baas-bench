@@ -161,7 +161,12 @@ test('Supabase setup streams COPY once, counts only server-confirmed batches, an
       assert.ok(first.value.startsWith('COPY public.users'));
       assert.ok(second.value.startsWith('COPY public.users'));
       assert.ok(first.value.includes('__BAAS_BENCH_V4_COPY_OK__1__users__1000'));
-      failure.stdout = '__BAAS_BENCH_V4_COPY_OK__1__users__1000' + String.fromCharCode(10);
+      const marker = '__BAAS_BENCH_V4_COPY_OK__1__users__1000\n';
+      assert.equal(typeof options.onStdout, 'function');
+      options.onStdout(Buffer.from(marker.slice(0, 17)));
+      options.onStdout(Buffer.from(marker.slice(17)));
+      // Confirmed progress must survive even without a final aggregated stdout result.
+      failure.stdout = '';
       await input.return();
       throw failure;
     }
@@ -202,6 +207,7 @@ test('Supabase fixture loading streams ordered bounded COPY batches through one 
         assert.ok(marker);
         rows += Number(marker.split('__').at(-1));
         batches++;
+        options.onStdout(Buffer.from(`${marker}\n`));
         markers.push(marker);
       }
       return { stdout: `${markers.join('\n')}\n`, stderr: '' };

@@ -23,7 +23,7 @@ export function spawnManaged(command, args, options, spawnImpl = spawn) {
 }
 
 // Abort is a termination request, not completion. All callers wait for close.
-export function waitForChild(child, { timeoutMs, signal, label = 'command', maxBuffer = 1024 * 1024, tailOutput = false, input } = {}) {
+export function waitForChild(child, { timeoutMs, signal, label = 'command', maxBuffer = 1024 * 1024, tailOutput = false, input, onStdout, onStderr } = {}) {
   if (!managedChildren.has(child)) throw new Error('cannot manage an unowned process group');
   const groupId = child.pid;
   const ownsGroup = managedChildren.get(child);
@@ -50,8 +50,9 @@ export function waitForChild(child, { timeoutMs, signal, label = 'command', maxB
       if (buffer.length > maxBuffer && !tailOutput) stop(new Error(`${label} output exceeds maxBuffer`));
       return tailOutput ? buffer.subarray(-maxBuffer) : buffer.subarray(0, maxBuffer);
     };
-    child.stdout?.on('data', data => { stdout = collect(stdout, data); });
-    child.stderr?.on('data', data => { stderr = collect(stderr, data); });
+    const observe = (callback, data) => { try { callback?.(data); } catch { /* diagnostics do not alter command results */ } };
+    child.stdout?.on('data', data => { stdout = collect(stdout, data); observe(onStdout, data); });
+    child.stderr?.on('data', data => { stderr = collect(stderr, data); observe(onStderr, data); });
     child.once('error', stop);
     child.stdin?.on('error', error => { if (error.code !== 'EPIPE') stop(error); });
     child.once('close', (code, exitSignal) => {
@@ -87,7 +88,7 @@ export function runCommand(command, args = [], options = {}) {
     const child = spawnManaged(command, transportArgs, { stdio: ['pipe', 'pipe', 'pipe'], env: options.env, cwd: options.cwd, rootScope: options.rootScope });
     let output;
     try {
-      output = await waitForChild(child, { timeoutMs, signal: options.signal, input: options.input, label: `${command} command` });
+      output = await waitForChild(child, { timeoutMs, signal: options.signal, input: options.input, onStdout: options.onStdout, onStderr: options.onStderr, label: `${command} command` });
       if (output.code !== 0) throw Object.assign(new Error('command failed'), output);
     } catch (error) {
       const normalized = String(error.stderr || error.stdout || '').trim().replace(/\s+/g, ' ');

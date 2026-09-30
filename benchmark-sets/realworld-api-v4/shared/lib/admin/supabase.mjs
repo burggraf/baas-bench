@@ -1,6 +1,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { runCommand } from '../command.mjs';
+import { createProgress, lineDecoder } from '../progress.mjs';
 import { seedDataset, buildVirtualUserSpecs } from '../dataset.mjs';
 import { loadSchemaText, encodeCopyBatches, exactCountSql, verifyExactCounts, verifyMinimumCounts, createFixtureState, resetFixtureState, createNeonPasswords } from './postgres.mjs';
 
@@ -26,7 +27,7 @@ export function createSupabaseAdmin({ run = runCommand, root, runtime, seed = 42
   const command = join(root, 'bin/baas');
   const state = join(runtime, 'state');
   let inputBytes = 0;
-  async function psql(input, args = []) { if (typeof input === 'string') inputBytes = Buffer.byteLength(input); return run(command, [...psqlArgs, ...args], { input, timeoutMs: 600_000 }); }
+  async function psql(input, args = [], options = {}) { if (typeof input === 'string') inputBytes = Buffer.byteLength(input); return run(command, [...psqlArgs, ...args], { input, timeoutMs: 600_000, ...options }); }
   async function query(sql) { const result = await psql(sql, ['-At']); return result.stdout; }
   async function countRows(sql) { return (await query(sql)).trim().split('\n').filter(Boolean).map(line => { const [table, row_count] = line.split(/[\t|]/); return { table, row_count }; }); }
   async function verify() { await verifyMinimumCounts(countRows); }
@@ -36,10 +37,14 @@ export function createSupabaseAdmin({ run = runCommand, root, runtime, seed = 42
       let phase = 'cleanup-baseline';
       const copyProgress = { copiedBatches: 0, copiedRows: 0, producedBatches: 0, producedRows: 0 };
       const started = performance.now();
+      const progress = createProgress('seed');
+      progress.phase(phase);
       try {
         await teardown();
         phase = 'schema';
+        progress.phase(phase);
         await psql(await loadSchemaText());
+        progress.phase('copy', { copied_rows: 0, copied_batches: 0, total_rows: 1_000_000 });
         const copyInput = async function* () {
           for await (const batch of encodeCopyBatches({ batches: seedDataset(seed, 1000), maxBatchSize: 1000 })) {
             phase = `copy:${batch.table}`;
@@ -53,18 +58,25 @@ export function createSupabaseAdmin({ run = runCommand, root, runtime, seed = 42
           }
         };
         try {
-          const result = await psql(copyInput());
+          const result = await psql(copyInput(), [], { onStdout: lineDecoder(line => {
+            recordCopyMarkers(line, copyProgress);
+            progress.count({ copied_rows: copyProgress.copiedRows, copied_batches: copyProgress.copiedBatches });
+          }) });
           recordCopyMarkers(result.stdout, copyProgress);
+          progress.count({ copied_rows: copyProgress.copiedRows, copied_batches: copyProgress.copiedBatches });
           if (copyProgress.copiedBatches !== copyProgress.producedBatches) throw new Error('Supabase COPY completion markers are incomplete');
         } catch (error) {
           recordCopyMarkers(commandStdout(error), copyProgress);
           throw error;
         }
         phase = 'auth-subjects';
+        progress.phase(phase);
         await psql(`UPDATE public.users SET auth_subject = id WHERE auth_subject IS NULL;`);
         phase = 'application-passwords';
+        progress.phase(phase);
         await createNeonPasswords(async (sql, params) => psql(sql.replace('$1', `'${params[0].replaceAll("'", "''")}'`)), password);
         phase = 'auth-users';
+        progress.phase(phase);
         await psql(`DO $$ BEGIN
   IF to_regclass('auth.users') IS NOT NULL THEN
     INSERT INTO auth.users (id, instance_id, aud, role, email, encrypted_password, email_confirmed_at, confirmation_token, recovery_token, email_change_token_new, email_change, created_at, updated_at, raw_app_meta_data, raw_user_meta_data)
@@ -76,17 +88,22 @@ export function createSupabaseAdmin({ run = runCommand, root, runtime, seed = 42
   END IF;
 END $$;`);
         phase = 'fixture-snapshot';
+        progress.phase(phase);
         await createFixtureState(async sql => psql(sql));
         phase = 'runtime-config';
+        progress.phase(phase);
         await mkdir(state, { recursive: true });
         await writeFile(join(state, 'supabase-config.json'), `${JSON.stringify({ seed, password })}\n`, { mode: 0o600 });
         phase = 'verify-counts';
+        progress.phase(phase);
         await verifyExactCounts(countRows);
+        progress.phase('complete', { copied_rows: copyProgress.copiedRows, copied_batches: copyProgress.copiedBatches });
       } catch (cause) {
+        progress.phase('failed', { copied_rows: copyProgress.copiedRows, copied_batches: copyProgress.copiedBatches });
         const error = new Error(`Supabase setup phase=${phase} copied_batches=${copyProgress.copiedBatches} copied_rows=${copyProgress.copiedRows} produced_batches=${copyProgress.producedBatches} produced_rows=${copyProgress.producedRows} input_bytes=${inputBytes} elapsed_ms=${Math.round(performance.now() - started)}: ${cause?.message ?? cause}`, { cause });
         try { await teardown(); } catch (cleanup) { error.cleanupError = cleanup?.message ?? String(cleanup); }
         throw error;
-      }
+      } finally { progress.stop(); }
     },
     verify,
     async reset() { await resetFixtureState(sql => psql(sql)); await verifyExactCounts(countRows); },

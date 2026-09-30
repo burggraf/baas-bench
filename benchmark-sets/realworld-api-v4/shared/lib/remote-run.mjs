@@ -26,7 +26,7 @@ export async function runRemote(args, io = {}) {
   if (!configPath) throw new Error('BAAS_BENCH_V4_REMOTE_CONFIG is required');
   await loadRemoteConfig(configPath, platform);
   const script = new URL('./run.mjs', import.meta.url);
-  const child = (io.spawn ?? spawn)(process.execPath, [script.pathname, ...args], { env: process.env, stdio: 'ignore' });
+  const child = (io.spawn ?? spawn)(process.execPath, [script.pathname, ...args], { env: process.env, stdio: ['ignore', 'ignore', 'inherit'] });
   const forward = signal => { if (!child.killed) child.kill(signal); };
   process.on('SIGINT', forward);
   process.on('SIGTERM', forward);

@@ -3,6 +3,12 @@ import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { measureRemoteCall } from '../measurement.mjs';
 import { buildVirtualUserSpecs } from '../dataset.mjs';
+import { BenchmarkOperationError } from '../correctness.mjs';
+function timeoutError() {
+  const error = new BenchmarkOperationError('timeout', { code: 'timeout', status: 408 });
+  error.message = 'Supabase request timed out';
+  return error;
+}
 export async function readKey(path, name) { const text = await readFile(path, 'utf8'); const line = text.split(/\r?\n/).find(value => value.startsWith(`${name}=`)); if (!line) throw new Error(`missing ${name}`); return line.slice(name.length + 1); }
 
 // Verified @supabase/supabase-js API (pinned runtime): createClient(url, key, options),
@@ -17,7 +23,7 @@ const mapTask = row => ({ id: row.id, organizationId: row.organization_id, proje
 const mapComment = row => ({ id: row.id, organizationId: row.organization_id, projectId: row.project_id, taskId: row.task_id, authorId: row.author_id, body: row.body, createdAt: row.created_at, updatedAt: row.updated_at });
 const mapActivity = row => ({ id: row.id, organizationId: row.organization_id, projectId: row.project_id ?? null, actorId: row.actor_id, action: row.action, subjectType: row.subject_type, subjectId: row.subject_id, createdAt: row.created_at });
 const mapMembership = row => ({ id: row.id, organizationId: row.organization_id, userId: row.user_id, role: row.role, createdAt: row.created_at });
-function ensure(error) { if (!error) return; const failure = new Error(error.message || 'Supabase request failed'); const code = String(error.code ?? ''); if (error.status !== undefined) failure.status = Number(error.status) === 406 || code === 'PGRST116' || code === '42501' ? 403 : error.status; else if (code === 'PGRST116' || code === '42501') failure.status = 403; if (error.code !== undefined) failure.code = error.code; throw failure; }
+function ensure(error) { if (!error) return; if (error.status === 408 || error.code === 'timeout' || String(error.message ?? '').includes('Supabase request timed out')) throw timeoutError(); const failure = new Error(error.message || 'Supabase request failed'); const code = String(error.code ?? ''); if (error.status !== undefined) failure.status = Number(error.status) === 406 || code === 'PGRST116' || code === '42501' ? 403 : error.status; else if (code === 'PGRST116' || code === '42501') failure.status = 403; if (error.code !== undefined) failure.code = error.code; throw failure; }
 function pageArgs(value) { const page = value.page ?? 0; const pageSize = value.pageSize ?? 20; if (!Number.isSafeInteger(page) || page < 0 || !Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 100) throw new Error('invalid page'); return [page, pageSize]; }
 function checkTenant(row, organizationId, projectId) { if (!row || row.organization_id !== organizationId || (projectId && row.project_id !== projectId)) throw new Error('Supabase tenant boundary violation'); }
 function abortableFetch(signalRef, timeoutMs) {
@@ -28,7 +34,7 @@ function abortableFetch(signalRef, timeoutMs) {
     const parent = signalRef.signal;
     const abort = () => controller.abort(parent.reason ?? new Error('Supabase request aborted'));
     if (parent.aborted) abort(); else parent.addEventListener('abort', abort, { once: true });
-    const timer = timeoutMs === undefined ? undefined : setTimeout(() => controller.abort(new Error('Supabase request timed out')), timeoutMs);
+    const timer = timeoutMs === undefined ? undefined : setTimeout(() => controller.abort(timeoutError()), timeoutMs);
     try { return await baseFetch(input, { ...init, signal: controller.signal }); }
     finally { clearTimeout(timer); parent.removeEventListener('abort', abort); }
   };
@@ -40,7 +46,7 @@ export function createSupabaseAdapter({ client, sdkCreateClient, url, key, timeo
       if (signal && typeof action?.abortSignal === 'function') action.abortSignal(signal);
       let timer;
       const pending = Promise.resolve(action);
-      const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Supabase request timed out')), requestTimeoutMs); });
+      const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(timeoutError()), requestTimeoutMs); });
       let onAbort;
       const cancelled = signal && new Promise((_, reject) => {
         onAbort = () => reject(signal.reason ?? new Error('Supabase request aborted'));
@@ -67,7 +73,7 @@ export function createSupabaseAdapter({ client, sdkCreateClient, url, key, timeo
       else session.controller.signal.addEventListener('abort', onAbort, { once: true });
       const previousSignal = signalRef.signal;
       signalRef.signal = controller.signal;
-      const timer = options.timeoutMs === undefined ? undefined : setTimeout(() => controller.abort(new Error('Supabase request timed out')), options.timeoutMs);
+      const timer = options.timeoutMs === undefined ? undefined : setTimeout(() => controller.abort(timeoutError()), options.timeoutMs);
       try { return await action({ ...args, signal: controller.signal }); }
       finally { clearTimeout(timer); signalRef.signal = previousSignal; session.controller.signal.removeEventListener('abort', onAbort); }
     };
