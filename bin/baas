@@ -462,7 +462,7 @@ remote_backend() {
   remote_command="cd $(shell_quote "$remote_root") && BAAS_RUNTIME_DIR=$(shell_quote "$remote_root/.runtime") BAAS_VERSION_PROFILE=$(shell_quote "$VERSION_PROFILE") BAAS_BENCH_V4_BACKEND_PRIVATE_IP=$(shell_quote "$remote_private_ip") BAAS_BENCH_V4_BACKEND_TARGET='' ./bin/baas"
   for argument do remote_command="$remote_command $(shell_quote "$argument")"; done
   node "$ROOT/benchmark-sets/realworld-api-v4/shared/lib/ssh-config.mjs" validate "${BAAS_BENCH_V4_SSH_CONFIG:-}" || exit 2
-  ssh -F "$BAAS_BENCH_V4_SSH_CONFIG" -o BatchMode=yes -o ConnectTimeout=5 "$remote_target" "$remote_command"
+  ssh -F "$BAAS_BENCH_V4_SSH_CONFIG" -o BatchMode=yes -o ConnectTimeout=15 "$remote_target" "$remote_command"
 }
 
 if [ -n "${BAAS_BENCH_V4_BACKEND_TARGET:-}" ] && [ "$command" != list ]; then

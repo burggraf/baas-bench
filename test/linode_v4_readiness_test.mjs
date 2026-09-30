@@ -4,6 +4,9 @@ import { spawn, spawnSync } from 'node:child_process';
 import { cp, mkdtemp, mkdir, writeFile, readFile, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createSupabaseAdmin } from '../benchmark-sets/realworld-api-v4/shared/lib/admin/supabase.mjs';
+import { createSshConfig } from '../benchmark-sets/realworld-api-v4/shared/lib/ssh-config.mjs';
 import { bootstrapAndDeploy } from '../benchmark-sets/realworld-api-v4/shared/lib/observation-workflow.mjs';
 import { bootstrapHosts } from '../benchmark-sets/realworld-api-v4/shared/lib/remote-bootstrap.mjs';
 import { runCommand } from '../benchmark-sets/realworld-api-v4/shared/lib/command.mjs';
@@ -45,6 +48,44 @@ test('runCommand honors pre-aborted cancellation rather than executing', async (
   const controller = new AbortController();
   controller.abort();
   await assert.rejects(runCommand(process.execPath, ['-e', 'process.exit(0)'], { signal: controller.signal }), /abort/i);
+});
+
+test('Supabase admin preserves an SSH timeout through real bin/baas and cleanup', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'v4-admin-ssh-'));
+  const fakeBin = join(root, 'bin');
+  const runtime = join(root, 'runtime');
+  const sshState = await createSshConfig();
+  const repositoryRoot = fileURLToPath(new URL('..', import.meta.url));
+  try {
+    await mkdir(fakeBin);
+    const log = join(root, 'ssh.log');
+    await writeFile(join(fakeBin, 'ssh'), '#!/bin/sh\nset -eu\nprintf "%s\\n" "$*" >> "$SSH_LOG"\ncount=$(cat "$SSH_COUNT" 2>/dev/null || echo 0)\ncount=$((count + 1))\nprintf "%s" "$count" > "$SSH_COUNT"\nif [ "$count" -eq 1 ]; then echo "ssh_dispatch_run_fatal: Connection to 192.0.2.8 port 22: Operation timed out" >&2; exit 255; fi\nexit 0\n', { mode: 0o755 });
+    const environment = {
+      ...process.env,
+      PATH: `${fakeBin}:${process.env.PATH}`,
+      SSH_LOG: log,
+      SSH_COUNT: join(root, 'ssh.count'),
+      BAAS_VERSION_PROFILE: 'realworld-api-v4',
+      BAAS_RUNTIME_DIR: runtime,
+      BAAS_BENCH_V4_BACKEND_TARGET: 'root@192.0.2.8',
+      BAAS_BENCH_V4_BACKEND_ROOT: '/opt/baas-bench',
+      BAAS_BENCH_V4_BACKEND_PRIVATE_IP: '10.203.0.10',
+      BAAS_BENCH_V4_SSH_CONFIG: sshState.configPath,
+    };
+    const run = (command, args, options) => runCommand(command, args, { ...options, env: environment });
+    let caught;
+    try { await createSupabaseAdmin({ root: repositoryRoot, runtime, run }).setup(); }
+    catch (error) { caught = error; }
+    assert.match(caught?.message ?? '', /bin\/baas command failed \[255\].*ssh_dispatch_run_fatal/);
+    assert.equal(caught.cleanupError, undefined, 'the second, successful cleanup must not replace the original SSH failure');
+    const calls = (await readFile(log, 'utf8')).trim().split('\n');
+    assert.equal(calls.length, 2, 'the failing setup attempt and compensating cleanup both traverse the real CLI');
+    assert.ok(calls.every(call => call.includes(`-F ${sshState.configPath}`)));
+    assert.ok(calls.every(call => call.includes('-o ConnectTimeout=15 root@192.0.2.8')));
+  } finally {
+    await sshState.cleanup();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('real rsync deployment excludes the controller token and preserves external tools', async () => {
