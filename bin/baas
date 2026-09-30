@@ -465,26 +465,29 @@ remote_backend() {
   ssh_trace=$(mktemp "${BAAS_BENCH_V4_SSH_CONFIG%/*}/trace.XXXXXX") || return $?
   trap 'rm -f "$ssh_trace"' 0
   ssh_started=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+  ssh_started_epoch=$(date '+%s')
   if ssh -F "$BAAS_BENCH_V4_SSH_CONFIG" -v -E "$ssh_trace" -o BatchMode=yes -o ConnectTimeout=15 "$remote_target" "$remote_command"; then
     remote_status=0
   else
     remote_status=$?
     # Emit only fixed milestones/reasons, never verbose commands, keys or SQL.
-    ssh_stage=$(awk '
-      BEGIN { stage = "unknown"; reason = "unknown" }
+    ssh_milestones=$(awk '
+      BEGIN { stage = "unknown"; authenticated = "no"; command_sent = "no"; reason = "unknown" }
       /^debug1: Connection established\.$/ { stage = "tcp-connected" }
       /^debug1: Remote protocol version / { stage = "banner-received" }
       /^debug1: SSH2_MSG_KEXINIT sent/ { stage = "key-exchange" }
       /^debug1: SSH2_MSG_NEWKEYS received/ { stage = "kex-complete" }
-      /^debug1: Next authentication method:|^debug1: Offering public key:|^[^[:space:]]+@[^[:space:]]+: Permission denied/ { stage = "authentication" }
-      /^Authenticated to / { stage = "authenticated" }
-      /^debug1: Sending command:/ { stage = "command-sent" }
+      /^debug1: SSH2_MSG_SERVICE_ACCEPT received|^debug1: Next authentication method:|^debug1: Offering public key:/ { stage = "authentication" }
+      /^Authenticated to / { stage = "authenticated"; authenticated = "yes" }
+      /^debug1: Sending command:/ { stage = "command-sent"; authenticated = "yes"; command_sent = "yes" }
       /^(ssh_dispatch_run_fatal: Connection|Connection |ssh: connect to host ).*([Oo]peration timed out|timed out)/ { reason = "timeout" }
       /^Host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED/ { reason = "host-key" }
-      /^[^[:space:]]+@[^[:space:]]+: Permission denied/ { reason = "authentication" }
-      END { printf "%s reason=%s", stage, reason }
-    ' "$ssh_trace") || ssh_stage='unknown reason=diagnostics-failed'
-    printf 'V4 backend SSH stage=%s exit=%s target=%s started_at=%s\n' "$ssh_stage" "$remote_status" "$remote_target" "$ssh_started" >&2
+      /^[^[:space:]]+@[^[:space:]]+: Permission denied/ { stage = "authentication"; reason = "authentication" }
+      END { printf "last_milestone=%s authenticated_seen=%s command_sent_seen=%s reason=%s", stage, authenticated, command_sent, reason }
+    ' "$ssh_trace") || ssh_milestones='last_milestone=unknown authenticated_seen=no command_sent_seen=no reason=diagnostics-failed'
+    ssh_finished=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+    ssh_elapsed_seconds=$(($(date '+%s') - ssh_started_epoch))
+    printf 'V4 backend SSH %s exit=%s target=%s started_at=%s finished_at=%s elapsed_seconds=%s\n' "$ssh_milestones" "$remote_status" "$remote_target" "$ssh_started" "$ssh_finished" "$ssh_elapsed_seconds" >&2
   fi
   if ! rm -f "$ssh_trace"; then
     echo 'V4 SSH trace cleanup failed' >&2

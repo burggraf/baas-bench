@@ -1,4 +1,6 @@
 import { spawn } from 'node:child_process';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { sshTransportArgs } from './ssh-config.mjs';
 
 const SAFE_COMMAND = /^[A-Za-z0-9._/-]+$/;
@@ -27,7 +29,8 @@ export function waitForChild(child, { timeoutMs, signal, label = 'command', maxB
   const ownsGroup = managedChildren.get(child);
   return new Promise((resolve, reject) => {
     let stdout = Buffer.alloc(0); let stderr = Buffer.alloc(0);
-    let primary; let killTimer;
+    let primary; let killTimer; let inputStreamError;
+    let inputDone = Promise.resolve();
     const terminate = signal => {
       // Spawn failures have no PID; ESRCH also covers an already-terminated group.
       if (!Number.isSafeInteger(groupId) || groupId <= 1 || groupId === process.pid) return;
@@ -52,15 +55,25 @@ export function waitForChild(child, { timeoutMs, signal, label = 'command', maxB
     child.once('error', stop);
     child.stdin?.on('error', error => { if (error.code !== 'EPIPE') stop(error); });
     child.once('close', (code, exitSignal) => {
-      // Descendants with closed/ignored stdio must not survive an early parent close.
-      if (primary && ownsGroup) terminate('SIGKILL');
-      clearTimeout(timer); clearTimeout(killTimer); signal?.removeEventListener('abort', abort);
-      const output = { stdout: stdout.toString('utf8'), stderr: stderr.toString('utf8'), code, signal: exitSignal };
-      if (primary) { Object.assign(primary, { stdout: output.stdout, stderr: output.stderr }); reject(primary); }
-      else resolve(output);
+      void inputDone.then(() => {
+        // Descendants with closed/ignored stdio must not survive an early parent close.
+        if (primary && ownsGroup) terminate('SIGKILL');
+        clearTimeout(timer); clearTimeout(killTimer); signal?.removeEventListener('abort', abort);
+        const output = { stdout: stdout.toString('utf8'), stderr: stderr.toString('utf8'), code, signal: exitSignal };
+        if (primary) { Object.assign(primary, { stdout: output.stdout, stderr: output.stderr }); reject(primary); }
+        else if (inputStreamError && code === 0) reject(Object.assign(new Error(`${label} input stream closed before completion`, { cause: inputStreamError }), output));
+        else resolve(output);
+      });
     });
     if (signal?.aborted) abort(); else signal?.addEventListener('abort', abort, { once: true });
-    if (input !== undefined) child.stdin?.end(String(input));
+    if (input !== undefined && child.stdin) {
+      if (typeof input?.[Symbol.asyncIterator] === 'function') {
+        inputDone = pipeline(Readable.from(input, { objectMode: false }), child.stdin).catch(error => {
+          if (error.code === 'EPIPE' || error.code === 'ERR_STREAM_PREMATURE_CLOSE' || error.code === 'ERR_STREAM_DESTROYED') inputStreamError = error;
+          else stop(error);
+        });
+      } else child.stdin.end(String(input));
+    }
   });
 }
 

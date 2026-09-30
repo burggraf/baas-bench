@@ -2,32 +2,64 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { runCommand } from '../command.mjs';
 import { seedDataset, buildVirtualUserSpecs } from '../dataset.mjs';
-import { loadSchemaText, copyDataset, exactCountSql, verifyExactCounts, verifyMinimumCounts, createFixtureState, resetFixtureState, createNeonPasswords } from './postgres.mjs';
+import { loadSchemaText, encodeCopyBatches, exactCountSql, verifyExactCounts, verifyMinimumCounts, createFixtureState, resetFixtureState, createNeonPasswords } from './postgres.mjs';
 
 const psqlArgs = ['compose', 'supabase', 'exec', '-T', 'db', 'psql', '-X', '-q', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', 'postgres'];
 function jsonRows(stdout) { try { return JSON.parse(stdout.trim()); } catch { throw new Error('invalid Supabase administration response'); } }
+function commandStdout(error) {
+  const seen = new Set();
+  for (let current = error; current && !seen.has(current); current = current.cause) {
+    seen.add(current);
+    if (typeof current.stdout === 'string') return current.stdout;
+  }
+  return '';
+}
+function recordCopyMarkers(stdout, progress) {
+  for (const match of stdout.matchAll(/^__BAAS_BENCH_V4_COPY_OK__(\d+)__([a-z_]+)__(\d+)$/gm)) {
+    const sequence = Number(match[1]);
+    if (sequence !== progress.copiedBatches + 1) continue;
+    progress.copiedBatches++;
+    progress.copiedRows += Number(match[3]);
+  }
+}
 export function createSupabaseAdmin({ run = runCommand, root, runtime, seed = 42, password = `Bb-v3-${seed}-capacity!` }) {
   const command = join(root, 'bin/baas');
   const state = join(runtime, 'state');
   let inputBytes = 0;
-  async function psql(sql, args = []) { inputBytes = Buffer.byteLength(sql); return run(command, [...psqlArgs, ...args], { input: sql, timeoutMs: 600_000 }); }
+  async function psql(input, args = []) { if (typeof input === 'string') inputBytes = Buffer.byteLength(input); return run(command, [...psqlArgs, ...args], { input, timeoutMs: 600_000 }); }
   async function query(sql) { const result = await psql(sql, ['-At']); return result.stdout; }
   async function countRows(sql) { return (await query(sql)).trim().split('\n').filter(Boolean).map(line => { const [table, row_count] = line.split(/[\t|]/); return { table, row_count }; }); }
   async function verify() { await verifyMinimumCounts(countRows); }
   async function teardown() { await psql("DO $$ BEGIN IF to_regclass('auth.users') IS NOT NULL THEN TRUNCATE TABLE auth.users CASCADE; END IF; END $$; DROP SCHEMA IF EXISTS benchmark_fixture CASCADE; DROP SCHEMA IF EXISTS benchmark_auth CASCADE; DROP TABLE IF EXISTS public.activities, public.comments, public.tasks, public.projects, public.memberships, public.organizations, public.users CASCADE; DROP SCHEMA IF EXISTS benchmark_private CASCADE; DROP SCHEMA IF EXISTS benchmark_extensions CASCADE;"); }
   return {
     async setup() {
-      let phase = 'cleanup-baseline'; let copiedBatches = 0; let copiedRows = 0;
+      let phase = 'cleanup-baseline';
+      const copyProgress = { copiedBatches: 0, copiedRows: 0, producedBatches: 0, producedRows: 0 };
       const started = performance.now();
       try {
         await teardown();
         phase = 'schema';
         await psql(await loadSchemaText());
-        await copyDataset({ batches: seedDataset(seed, 1000), maxBatchSize: 1000, copy: async ({ table, statement, data, rowCount }) => {
-          phase = `copy:${table}`;
-          await psql(`${data}\\.\n`, ['-c', statement]);
-          copiedBatches++; copiedRows += rowCount;
-        } });
+        const copyInput = async function* () {
+          for await (const batch of encodeCopyBatches({ batches: seedDataset(seed, 1000), maxBatchSize: 1000 })) {
+            phase = `copy:${batch.table}`;
+            const sequence = copyProgress.producedBatches + 1;
+            const marker = `__BAAS_BENCH_V4_COPY_OK__${sequence}__${batch.table}__${batch.rowCount}`;
+            const input = `${batch.statement};\n${batch.data}\\.\n\\echo ${marker}\n`;
+            inputBytes = Buffer.byteLength(input);
+            copyProgress.producedBatches = sequence;
+            copyProgress.producedRows += batch.rowCount;
+            yield input;
+          }
+        };
+        try {
+          const result = await psql(copyInput());
+          recordCopyMarkers(result.stdout, copyProgress);
+          if (copyProgress.copiedBatches !== copyProgress.producedBatches) throw new Error('Supabase COPY completion markers are incomplete');
+        } catch (error) {
+          recordCopyMarkers(commandStdout(error), copyProgress);
+          throw error;
+        }
         phase = 'auth-subjects';
         await psql(`UPDATE public.users SET auth_subject = id WHERE auth_subject IS NULL;`);
         phase = 'application-passwords';
@@ -51,7 +83,7 @@ END $$;`);
         phase = 'verify-counts';
         await verifyExactCounts(countRows);
       } catch (cause) {
-        const error = new Error(`Supabase setup phase=${phase} copied_batches=${copiedBatches} copied_rows=${copiedRows} input_bytes=${inputBytes} elapsed_ms=${Math.round(performance.now() - started)}: ${cause?.message ?? cause}`, { cause });
+        const error = new Error(`Supabase setup phase=${phase} copied_batches=${copyProgress.copiedBatches} copied_rows=${copyProgress.copiedRows} produced_batches=${copyProgress.producedBatches} produced_rows=${copyProgress.producedRows} input_bytes=${inputBytes} elapsed_ms=${Math.round(performance.now() - started)}: ${cause?.message ?? cause}`, { cause });
         try { await teardown(); } catch (cleanup) { error.cleanupError = cleanup?.message ?? String(cleanup); }
         throw error;
       }

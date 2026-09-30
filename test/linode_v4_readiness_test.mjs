@@ -96,7 +96,7 @@ exit 0
     catch (error) { caught = error; }
     assert.match(caught?.message ?? '', /bin\/baas command failed \[255\]/);
     assert.equal(caught.cleanupError, undefined, 'the second, successful cleanup must not replace the original SSH failure');
-    assert.match(caught.message, /V4 backend SSH stage=key-exchange reason=timeout exit=255 target=root@192\.0\.2\.8 started_at=/);
+    assert.match(caught.message, /V4 backend SSH last_milestone=key-exchange authenticated_seen=no command_sent_seen=no reason=timeout exit=255 target=root@192\.0\.2\.8 started_at=.*finished_at=.*elapsed_seconds=\d+/);
     assert.doesNotMatch(caught.message, /synthetic-secret/);
     const { readdir } = await import('node:fs/promises');
     assert.deepEqual((await readdir(sshState.directory)).sort(), ['known_hosts', 'ssh_config']);
@@ -124,15 +124,17 @@ printf 'remote-output'
 exit "$SSH_EXIT"
 `, { mode: 0o755 });
     const env = { ...process.env, PATH: `${root}:${process.env.PATH}`, BAAS_VERSION_PROFILE: 'realworld-api-v4', BAAS_BENCH_V4_BACKEND_TARGET: 'root@192.0.2.8', BAAS_BENCH_V4_BACKEND_ROOT: '/opt/baas-bench', BAAS_BENCH_V4_SSH_CONFIG: state.configPath };
-    for (const [trace, stage, reason, status] of [
-      ['ssh: connect to host 192.0.2.8 port 22: Operation timed out', 'unknown', 'timeout', 255],
-      ['debug1: SSH2_MSG_KEXINIT sent\nHost key verification failed.', 'key-exchange', 'host-key', 255],
-      ['debug1: SSH2_MSG_NEWKEYS received\ndebug1: Next authentication method: publickey\nroot@192.0.2.8: Permission denied (publickey).', 'authentication', 'authentication', 255],
-      ['Authenticated to 192.0.2.8\ndebug1: Sending command: synthetic-secret', 'command-sent', 'unknown', 42],
+    for (const [trace, milestone, authenticated, commandSent, reason, status] of [
+      ['ssh: connect to host 192.0.2.8 port 22: Operation timed out', 'unknown', 'no', 'no', 'timeout', 255],
+      ['debug1: SSH2_MSG_KEXINIT sent\nHost key verification failed.', 'key-exchange', 'no', 'no', 'host-key', 255],
+      ['debug1: SSH2_MSG_NEWKEYS received\ndebug1: Next authentication method: publickey\nroot@192.0.2.8: Permission denied (publickey).', 'authentication', 'no', 'no', 'authentication', 255],
+      ['Authenticated to 192.0.2.8\ndebug1: Sending command: synthetic-secret', 'command-sent', 'yes', 'yes', 'unknown', 42],
+      ['Authenticated to 192.0.2.8\ndebug1: SSH2_MSG_KEXINIT sent\nssh_dispatch_run_fatal: Connection to 192.0.2.8 port 22: Operation timed out', 'key-exchange', 'yes', 'no', 'timeout', 255],
     ]) {
       await assert.rejects(runCommand(cli, ['stop', 'supabase'], { env: { ...env, SSH_TRACE_TEXT: trace, SSH_EXIT: String(status) } }), error => {
         assert.ok(error.message.includes(`[${status}]`));
-        assert.ok(error.message.includes(`stage=${stage} reason=${reason} exit=${status}`));
+        assert.ok(error.message.includes(`last_milestone=${milestone} authenticated_seen=${authenticated} command_sent_seen=${commandSent} reason=${reason} exit=${status}`));
+        assert.match(error.message, /started_at=.*finished_at=.*elapsed_seconds=\d+/);
         assert.doesNotMatch(error.message, /synthetic-secret/);
         return true;
       });
@@ -145,28 +147,75 @@ exit "$SSH_EXIT"
   } finally { await state.cleanup(); await rm(root, { recursive: true, force: true }); }
 });
 
-test('Supabase setup reports the failed seeding phase without replaying COPY or losing cleanup errors', async () => {
+test('Supabase setup streams COPY once, counts only server-confirmed batches, and never replays', async () => {
   const root = await mkdtemp(join(tmpdir(), 'v4-seed-failure-'));
   const failure = new Error('SSH transport timeout');
   const calls = [];
   const run = async (_command, args, options) => {
     calls.push({ args, input: options.input });
-    if (calls.length === 4) throw failure;
-    if (calls.length === 5) throw new Error('cleanup failed');
+    if (calls.length === 3) {
+      assert.equal(typeof options.input?.[Symbol.asyncIterator], 'function');
+      const input = options.input[Symbol.asyncIterator]();
+      const first = await input.next();
+      const second = await input.next();
+      assert.ok(first.value.startsWith('COPY public.users'));
+      assert.ok(second.value.startsWith('COPY public.users'));
+      assert.ok(first.value.includes('__BAAS_BENCH_V4_COPY_OK__1__users__1000'));
+      failure.stdout = '__BAAS_BENCH_V4_COPY_OK__1__users__1000' + String.fromCharCode(10);
+      await input.return();
+      throw failure;
+    }
+    if (calls.length === 4) throw new Error('cleanup failed');
     return { stdout: '', stderr: '' };
   };
   try {
     const admin = createSupabaseAdmin({ root, runtime: join(root, 'runtime'), run });
     await assert.rejects(admin.setup(), error => {
-      assert.match(error.message, new RegExp(`Supabase setup phase=copy:users copied_batches=1 copied_rows=1000 input_bytes=${Buffer.byteLength(calls[3].input)} elapsed_ms=\\d+: SSH transport timeout`));
+      assert.match(error.message, /Supabase setup phase=copy:users copied_batches=1 copied_rows=1000 produced_batches=2 produced_rows=2000 input_bytes=\d+ elapsed_ms=\d+: SSH transport timeout/);
       assert.equal(error.cause, failure);
       assert.equal(error.cleanupError, 'cleanup failed');
       return true;
     });
-    assert.equal(calls.length, 5, 'one failing COPY plus one compensating cleanup, never SQL replay');
-    assert.equal(calls[2].args.at(-1), calls[3].args.at(-1));
-    assert.notEqual(calls[2].input, calls[3].input, 'the failing COPY is the second, distinct batch');
+    assert.equal(calls.length, 4, 'one COPY stream plus one compensating cleanup, never SQL replay');
+    assert.ok(!calls[2].args.includes('-c'), 'all COPY statements share one psql process');
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('Supabase fixture loading streams ordered bounded COPY batches through one psql session', async () => {
+  const root = fileURLToPath(new URL('..', import.meta.url));
+  const runtime = await mkdtemp(join(tmpdir(), 'v4-seed-stream-'));
+  const { DATASET_COUNTS } = await import('../benchmark-sets/realworld-api-v4/shared/lib/dataset.mjs');
+  const calls = [];
+  let batches = 0;
+  let rows = 0;
+  let copySessions = 0;
+  const run = async (_command, args, options) => {
+    calls.push(args);
+    if (typeof options.input?.[Symbol.asyncIterator] === 'function') {
+      copySessions++;
+      const markers = [];
+      for await (const chunk of options.input) {
+        assert.ok(chunk.startsWith('COPY public.'));
+        assert.ok(chunk.includes(' FROM STDIN;\n'));
+        assert.ok(chunk.includes('\\.\n\\echo '));
+        const marker = chunk.match(/\\echo ([^\n]+)\n$/)?.[1];
+        assert.ok(marker);
+        rows += Number(marker.split('__').at(-1));
+        batches++;
+        markers.push(marker);
+      }
+      return { stdout: `${markers.join('\n')}\n`, stderr: '' };
+    }
+    if (args.includes('-At')) return { stdout: Object.entries(DATASET_COUNTS).map(([table, count]) => `${table}|${count}`).join('\n'), stderr: '' };
+    return { stdout: '', stderr: '' };
+  };
+  try {
+    await createSupabaseAdmin({ root, runtime, run }).setup();
+    assert.equal(copySessions, 1);
+    assert.equal(batches, 1002);
+    assert.equal(rows, Object.values(DATASET_COUNTS).reduce((sum, count) => sum + count, 0));
+    assert.equal(calls.filter(args => args.includes('-c')).length, 0);
+  } finally { await rm(runtime, { recursive: true, force: true }); }
 });
 
 test('backend failure snapshots are bounded, read-only and avoid SQL, environment and container secrets', async () => {
@@ -273,7 +322,7 @@ test('runBench escalates ignored termination and settles after close', async () 
 });
 
 
-test('runCommand preserves stdin, environment, cwd, output caps and process failures', async () => {
+test('runCommand preserves string stdin, streams async input with backpressure, and keeps process safeguards', async () => {
   const root = await mkdtemp(join(tmpdir(), 'v4-command-'));
   try {
     const result = await runCommand(process.execPath, ['-e', "process.stdin.on('data', data => process.stdout.write(process.env.MARKER + ':' + process.cwd() + ':' + data));"], { input: 'payload', env: { MARKER: 'test' }, cwd: root });
@@ -281,6 +330,15 @@ test('runCommand preserves stdin, environment, cwd, output caps and process fail
     await assert.rejects(runCommand(process.execPath, ['-e', "process.stderr.write('failure detail'); process.exit(7)" ]), /\[7\].*failure detail/);
     await assert.rejects(runCommand('/missing-v4-command'), /ENOENT/);
     await assert.rejects(runCommand(process.execPath, ['-e', "process.stdout.write('x'.repeat(2 * 1024 * 1024))" ]), /maxBuffer/);
+    const chunk = Buffer.alloc(64 * 1024, 'x');
+    const input = (async function* () { for (let index = 0; index < 100; index++) yield chunk; }());
+    const streamed = await runCommand(process.execPath, ['-e', "let bytes = 0; for await (const chunk of process.stdin) bytes += chunk.length; process.stdout.write(String(bytes));"], { input });
+    assert.equal(streamed.stdout, String(chunk.length * 100));
+    const earlyInput = (async function* () { yield Buffer.alloc(8 * 1024 * 1024); }());
+    await assert.rejects(runCommand(process.execPath, ['-e', 'process.exit(0)'], { input: earlyInput }), /input stream closed before completion/);
+    const producerError = new Error('input producer failed');
+    const brokenInput = (async function* () { yield chunk; throw producerError; }());
+    await assert.rejects(runCommand(process.execPath, ['-e', 'process.stdin.resume(); setInterval(() => {}, 1000)'], { input: brokenInput }), /input producer failed/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

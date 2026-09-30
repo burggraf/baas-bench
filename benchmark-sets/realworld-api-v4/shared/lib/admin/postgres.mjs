@@ -68,11 +68,9 @@ function copyRecord(entity, record) {
   return record;
 }
 
-export async function copyDataset({ batches, copy, maxBatchSize = 1_000 }) {
+export async function* encodeCopyBatches({ batches, maxBatchSize = 1_000 }) {
   if (!batches || typeof batches[Symbol.asyncIterator] !== 'function') throw new TypeError('batches must be an async iterable');
-  if (typeof copy !== 'function') throw new TypeError('copy transport is required');
   if (!Number.isSafeInteger(maxBatchSize) || maxBatchSize < 1) throw new RangeError('maxBatchSize must be a positive integer');
-  const totals = Object.fromEntries(APPLICATION_TABLES.map(table => [table, 0]));
   for await (const batch of batches) {
     const definition = COPY_DEFINITIONS[batch?.entity];
     if (!definition) throw new RangeError(`unsupported entity: ${batch?.entity}`);
@@ -83,14 +81,16 @@ export async function copyDataset({ batches, copy, maxBatchSize = 1_000 }) {
       const record = copyRecord(batch.entity, source);
       data += encodeCopyRow(definition.fields.map(field => record[field]));
     }
-    await copy({
-      table: definition.table,
-      columns: [...definition.columns],
-      statement: copyStatement(definition.table),
-      data,
-      rowCount: batch.records.length,
-    });
-    totals[definition.table] += batch.records.length;
+    yield { table: definition.table, columns: [...definition.columns], statement: copyStatement(definition.table), data, rowCount: batch.records.length };
+  }
+}
+
+export async function copyDataset({ batches, copy, maxBatchSize = 1_000 }) {
+  if (typeof copy !== 'function') throw new TypeError('copy transport is required');
+  const totals = Object.fromEntries(APPLICATION_TABLES.map(table => [table, 0]));
+  for await (const batch of encodeCopyBatches({ batches, maxBatchSize })) {
+    await copy(batch);
+    totals[batch.table] += batch.rowCount;
   }
   return totals;
 }

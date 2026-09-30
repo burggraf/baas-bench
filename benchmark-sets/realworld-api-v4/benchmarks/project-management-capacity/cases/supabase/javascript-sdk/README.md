@@ -7,4 +7,6 @@ Measured operations use Auth and PostgREST only. Tenant predicates, stable order
 The backend's native Envoy gateway exposes a per-observation CA-signed HTTPS listener on its VPC address. The HTTP listener is loopback-only; the runner receives only the CA certificate and Supabase publishable key.
 
 
+Fixture loading keeps 1,000-row COPY boundaries and ordering, but streams them through one psql process over one setup SSH session; batch-completion markers distinguish confirmed COPYs from input merely produced. The session closes before verification and measurement—there is no persistent benchmark tunnel.
+
 V4 remote setup requires `BAAS_BENCH_V4_SSH_CONFIG` from the observation's private SSH state. Controller probes, orchestration, and rsync use it explicitly; the runner's Docker/host SSH probes use a separate strict config and backend pin in its private V4 runtime. No global known-hosts or identity file is overwritten. See the set README for manual setup and the first-contact TOFU boundary.

@@ -1234,6 +1234,23 @@ test('postgres admin streams escaped bounded COPY and verifies every exact count
   await assert.rejects(verifyExactCounts(async () => [...exact, { table: 'intruder', count: '0' }]), /unexpected table/i);
 });
 
+test('postgres COPY stream encoding preserves bounded batches and exact COPY framing data', async () => {
+  const { encodeCopyBatches, encodeCopyRow } = await import('../benchmark-sets/realworld-api-v4/shared/lib/admin/postgres.mjs');
+  const batches = (async function* () {
+    yield { entity: 'user', records: [
+      { id: 'u1', email: 'a@example.test', displayName: 'A\\tB', createdAt: '2020-01-01', updatedAt: '2020-01-02' },
+      { id: 'u2', email: 'b@example.test', displayName: null, createdAt: '2020-01-01', updatedAt: '2020-01-02' },
+    ] };
+  }());
+  const encoded = [];
+  for await (const batch of encodeCopyBatches({ batches, maxBatchSize: 2 })) encoded.push(batch);
+  assert.equal(encoded.length, 1);
+  assert.equal(encoded[0].statement, 'COPY public.users (id, email, display_name, created_at, updated_at) FROM STDIN');
+  assert.equal(encoded[0].rowCount, 2);
+  assert.equal(encoded[0].data, encodeCopyRow(['u1', 'a@example.test', 'A\\tB', '2020-01-01', '2020-01-02']) + encodeCopyRow(['u2', 'b@example.test', null, '2020-01-01', '2020-01-02']));
+  await assert.rejects(() => encodeCopyBatches({ batches: (async function* () { yield { entity: 'user', records: [{}, {}, {}] }; }()), maxBatchSize: 2 }).next(), /batch exceeds/);
+});
+
 test('postgres admin parameterized administrative transports preserve SQL, values, results, and failures', async () => {
   const {
     CREATE_FIXTURE_STATE_SQL, RESET_FIXTURE_STATE_SQL, CREATE_NEON_PASSWORDS_SQL,
