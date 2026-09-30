@@ -612,10 +612,10 @@ test('resource collection invalidates missing runner or backend host telemetry',
 test('remote container probes use a validated SSH target for backend telemetry', async () => {
   const { discoverPlatformContainers, collectResources } = await import('../benchmark-sets/realworld-api-v4/shared/lib/resources.mjs');
   const calls = [];
-  const command = async (name, args) => { calls.push([name, args]); return { stdout: name === 'ssh' && args.includes('ps') ? 'aaaaaaaaaaaa\n' : '{"ID":"aaaaaaaaaaaa","CPUPerc":"1%","MemUsage":"1MiB / 2GiB"}\n' }; };
+  const command = async (name, args) => { calls.push([name, args]); return { stdout: name === 'ssh' && args.at(-1)?.includes("'ps'") ? 'aaaaaaaaaaaa\n' : '{"ID":"aaaaaaaaaaaa","CPUPerc":"1%","MemUsage":"1MiB / 2GiB"}\n' }; };
   const ids = await discoverPlatformContainers('directus', command, { sshTarget: 'backend-telemetry' });
   assert.deepEqual(ids, ['aaaaaaaaaaaa']);
-  assert.deepEqual(calls[0], ['ssh', ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', 'backend-telemetry', 'docker', 'compose', '-p', 'baas-directus', 'ps', '-q']]);
+  assert.deepEqual(calls[0], ['ssh', ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', 'backend-telemetry', "docker 'compose' '-p' 'baas-directus' 'ps' '-q'"]]);
   await assert.rejects(discoverPlatformContainers('directus', command, { sshTarget: 'backend;touch /tmp/pwned' }), /invalid SSH target/);
   let now = 0;
   const result = await collectResources({
@@ -626,7 +626,7 @@ test('remote container probes use a validated SSH target for backend telemetry',
     command,
   });
   assert.equal(result.valid, true);
-  assert.deepEqual(calls[1], ['ssh', ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', 'backend-telemetry', 'docker', 'stats', '--no-stream', '--format', '{{json .}}', 'aaaaaaaaaaaa']]);
+  assert.deepEqual(calls[1], ['ssh', ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', 'backend-telemetry', "docker 'stats' '--no-stream' '--format' '{{json .}}' 'aaaaaaaaaaaa'"]]);
 });
 
 test('remote runner config is platform-scoped and requires HTTPS endpoints', async () => {

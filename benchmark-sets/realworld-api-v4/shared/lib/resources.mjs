@@ -12,10 +12,13 @@ function bytes(text) {
   return Number.isSafeInteger(Math.round(value)) ? Math.round(value) : null;
 }
 
+function shellQuote(value) { return `'${String(value).replaceAll("'", "'\\''")}'`; }
+
 function dockerInvocation(args, sshTarget) {
   if (sshTarget === undefined || sshTarget === '') return ['docker', args];
   if (typeof sshTarget !== 'string' || !/^(?:[A-Za-z0-9_.-]+@)?[A-Za-z0-9][A-Za-z0-9.-]*$/.test(sshTarget)) throw new Error('invalid SSH target');
-  return ['ssh', ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', sshTarget, 'docker', ...args]];
+  const remoteCommand = ['docker', ...args.map(shellQuote)].join(' ');
+  return ['ssh', ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', sshTarget, remoteCommand]];
 }
 
 export async function discoverPlatformContainers(platform, command = runCommand, options = {}) {
