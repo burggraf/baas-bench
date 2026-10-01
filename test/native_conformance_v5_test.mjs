@@ -5,11 +5,11 @@ import { fileURLToPath } from 'node:url';
 import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { nativeSourceManifest } from './native_v5_provenance.mjs';
+import { nativeSourceManifest, pinnedNodeVersion } from './native_v5_provenance.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { SCALE_SNAPSHOT_MIGRATION, RESTORE_APPLICATION_SQL, restoreTrailBaseScaleBaseline } from './native_v5_trailbase_scale.mjs';
 import { runNativeConformance, closeNativeSessions } from '../benchmark-sets/realworld-api-v5/shared/lib/native-conformance.mjs';
-import { assertConformance } from '../benchmark-sets/realworld-api-v5/shared/lib/conformance.mjs';
+import { assertConformance, runConformance } from '../benchmark-sets/realworld-api-v5/shared/lib/conformance.mjs';
 import { fixtureBatches, FIXTURE_COLUMNS } from '../benchmark-sets/realworld-api-v5/shared/lib/fixture.mjs';
 import { DATASET_COUNTS, entityId } from '../benchmark-sets/realworld-api-v5/shared/lib/dataset.mjs';
 
@@ -98,6 +98,9 @@ test('native provenance hashes source bytes and paths, excludes private runtime 
     put('bin/baas', 'setup');
     put('versions.env', 'pins');
     put('.runtime/conformance-v5/sdk/package-lock.json', '{}');
+    put('.runtime/conformance-v5/sdk/package.json', JSON.stringify({ engines: { node: '>=22' } }));
+    put('benchmark-sets/realworld-api-v5/versions.env', 'NODE_VERSION=22.23.1\n');
+    assert.equal(pinnedNodeVersion(root), '22.23.1');
     put('.runtime/conformance-v5/secret.env', 'never report this');
     const initial = nativeSourceManifest(root);
     assert.deepEqual(nativeSourceManifest(root), initial);
@@ -110,6 +113,17 @@ test('native provenance hashes source bytes and paths, excludes private runtime 
     put('test/native_v5_extra.mjs', 'new source');
     assert.equal(nativeSourceManifest(root).files.length, initial.files.length + 1);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('conformance failure diagnostics retain status but exclude raw errors and unknown names', async () => {
+  const error = Object.assign(new Error('private-token-value'), { name: 'private-token-value', status: 401, cleanupErrors: [new Error('private-password')] });
+  const report = await runConformance({ async 'fixture-integrity'() { throw error; } });
+  const finding = report.findings.find(row => row.name === 'fixture-integrity');
+  assert.equal(finding.passed, false);
+  assert.equal(finding.failure_type, 'Error');
+  assert.equal(finding.failure_http_status, 401);
+  assert.equal(finding.cleanup_failure_count, 1);
+  assert.equal(JSON.stringify(report).includes('private-'), false);
 });
 
 test('native session cleanup tries every session and preserves the primary error', async () => {

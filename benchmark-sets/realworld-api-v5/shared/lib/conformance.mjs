@@ -25,9 +25,13 @@ export async function runConformance(checks) {
     try {
       if (typeof checks?.[name] !== 'function' || await checks[name]() !== true) throw new Error('missing or unsuccessful native check');
       findings.push({ name, passed: true });
-    } catch {
-      // Avoid publishing native exceptions that can contain tokens/URLs.
-      findings.push({ name, passed: false });
+    } catch (error) {
+      // Never retain native messages, URLs, tokens, or arbitrary error names.
+      const safeTypes = ['Error', 'AssertionError', 'BenchmarkOperationError', 'FetchError', 'TimeoutError', 'AbortError', 'AggregateError'];
+      const finding = { name, passed: false, failure_type: safeTypes.includes(error?.name) ? error.name : 'Error' };
+      if (Number.isInteger(error?.status) && error.status >= 100 && error.status <= 599) finding.failure_http_status = error.status;
+      if (Array.isArray(error?.cleanupErrors)) finding.cleanup_failure_count = error.cleanupErrors.length;
+      findings.push(finding);
     }
   }
   return { passed: findings.every(finding => finding.passed), findings };

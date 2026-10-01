@@ -116,6 +116,10 @@ qualification, or proof that the full native adversarial suite has passed at
 scale. Both V5 hard guards remain. Do not pool the small- and full-scale reports
 into automatic admission evidence.
 
+Failed findings retain only an allowlisted error type, a valid HTTP status when
+available, and a cleanup-failure count. Native messages, URLs, credentials, and
+unknown error names are discarded. These diagnostics do not change acceptance.
+
 ## Diagnostic source provenance
 
 New attempts record the starting Git commit, dirty-worktree flag, actual Node

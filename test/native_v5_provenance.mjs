@@ -23,11 +23,20 @@ export function nativeSourceManifest(root) {
   return { files, sha256: createHash('sha256').update(JSON.stringify(files)).digest('hex') };
 }
 
+export function pinnedNodeVersion(root) {
+  const versions = readFileSync(join(root, 'benchmark-sets/realworld-api-v5/versions.env'), 'utf8');
+  const version = versions.match(/^NODE_VERSION=(\S+)$/m)?.[1];
+  assert.match(version ?? '', /^\d+\.\d+\.\d+$/);
+  const sdk = JSON.parse(readFileSync(join(root, '.runtime/conformance-v5/sdk/package.json'), 'utf8'));
+  assert.equal(sdk.engines?.node, `>=${version.split('.')[0]}`, 'SDK package must require the declared Node major version');
+  return version;
+}
+
 export function nativeProbeProvenance(root) {
   const git = args => {
     const result = spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', timeout: 10000, maxBuffer: 1024 * 1024 });
     assert.equal(result.status, 0, 'native provenance Git inspection failed');
     return result.stdout.trim();
   };
-  return { git_commit: git(['rev-parse', 'HEAD']), dirty: git(['status', '--porcelain', '--untracked-files=all']) !== '', node_version: process.version, sources: nativeSourceManifest(root), admission_evidence: false };
+  return { git_commit: git(['rev-parse', 'HEAD']), dirty: git(['status', '--porcelain', '--untracked-files=all']) !== '', node_version: process.version, pinned_node_version: pinnedNodeVersion(root), sources: nativeSourceManifest(root), admission_evidence: false };
 }

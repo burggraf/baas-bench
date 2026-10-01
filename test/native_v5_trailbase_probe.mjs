@@ -10,7 +10,7 @@ import { createTrailBaseAdapter } from '../benchmark-sets/realworld-api-v5/share
 import { runNativeConformance } from '../benchmark-sets/realworld-api-v5/shared/lib/native-conformance.mjs';
 import { parseBootstrapCredentials } from '../benchmark-sets/realworld-api-v4/shared/lib/admin/trailbase-bootstrap.mjs';
 import { runTrailBaseScaleProbe, SCALE_SNAPSHOT_MIGRATION } from './native_v5_trailbase_scale.mjs';
-import { nativeProbeProvenance, nativeSourceManifest } from './native_v5_provenance.mjs';
+import { nativeProbeProvenance, nativeSourceManifest, pinnedNodeVersion } from './native_v5_provenance.mjs';
 
 if (process.argv.length !== 3 || !['--local-disposable', '--local-declared-scale'].includes(process.argv[2])) {
   console.error('usage: node test/native_v5_trailbase_probe.mjs {--local-disposable|--local-declared-scale}');
@@ -47,6 +47,7 @@ async function query(sql) {
 async function denied(action, constraint = false) { await assert.rejects(action(), error => Number(error.status) >= 400 && Number(error.status) < (constraint ? 600 : 500)); }
 async function main() {
   report.provenance = nativeProbeProvenance(root);
+  assert.equal(process.versions.node, pinnedNodeVersion(root), 'native probe requires the pinned V5 Node runtime');
   report.phase = 'image-preflight';
   const contextHost = docker(['context', 'inspect', '--format', '{{.Endpoints.docker.Host}}']).trim();
   const dockerHost = process.env.DOCKER_CONTEXT ? contextHost : process.env.DOCKER_HOST || contextHost;

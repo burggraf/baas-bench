@@ -70,9 +70,13 @@ restore or preserving old workload sessions. This correction still requires a
 fresh native check. It does not change actor authentication or API deadlines.
 
 Supabase declared-scale testing started only after confirmed TrailBase cleanup.
-No full-scale passing result is claimed: two complete mutation/reset cycles are
-required. Identical warm-up and the actual measurement lifecycle remain separate
-qualification gates.
+The active attempt began under Node 26.7.0, not the pinned Node 22.23.1, and
+before source provenance was recorded. Its observations are diagnostic-only; do
+not treat them as conformance evidence even if its reset cycles pass. A private,
+checksum-verified Node 22.23.1 is now installed, and future attempts fail before
+setup if the runtime differs from the V5 pin. No full-scale passing result is
+claimed: two complete mutation/reset cycles are required. Identical warm-up and
+the actual measurement lifecycle remain separate qualification gates.
 
 ## Remaining gates
 
