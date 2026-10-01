@@ -95,6 +95,12 @@ Measured runs must write the normalized `summary.json` contract documented in `d
 
 Never commit `.runtime/`, `.results/`, credentials, connection strings, or raw benchmark output. Publish only through `bin/bench publish`; it rejects dirty, debug, failed, invalid, stale, malformed, or tampered bundles. Do not hand-edit published evidence or calculate cross-case rankings unless an approved reporting methodology exists.
 
+## Next implementation priority: benchmark fairness
+
+The user has queued [BaaS benchmark fairness and conformance remediation](docs/plans/2026-10-01-baas-benchmark-fairness-plan.md) as the **highest next implementation priority once the multi-core runner test work in the other terminal is complete**. Do not interrupt that work or overwrite its pending changes. Obtain its completion handoff (revision, checks, runner profile, outstanding issues and any live-resource ownership/cleanup state) before beginning this plan.
+
+After that handoff, prioritize the all-case semantic audit, approved shared application contract, failing conformance tests, and implementation alignment before further comparative capacity campaigns or isolated performance tuning. Existing Supabase/TrailBase observations are diagnostic implementations, not established apples-to-apples platform results; preserve historical bundles unchanged. This priority does not cancel already authorized multi-core diagnostics or authorize new paid runs, retries, destructive recovery, budget extensions, or publication. Follow the plan's approval and conformance gates.
+
 ## V4 live pilot progress
 
 While an authorized Linode V4 pilot is running, inspect its local status without a token, SSH, or another monitoring connection:

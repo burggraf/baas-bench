@@ -54,6 +54,22 @@ A passing stage must be telemetry- and lifecycle-valid, achieve at least 95% of 
 
 The backend also records disk I/O/space, network and service restart/health. Measurements align to stage boundaries and include timestamps and host profiles. Sustained runner overload, missing/malformed telemetry, service restart, incomplete work, failed fixture verification, unexpected public route, or resource pressure that prevents attribution invalidates the observation; it is not reported as a low backend capacity.
 
+## Implementation-equivalence caveat
+
+The common seed, workflow weights, think times, stage/SLO rules, backend hardware profile, and private-network topology are intended to match. Different native request fan-out is an access-path characteristic, not a requirement to equalize HTTP request counts. However, the current Supabase and TrailBase cases do **not** yet enforce identical application semantics:
+
+- Supabase enforces self/organization-peer user visibility; TrailBase allows authenticated reads of all application users. Supabase restricts project mutations to owners/admins and comment edits to author/manager; TrailBase's corresponding rules allow organization members. Project mutations and editing another author's comment are not measured workflows, but peer visibility affects measured task-detail reads.
+- Supabase checks creator/author identity and enforces foreign keys and value constraints. TrailBase's schema lacks equivalent relationship/value checks, and its create rules check membership without binding creator/author to the authenticated user. Well-formed benchmark payloads do not prove equivalent rejection behavior.
+- Supabase task/comment insert/update triggers create activity records. TrailBase currently has no equivalent trigger or adapter-side activity write, reducing write work and changing the later dashboard dataset.
+- Supabase search uses case-insensitive substring matching; TrailBase passes a plain title filter without an explicit substring operator. Search result semantics must be reconciled and tested.
+- Supabase handles an explicit null assignee filter; TrailBase's adapter currently drops it. The measured task-list workflow does not request this filter, and the seeded correctness fixture can mask the discrepancy.
+- Profile mutation uses native Auth plus the application user table in Supabase, but only the application user table in TrailBase. Task-detail user reads are sequential in Supabase and parallel in TrailBase. These access-path/implementation differences must be disclosed.
+- Supabase restores the full application baseline; TrailBase reset deletes workload-created records but does not restore modified seeded rows, profiles, or roles. Fresh observations reduce cross-run effects but do not establish reset equivalence.
+
+The shared correctness gate checks several tenant/role and pagination behaviors but does not currently verify search matches, activity side effects, or the complete negative authorization/constraint contract above. Passing that gate is not proof of implementation equivalence. Earlier Supabase observations also used different telemetry/search implementations from later TrailBase observations; retain their exact archived definitions and do not pool them as one unchanged profile.
+
+Treat existing capacities as diagnostic measurements of these implementations, not a formal apples-to-apples platform ranking. Close the semantic gaps with matching correctness checks, document access-path differences, and rerun both cases under the same harness revision before a formal comparison. Supabase's unused-count removal and statement-scoped RLS overlay preserve its existing semantics and require new observations; they do not retroactively change prior evidence.
+
 ## Trials and reporting
 
 A formal 8 GiB comparison requires at least three valid independent observations per included platform in a predeclared balanced/rotated order. Every attempt, including invalid/interrupted attempts, is retained. A fresh VM pair is used per observation and deleted afterward; there is no fixed 600-second inter-platform cooldown. Record start/finish times, creation/deletion outcomes, exact plan/region/network/image/runtime versions, estimated spend, and resource traces to expose time-varying provider contention. Do not pool different backend/runner plan profiles.
