@@ -123,10 +123,12 @@ test('runBench receives live progress on its separate descriptor without changin
   try {
     await mkdir(join(root, 'bin'));
     const event = { source: 'runner', phase: 'measure', kind: 'heartbeat', updated_at: 1000, last_activity_at: 1000, elapsed_ms: 0 };
-    await writeFile(join(root, 'bin/bench'), `#!/bin/sh\nprintf '%s' '${encodeProgress(event)}' >&3\nprintf '/tmp/evidence\n'\n`, { mode: 0o700 });
+    const argsPath = join(root, 'args');
+    await writeFile(join(root, 'bin/bench'), `#!/bin/sh\nprintf '%s' '${encodeProgress(event)}' >&3\nprintf '%s' \"$*\" > '${argsPath}'\nprintf '/tmp/evidence\\n'\n`, { mode: 0o700 });
     const events = [];
-    const path = await runBench({ repositoryRoot: root, timeoutMs: 5000, onProgress: event => events.push(event) });
+    const path = await runBench({ repositoryRoot: root, platform: 'trailbase', timeoutMs: 5000, onProgress: event => events.push(event) });
     assert.equal(path, '/tmp/evidence');
+    assert.match(await readFile(argsPath, 'utf8'), /run realworld-api-v4 project-management-capacity trailbase javascript-sdk/);
     assert.deepEqual(events, [event]);
   } finally { await rm(root, { recursive: true, force: true }); }
 });

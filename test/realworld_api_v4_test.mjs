@@ -45,13 +45,15 @@ test('real-world API capacity scaffold declares its lifecycle and metrics', () =
 
 test('V4 pins current platform and SDK releases without changing V3 pins', () => {
   const versions = text('versions.env');
-  for (const pin of ['NODE_VERSION=22.23.1', 'DOCKER_VERSION=29.5.0', 'DOCKER_COMPOSE_VERSION=5.1.2', 'SUPABASE_ENVOY_IMAGE=envoyproxy/envoy@sha256:57e14a549d7bd43c8d3f6d03e8cfa653e037d4b38e133acd9b54f38c524401b4', 'TRAILBASE_VERSION=0.34.1', 'APPWRITE_VERSION=2.3.0', 'DIRECTUS_VERSION=12.4.1', 'POCKETBASE_VERSION=0.40.4', 'POSTGRES_VERSION=16.15-bookworm']) assert.ok(versions.includes(`${pin}\n`), pin);
+  for (const pin of ['NODE_VERSION=22.23.1', 'DOCKER_VERSION=29.5.0', 'DOCKER_COMPOSE_VERSION=5.1.2', 'SUPABASE_ENVOY_IMAGE=envoyproxy/envoy@sha256:57e14a549d7bd43c8d3f6d03e8cfa653e037d4b38e133acd9b54f38c524401b4', 'TRAILBASE_VERSION=0.34.2', 'TRAILBASE_IMAGE=trailbase/trailbase:0.34.2@sha256:19c0d307b04feff676e7c4386a48d6cceb60a29385fc778eb810ea92d91cd238', 'APPWRITE_VERSION=2.3.0', 'DIRECTUS_VERSION=12.4.1', 'POCKETBASE_VERSION=0.40.4', 'POSTGRES_VERSION=16.15-bookworm']) assert.ok(versions.includes(`${pin}\n`), pin);
   const bootstrap = text('../services/linode/bootstrap.sh', new URL('../', setRoot));
   for (const pin of ['NODE_VERSION=22.23.1', 'DOCKER_VERSION=29.5.0', 'COMPOSE_VERSION=5.1.2', 'git iproute2 iptables openssh-client openssl rsync', 'sha256sum -c -', 'systemctl is-active --quiet docker', 'docker info', 'journalctl -u docker', 'docker compose version --short']) assert.ok(bootstrap.includes(pin), pin);
   assert.ok(bootstrap.includes('tar -xJf "$work/node.tar.xz" -C /opt/baas-bench-tools'));
   assert.ok(!bootstrap.includes('/opt/baas-bench/node-v'));
   assert.ok(text('versions.env', new URL('../../', setRoot)).includes('TRAILBASE_VERSION=0.33.10\n'));
   assert.ok(text('cases/trailbase/javascript-sdk/case.conf', benchmarkRoot).includes('client=trailbase@0.14.1\n'));
+  assert.ok(text('cases/trailbase/javascript-sdk/case.conf', benchmarkRoot).includes('connection=https-private-vpc-envoy\n'));
+  assert.ok(versions.includes('TRAILBASE_ENVOY_IMAGE=envoyproxy/envoy@sha256:57e14a549d7bd43c8d3f6d03e8cfa653e037d4b38e133acd9b54f38c524401b4\n'));
   assert.ok(text('shared/pocketbase-go/go.mod').includes('github.com/pocketbase/pocketbase v0.40.4'));
   const pkg = JSON.parse(text('shared/package.json'));
   const lock = JSON.parse(text('shared/package-lock.json'));
@@ -164,6 +166,17 @@ echo "rsync: $*" >> "$FAKE_LOG"
     assert.match(calls, /remote-config\.mjs create supabase .* 10\.0\.0\.10 bench@10\.0\.0\.10/);
     assert.ok(calls.indexOf('admin.mjs') < calls.indexOf('remote-config.mjs create'));
     assert.ok(calls.indexOf('remote-config.mjs create') < calls.lastIndexOf('rsync:'));
+    await writeFile(log, '');
+    const trailbaseSetup = spawnSync('sh', [new URL('../benchmark-sets/realworld-api-v4/shared/case.sh', import.meta.url).pathname, 'setup', 'trailbase'], {
+      encoding: 'utf8',
+      env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, FAKE_LOG: log, FAKE_RUNNER_SSH: runnerSsh, REAL_NODE: process.execPath, BAAS_BENCH_V4_SSH_CONFIG: sshState.configPath, BAAS_RUNTIME_DIR: directory, BAAS_BENCH_V4_RUNNER_TARGET: 'runner.internal', BAAS_BENCH_V4_RUNNER_ROOT: '/srv/runner', BAAS_BENCH_V4_BACKEND_TARGET: 'controller@172.233.137.153', BAAS_BENCH_V4_BACKEND_ROOT: '/srv/backend', BAAS_BENCH_V4_BACKEND_PRIVATE_IP: '10.0.0.10', BAAS_BENCH_V4_BACKEND_DOCKER_SSH_TARGET: 'bench@10.0.0.10', BAAS_BENCH_V4_RUNNER_SSH_KEY_FILE: runnerKey },
+    });
+    assert.equal(trailbaseSetup.status, 0, trailbaseSetup.stderr);
+    const trailbaseCalls = await readFile(log, 'utf8');
+    assert.match(trailbaseCalls, /remote-config\.mjs create trailbase .* 10\.0\.0\.10 bench@10\.0\.0\.10/);
+    assert.match(trailbaseCalls, /runner\.internal .*ssh_config/);
+    assert.ok(trailbaseCalls.indexOf('admin.mjs') < trailbaseCalls.indexOf('remote-config.mjs create'));
+    assert.ok(trailbaseCalls.indexOf('remote-config.mjs create') < trailbaseCalls.lastIndexOf('rsync:'));
     await writeFile(log, '');
     const failed = spawnSync('sh', [new URL('../benchmark-sets/realworld-api-v4/shared/case.sh', import.meta.url).pathname, 'setup', 'supabase'], {
       encoding: 'utf8',
@@ -539,7 +552,7 @@ test('resources select compose project containers and sum docker stats', async (
   assert.equal(stats.memoryBytes, 2 * 1024 * 1024);
 });
 
-test('pilot evidence verifier requires a complete V4 Supabase lifecycle bundle', async () => {
+test('pilot evidence verifier accepts only complete valid Supabase or TrailBase bundles', async () => {
   const { verifyPilotBundle } = await import('../benchmark-sets/realworld-api-v4/shared/lib/bench-execution.mjs');
   const directory = await mkdtemp(join(tmpdir(), 'rw-pilot-bundle-'));
   try {
@@ -560,6 +573,13 @@ test('pilot evidence verifier requires a complete V4 Supabase lifecycle bundle',
     await assert.rejects(verifyPilotBundle(directory), /invalid measured stages/);
     await writeFile(join(directory, 'run.json'), JSON.stringify({ status: 'failed' }));
     await assert.rejects(verifyPilotBundle(directory), /lifecycle is incomplete/);
+    const valid = { status: 'complete', set: 'realworld-api-v4', platform: 'trailbase', variant: 'javascript-sdk', lifecycle: { start: 'complete', setup: 'complete', teardown: 'complete', stop: 'complete' } };
+    raw.stages[0].valid = true; raw.capacity.stages[0].invalid = false; raw.platform = 'trailbase';
+    await writeFile(join(directory, 'run.json'), JSON.stringify(valid));
+    await writeFile(join(trial, 'raw.json'), JSON.stringify(raw));
+    await rm(join(trial, '.transfer-manifest.json'));
+    await createTransferManifest(trial);
+    assert.equal(await verifyPilotBundle(directory, 'trailbase'), directory);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -711,7 +731,7 @@ test('remote runner loads only restrictive config and confirms its CA exists', a
   } finally { await sshState.cleanup(); await rm(directory, { recursive: true, force: true }); }
 });
 
-test('remote setup creates a private Supabase runner config from backend-only inputs', async () => {
+test('remote setup creates private Supabase and TrailBase runner configs from backend-only inputs', async () => {
   const { createRemoteConfig, prepareRemoteConfig } = await import('../benchmark-sets/realworld-api-v4/shared/lib/remote-config.mjs');
   const createdDirectory = await mkdtemp(join(tmpdir(), 'rw-created-remote-config-'));
   try {
@@ -724,6 +744,10 @@ test('remote setup creates a private Supabase runner config from backend-only in
     assert.equal((await stat(join(createdDirectory, 'remote-config.json'))).mode & 0o077, 0);
     await assert.rejects(createRemoteConfig({ platform: 'supabase', runtime: createdDirectory, runnerRoot: '/opt/runner', backendAddress: 'backend.example.test', dockerSshTarget: 'bench@10.0.0.10', publishableKey: 'key' }), /private IPv4/);
     await assert.rejects(createRemoteConfig({ platform: 'supabase', runtime: createdDirectory, runnerRoot: '/opt/runner', backendAddress: '203.0.113.10', dockerSshTarget: 'bench@10.0.0.10', publishableKey: 'key' }), /private IPv4/);
+    const trailbase = await createRemoteConfig({ platform: 'trailbase', runtime: createdDirectory, runnerRoot: '/opt/runner', backendAddress: '10.0.0.10', dockerSshTarget: 'bench@10.0.0.10' });
+    assert.deepEqual(trailbase.env, { TRAILBASE_URL: 'https://10.0.0.10:8443' });
+    assert.equal((await stat(join(createdDirectory, 'remote-config.json'))).mode & 0o077, 0);
+    await assert.rejects(createRemoteConfig({ platform: 'trailbase', runtime: createdDirectory, runnerRoot: '/opt/runner', backendAddress: '203.0.113.10', dockerSshTarget: 'bench@10.0.0.10' }), /private IPv4/);
   } finally { await rm(createdDirectory, { recursive: true, force: true }); }
 });
 
@@ -1798,7 +1822,10 @@ test('TrailBase adapter uses the official record client with isolated auth sessi
   const { createTrailBaseAdapter } = await import('../benchmark-sets/realworld-api-v4/shared/lib/adapters/trailbase.mjs');
   const calls = [];
   const client = { auth: { async login(value) { calls.push(['login', value]); return { user: { id: 'usr' }, token: 'token' }; }, async refresh() {}, async logout() { calls.push(['logout']); } }, records(name) { return { async list(options) { calls.push(['list', name, options]); if (name === 'users') return { records: [{ id: 'usr', email: 'u@example.test' }] }; if (name === 'memberships') return { records: [{ id: 42, external_id: 'mem', organization_id: 'org', user_id: 'usr', role: 'member', created_at: '2025-01-01' }] }; return { records: [], totalCount: 0 }; }, async read(id) { calls.push(['read', name, id]); return { id, organization_id: 'org', project_id: 'prj', creator_id: 'usr', title: 't', description: 'd', status: 'todo', priority: 'low', created_at: '2025-01-01', updated_at: '2025-01-01' }; }, async create(data) { calls.push(['create', name, data]); return { id: 'new', ...data }; }, async update(id, data) { calls.push(['update', name, id, data]); return { id, ...data }; } }; } };
-  const adapter = createTrailBaseAdapter({ initClient: () => client, client });
+  const adapter = createTrailBaseAdapter({ initClient: () => client, client, endpoint: 'http://127.0.0.1:4000' });
+  const tlsAdapter = createTrailBaseAdapter({ initClient: () => client, client, endpoint: 'https://10.0.0.10:8443' });
+  assert.equal(adapter.deviations.length, 1);
+  assert.match(tlsAdapter.deviations.at(-1), /pinned Envoy gateway/);
   const session = await adapter.createSession({ email: 'u@example.test', password: 'pw' });
   assert.equal((await session.getProfile()).id, 'usr');
   await session.listTasks({ organizationId: 'org', projectId: 'prj', page: 0, pageSize: 10 });

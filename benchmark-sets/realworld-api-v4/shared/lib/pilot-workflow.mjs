@@ -4,20 +4,21 @@ import { createEphemeralSshKey, startSshAgent } from './ephemeral-ssh.mjs';
 import { readBootstrapScript } from './remote-bootstrap.mjs';
 import { bootstrapAndDeploy } from './observation-workflow.mjs';
 import { resolveHardwareProfile, runObservation } from './linode-controller.mjs';
-import { preflightPilot, runBench, verifyPilotBundle } from './bench-execution.mjs';
+import { PILOT_PLATFORMS, preflightPilot, runBench, verifyPilotBundle } from './bench-execution.mjs';
 import { createProgress, emitProgress } from './progress.mjs';
 
 export async function runPilot(options) {
   const { api, config, repositoryRoot, bootstrapScriptPath, inventoryPath, campaignPath, controllerCidr, maxHours, transferReserveUsd, liveApproval, deleteConfirmation } = options;
-  if (!api?.request || !config?.runId || typeof repositoryRoot !== 'string' || typeof bootstrapScriptPath !== 'string' || typeof controllerCidr !== 'string') throw new Error('invalid V4 pilot configuration');
+  const platform = options.platform ?? 'supabase';
+  if (!PILOT_PLATFORMS.includes(platform) || !api?.request || !config?.runId || typeof repositoryRoot !== 'string' || typeof bootstrapScriptPath !== 'string' || typeof controllerCidr !== 'string') throw new Error('invalid V4 pilot configuration');
   const selectProfile = options.selectProfile ?? resolveHardwareProfile;
   const createKey = options.createKey ?? createEphemeralSshKey;
   const startAgent = options.startAgent ?? startSshAgent;
   const deploy = options.deploy ?? bootstrapAndDeploy;
   const observe = options.observe ?? runObservation;
   const onProgress = options.onProgress ?? emitProgress;
-  const executeBench = options.executeBench ?? (args => runBench({ repositoryRoot, onProgress, ...args }));
-  const verifyBench = options.verifyBench ?? verifyPilotBundle;
+  const executeBench = options.executeBench ?? (args => runBench({ repositoryRoot, platform, onProgress, ...args }));
+  const verifyBench = options.verifyBench ?? ((path, selectedPlatform) => verifyPilotBundle(path, selectedPlatform));
   if (typeof executeBench !== 'function' || typeof verifyBench !== 'function') throw new Error('V4 pilot requires benchmark execution and verification');
   const progress = createProgress('controller', { emit: onProgress });
   let key;
@@ -26,7 +27,7 @@ export async function runPilot(options) {
   let primary;
   progress.phase('preflight');
   try {
-    await (options.preflight ?? preflightPilot)({ repositoryRoot });
+    await (options.preflight ?? preflightPilot)({ repositoryRoot, platform });
     const profile = await selectProfile(api);
     if (typeof api.list !== 'function') throw new Error('Linode account SSH key listing is unavailable');
     const accountKeys = (await api.list('/v4/profile/sshkeys')).filter(item => item?.label === 'mba-m1');
@@ -51,8 +52,8 @@ export async function runPilot(options) {
         if (deployment.hostProvenance) inventory.host_provenance = deployment.hostProvenance;
         inventory.hardware_profile = { region: profile.region, type: Object.fromEntries(['id', 'class', 'memory', 'vcpus', 'disk', 'transfer'].filter(key => profile.type[key] !== undefined).map(key => [key, profile.type[key]])), hourly_usd: profile.hourlyUsd };
       },
-      run: async ({ inventory, signal }) => executeBench({ environment: { ...environment, ...inventory.benchmark_environment, BAAS_BENCH_V4_SSH_CONFIG: sshState.configPath }, signal }),
-      verify: async (...args) => { progress.phase('verify-evidence'); return verifyBench(...args); },
+      run: async ({ inventory, signal }) => executeBench({ platform, environment: { ...environment, ...inventory.benchmark_environment, BAAS_BENCH_V4_SSH_CONFIG: sshState.configPath }, signal }),
+      verify: async path => { progress.phase('verify-evidence'); return verifyBench(path, platform); },
     });
     return { ...outcome, profile };
   } catch (error) { primary = error; throw error; }

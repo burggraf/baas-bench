@@ -142,7 +142,7 @@ test('recovery CLI fails closed without an explicit deletion confirmation', () =
 
 test('pilot CLI fails before API work without approval or deletion confirmation', () => {
   const cli = fileURLToPath(new URL('../bin/bench-v4-linode.mjs', import.meta.url));
-  const noApproval = spawnSync(process.execPath, [cli, 'pilot', '/tmp/pilot-inventory.json', '--run-id', 'obs-20260929-abc123', '--campaign', '/tmp/pilot-ledger.json', '--controller-cidr', '203.0.113.4/32', '--confirm-delete', 'obs-20260929-abc123'], { encoding: 'utf8', env: { ...process.env, LINODE_TOKEN: 'controller-secret', LIVE_APPROVAL_PHRASE: '' } });
+  const noApproval = spawnSync(process.execPath, [cli, 'pilot', '/tmp/pilot-inventory.json', '--platform', 'trailbase', '--run-id', 'obs-20260929-abc123', '--campaign', '/tmp/pilot-ledger.json', '--controller-cidr', '203.0.113.4/32', '--confirm-delete', 'obs-20260929-abc123'], { encoding: 'utf8', env: { ...process.env, LINODE_TOKEN: 'controller-secret', LIVE_APPROVAL_PHRASE: '' } });
   assert.notEqual(noApproval.status, 0);
   assert.match(noApproval.stderr, /LIVE_APPROVAL_PHRASE/);
   const wrongDelete = spawnSync(process.execPath, [cli, 'pilot', '/tmp/pilot-inventory.json', '--run-id', 'obs-20260929-abc123', '--campaign', '/tmp/pilot-ledger.json', '--controller-cidr', '203.0.113.4/32', '--confirm-delete', 'other-run'], { encoding: 'utf8', env: { ...process.env, LINODE_TOKEN: 'controller-secret', LIVE_APPROVAL_PHRASE: 'I_APPROVE_V4_LINODE_ACTIONS_UP_TO_USD_30' } });
@@ -324,7 +324,7 @@ test('ambiguous creation is reconciled by unique run label; primary create error
 
 test('pilot preflight checks local tools, validated definitions, and tracked/untracked launch changes', async () => {
   const { preflightPilot } = await import('../benchmark-sets/realworld-api-v4/shared/lib/bench-execution.mjs');
-  for (const dirty of ['', ' M benchmark-sets/realworld-api-v4/shared/lib/run.mjs\n', '?? benchmark-sets/realworld-api-v4/shared/new.mjs\n', ' M bin/bench\n']) {
+  for (const dirty of ['', ' M benchmark-sets/realworld-api-v4/shared/lib/run.mjs\n', '?? benchmark-sets/realworld-api-v4/shared/new.mjs\n', ' M bin/bench\n', ' M services/trailbase/envoy.yaml\n', ' M versions.env\n']) {
     const calls = [];
     const task = preflightPilot({ repositoryRoot: '/repo', command: async (name, args, options) => {
       calls.push([name, args]); assert.equal(options.cwd, '/repo'); assert.equal(options.timeoutMs, 30_000);
@@ -335,7 +335,13 @@ test('pilot preflight checks local tools, validated definitions, and tracked/unt
     assert.deepEqual(calls[1], ['/repo/bin/bench', ['validate', 'realworld-api-v4/project-management-capacity/supabase/javascript-sdk']]);
     assert.ok(calls[2][1].includes('--porcelain'));
     assert.ok(calls[2][1].includes('bin/bench-v4-linode.mjs'));
+    assert.ok(calls[2][1].includes('services/trailbase'));
+    assert.ok(calls[2][1].includes('versions.env'));
   }
+  const trailbaseCalls = [];
+  await preflightPilot({ repositoryRoot: '/repo', platform: 'trailbase', command: async (name, args) => { trailbaseCalls.push([name, args]); return { stdout: '' }; } });
+  assert.deepEqual(trailbaseCalls[1], ['/repo/bin/bench', ['validate', 'realworld-api-v4/project-management-capacity/trailbase/javascript-sdk']]);
+  await assert.rejects(preflightPilot({ repositoryRoot: '/repo', platform: 'unknown', command: async () => {} }), /unsupported V4 pilot platform/);
   await assert.rejects(preflightPilot({ repositoryRoot: '/repo', command: async () => { throw new Error('missing controller tool'); } }), /missing controller tool/);
 });
 
@@ -352,22 +358,23 @@ test('pilot rejects a failed local preflight before querying Linode or creating 
   assert.equal(paidWork, false);
 });
 
-test('pilot workflow profiles, deploys, runs, and cleans its ephemeral SSH credential', async () => {
+test('pilot workflow runs and verifies the selected TrailBase case with its ephemeral SSH credential', async () => {
   const { runPilot } = await import('../benchmark-sets/realworld-api-v4/shared/lib/pilot-workflow.mjs');
   const events = [];
   let sshConfigPath;
   const key = { privateKey: '/tmp/pilot-key', publicKey: 'ssh-ed25519 AAAATEST pilot', cleanup: async () => { events.push('key-cleanup'); } };
   const result = await runPilot({
+    platform: 'trailbase',
     api: { request() {}, list: async path => { assert.equal(path, '/v4/profile/sshkeys'); return [{ label: 'mba-m1', ssh_key: 'ssh-ed25519 AAAATEST mba-m1' }]; } }, config: { runId: 'obs-20260929-abc123', image: 'linode/ubuntu24.04' }, repositoryRoot: '/repo', bootstrapScriptPath: fileURLToPath(new URL('../services/linode/bootstrap.sh', import.meta.url)), inventoryPath: '/tmp/inventory.json', campaignPath: '/tmp/ledger.json', controllerCidr: '203.0.113.4/32', maxHours: 2, transferReserveUsd: 1, liveApproval: 'approval', deleteConfirmation: 'obs-20260929-abc123',
-    preflight: async () => {},
+    preflight: async ({ platform }) => { assert.equal(platform, 'trailbase'); },
     selectProfile: async () => ({ region: 'us-lax', type: { id: 'g6-dedicated-4', transfer: 5000 }, hourlyUsd: .1 }), createKey: async () => key,
     startAgent: async () => ({ env: { SSH_AUTH_SOCK: '/tmp/agent' }, stop: async () => { events.push('agent-stop'); } }),
     deploy: async ({ inventory, runnerKeyFile }) => { events.push('deploy'); assert.equal(runnerKeyFile, key.privateKey); return { environment: { DEPLOYED: inventory.resources.backend.privateIpv4, BAAS_BENCH_V4_SSH_CONFIG: '/stale/ssh_config' }, hostProvenance: { backend: { dockerService: 'active' }, runner: { dockerService: 'active' } } }; },
-    executeBench: async ({ environment }) => { sshConfigPath = environment.BAAS_BENCH_V4_SSH_CONFIG; assert.equal((await stat(sshConfigPath)).mode & 0o777, 0o600); events.push('run'); assert.equal(environment.DEPLOYED, '10.203.0.10'); return '/tmp/bundle'; }, verifyBench: async result => { events.push(`verify:${result}`); },
-    observe: async options => { assert.equal(options.transferReserveUsd, 0); assert.deepEqual(options.config.additionalSshPublicKeys, ['ssh-ed25519 AAAATEST mba-m1']); const inventory = { status: 'bootstrapping', resources: { backend: { publicIpv4: '172.233.137.153', privateIpv4: '10.203.0.10' } } }; await options.bootstrap({ inventory }); assert.equal(inventory.hardware_profile.type.id, 'g6-dedicated-4'); assert.equal(inventory.host_provenance.runner.dockerService, 'active'); return { result: await options.run({ inventory, signal: new AbortController().signal }) }; },
+    executeBench: async ({ environment, platform }) => { assert.equal(platform, 'trailbase'); sshConfigPath = environment.BAAS_BENCH_V4_SSH_CONFIG; assert.equal((await stat(sshConfigPath)).mode & 0o777, 0o600); events.push('run'); assert.equal(environment.DEPLOYED, '10.203.0.10'); return '/tmp/bundle'; }, verifyBench: async (result, platform) => { assert.equal(platform, 'trailbase'); events.push(`verify:${result}`); },
+    observe: async options => { assert.equal(options.transferReserveUsd, 0); assert.deepEqual(options.config.additionalSshPublicKeys, ['ssh-ed25519 AAAATEST mba-m1']); const inventory = { status: 'bootstrapping', resources: { backend: { publicIpv4: '172.233.137.153', privateIpv4: '10.203.0.10' } } }; await options.bootstrap({ inventory }); assert.equal(inventory.hardware_profile.type.id, 'g6-dedicated-4'); assert.equal(inventory.host_provenance.runner.dockerService, 'active'); const bundle = await options.run({ inventory, signal: new AbortController().signal }); await options.verify(bundle, inventory); return { result: bundle }; },
   });
   assert.equal(result.profile.region, 'us-lax');
-  assert.deepEqual(events, ['deploy', 'run', 'agent-stop', 'key-cleanup']);
+  assert.deepEqual(events, ['deploy', 'run', 'verify:/tmp/bundle', 'agent-stop', 'key-cleanup']);
   await assert.rejects(stat(sshConfigPath), { code: 'ENOENT' });
 });
 

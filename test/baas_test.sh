@@ -24,7 +24,11 @@ trailbase'
 actual=$($BAAS list) || fail "list command failed"
 [ "$actual" = "$expected" ] || fail "unexpected service list"
 grep -q '^NHOST_TRAEFIK_IMAGE=traefik:v3\.6\.1@sha256:' "$ROOT/versions.env" || fail "V3 Nhost Traefik compatibility image changed"
-grep -q '^TRAILBASE_VERSION=0\.34\.1$' "$ROOT/benchmark-sets/realworld-api-v4/versions.env" || fail "V4 TrailBase version is not current"
+grep -q '^TRAILBASE_VERSION=0\.34\.2$' "$ROOT/benchmark-sets/realworld-api-v4/versions.env" || fail "V4 TrailBase version is not current"
+grep -q '^TRAILBASE_IMAGE=trailbase/trailbase:0\.34\.2@sha256:19c0d307b04feff676e7c4386a48d6cceb60a29385fc778eb810ea92d91cd238$' "$ROOT/benchmark-sets/realworld-api-v4/versions.env" || fail "V4 TrailBase image is not digest-pinned"
+grep -q '^TRAILBASE_ENVOY_IMAGE=envoyproxy/envoy@sha256:57e14a549d7bd43c8d3f6d03e8cfa653e037d4b38e133acd9b54f38c524401b4$' "$ROOT/benchmark-sets/realworld-api-v4/versions.env" || fail "V4 TrailBase Envoy image is not digest-pinned"
+grep -q 'filename: /etc/envoy/tls/server.crt' "$ROOT/services/trailbase/envoy.yaml" || fail "V4 TrailBase gateway does not use TLS"
+grep -q 'address: trailbase' "$ROOT/services/trailbase/envoy.yaml" || fail "V4 TrailBase gateway does not proxy to the service"
 grep -Eq '^NEON_BUILD_TOOLS_IMAGE=ghcr\.io/neondatabase/build-tools:pinned@sha256:[0-9a-f]{64}$' "$ROOT/versions.env" || fail "Neon proxy build tools image is not fully pinned"
 grep -Eq '^NEON_IMAGE=[^[:space:]@]+@sha256:[0-9a-f]{64}$' "$ROOT/versions.env" || fail "Neon proxy runtime image is not fully pinned"
 grep -Eq '^NEON_REF=[0-9a-f]{40}$' "$ROOT/versions.env" || fail "Neon source ref is not an immutable commit"
@@ -69,7 +73,7 @@ case "$docker_args" in
     (
       set -a
       for compose_env_file in $compose_env_files; do . "$compose_env_file"; done
-      printf '%s\n' "trailbase-resolved-version=$TRAILBASE_VERSION" >> "$BAAS_TEST_LOG"
+      printf '%s\n' "trailbase-resolved-version=$TRAILBASE_VERSION" "trailbase-resolved-image=${TRAILBASE_IMAGE:-}" "trailbase-resolved-envoy=${TRAILBASE_ENVOY_IMAGE:-}" "trailbase-http-bind=${TRAILBASE_HTTP_BIND:-}" >> "$BAAS_TEST_LOG"
     )
     ;;
   *services/pocketbase/compose.yml*)
@@ -143,6 +147,7 @@ case "$1" in
       case "$1" in
         -out) output=$2; shift 2 ;;
         -keyout) keyout=$2; shift 2 ;;
+        -extfile) cat "$2" >> "$BAAS_TEST_LOG"; shift 2 ;;
         *) shift ;;
       esac
     done
@@ -182,9 +187,19 @@ if grep 'docker compose .*services/directus/compose.yml' "$BAAS_TEST_LOG" | grep
 grep -q 'curl .*localhost:8055/server/ping' "$BAAS_TEST_LOG" || fail "Directus smoke call missing"
 [ "$(ls -l "$BAAS_RUNTIME_DIR/directus/.env" | cut -c5-10)" = '------' ] || fail "Directus secrets are not private"
 : > "$BAAS_TEST_LOG"
-BAAS_VERSION_PROFILE=realworld-api-v4 "$BAAS" setup trailbase >/dev/null
-grep -q 'docker compose .*--env-file .*versions.env --env-file .*realworld-api-v4/versions.env .*services/trailbase/compose.yml config --quiet' "$BAAS_TEST_LOG" || fail "V4 service versions were not overlaid for Compose"
-grep -q '^trailbase-resolved-version=0.34.1$' "$BAAS_TEST_LOG" || fail "V4 TrailBase version was not used"
+BAAS_VERSION_PROFILE=realworld-api-v4 BAAS_BENCH_V4_BACKEND_PRIVATE_IP=10.0.0.10 "$BAAS" setup trailbase >/dev/null
+BAAS_VERSION_PROFILE=realworld-api-v4 BAAS_BENCH_V4_BACKEND_PRIVATE_IP=10.0.0.10 "$BAAS" setup trailbase >/dev/null
+grep -q 'docker compose .*--env-file .*versions.env --env-file .*realworld-api-v4/versions.env .*services/trailbase/compose.yml .*services/trailbase/v4-gateway.yml config --quiet' "$BAAS_TEST_LOG" || fail "V4 private TrailBase gateway overlay missing from Compose"
+grep -q '^trailbase-resolved-version=0.34.2$' "$BAAS_TEST_LOG" || fail "V4 TrailBase version was not used"
+grep -q '^trailbase-resolved-image=trailbase/trailbase:0.34.2@sha256:19c0d307b04feff676e7c4386a48d6cceb60a29385fc778eb810ea92d91cd238$' "$BAAS_TEST_LOG" || fail "V4 TrailBase digest-pinned image was not used"
+grep -q '^trailbase-resolved-envoy=envoyproxy/envoy@sha256:57e14a549d7bd43c8d3f6d03e8cfa653e037d4b38e133acd9b54f38c524401b4$' "$BAAS_TEST_LOG" || fail "V4 TrailBase digest-pinned gateway was not used"
+[ -f "$BAAS_RUNTIME_DIR/benchmarks/realworld-api-v4/trailbase/ca.pem" ] || fail "V4 TrailBase private CA missing"
+[ -f "$BAAS_RUNTIME_DIR/trailbase/tls/server.crt" ] || fail "V4 TrailBase TLS certificate missing"
+grep -Fxq 'subjectAltName=IP:10.0.0.10' "$BAAS_TEST_LOG" || fail "V4 TrailBase TLS certificate is missing its private IP SAN"
+: > "$BAAS_TEST_LOG"
+BAAS_VERSION_PROFILE=realworld-api-v4 BAAS_BENCH_V4_BACKEND_PRIVATE_IP=10.0.0.10 "$BAAS" start trailbase >/dev/null
+grep -q '^trailbase-http-bind=127.0.0.1$' "$BAAS_TEST_LOG" || fail "V4 TrailBase cleartext API is not loopback-only"
+grep -q 'curl .*--cacert .*realworld-api-v4/trailbase/ca.pem .*https://10.0.0.10:8443/api/healthcheck' "$BAAS_TEST_LOG" || fail "V4 TrailBase private HTTPS smoke check missing"
 : > "$BAAS_TEST_LOG"
 BAAS_VERSION_PROFILE=realworld-api-v4 "$BAAS" setup pocketbase >/dev/null
 grep -q '^pocketbase-resolved-dockerfile=benchmark-sets/realworld-api-v4/shared/pocketbase-go/Dockerfile$' "$BAAS_TEST_LOG" || fail "V4 PocketBase helper was not selected"

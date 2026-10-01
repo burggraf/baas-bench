@@ -1,0 +1,14 @@
+services:
+  trailbase-v4-gateway:
+    image: ${TRAILBASE_ENVOY_IMAGE}
+    command: ["-c", "/etc/envoy/envoy.yaml"]
+    depends_on:
+      trailbase:
+        condition: service_started
+    ports:
+      - "${BAAS_BENCH_V4_BACKEND_PRIVATE_IP}:8443:8443"
+    volumes:
+      - ${TRAILBASE_V4_ENVOY_CONFIG}:/etc/envoy/envoy.yaml:ro
+      - ${TRAILBASE_V4_TLS_CERT}:/etc/envoy/tls/server.crt:ro
+      - ${TRAILBASE_V4_TLS_KEY}:/etc/envoy/tls/server.key:ro
+    restart: unless-stopped

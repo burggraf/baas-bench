@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { readPrivateJson, readLinodeToken, LinodeApi, recoverObservation, LIVE_APPROVAL_PHRASE } from '../benchmark-sets/realworld-api-v4/shared/lib/linode-controller.mjs';
 import { runPilot } from '../benchmark-sets/realworld-api-v4/shared/lib/pilot-workflow.mjs';
+import { PILOT_PLATFORMS } from '../benchmark-sets/realworld-api-v4/shared/lib/bench-execution.mjs';
 import { resolve, dirname, join } from 'node:path';
 import { mkdir } from 'node:fs/promises';
 import { createProgressStore, progressStatus } from '../benchmark-sets/realworld-api-v4/shared/lib/progress.mjs';
@@ -10,7 +11,7 @@ const usage = `Usage:
   node bin/bench-v4-linode.mjs inspect INVENTORY.json
   node bin/bench-v4-linode.mjs status INVENTORY.json
   LINODE_TOKEN=… node bin/bench-v4-linode.mjs recover INVENTORY.json --campaign LEDGER.json --confirm-delete RUN_ID [--force-stale-lock]
-  LINODE_TOKEN=… LIVE_APPROVAL_PHRASE=${LIVE_APPROVAL_PHRASE} node bin/bench-v4-linode.mjs pilot INVENTORY.json --run-id RUN_ID --campaign LEDGER.json --controller-cidr IPV4/32 --confirm-delete RUN_ID
+  LINODE_TOKEN=… LIVE_APPROVAL_PHRASE=${LIVE_APPROVAL_PHRASE} node bin/bench-v4-linode.mjs pilot INVENTORY.json [--platform supabase|trailbase] --run-id RUN_ID --campaign LEDGER.json --controller-cidr IPV4/32 --confirm-delete RUN_ID
 
 Recovery and pilot delete only resources recorded in the private inventory after checking IDs and ownership labels. Set LINODE_TOKEN in the environment or store it in a mode-0600 .linode.env file. Pilot provisions one pair and may incur charges.`;
 
@@ -37,13 +38,16 @@ async function main(argv) {
   }
 
   const options = {};
+  const allowedFlags = command === 'pilot' ? ['--campaign', '--confirm-delete', '--run-id', '--controller-cidr', '--platform'] : ['--campaign', '--confirm-delete'];
   for (let index = 0; index < rest.length; index++) {
     const flag = rest[index];
     if (flag === '--force-stale-lock' && command === 'recover') { options.force = true; continue; }
-    if (!['--campaign', '--confirm-delete', '--run-id', '--controller-cidr'].includes(flag) || !rest[index + 1] || options[flag]) throw new Error(usage);
+    if (!allowedFlags.includes(flag) || !rest[index + 1] || options[flag]) throw new Error(usage);
     options[flag] = rest[++index];
   }
   if (!options['--campaign'] || !options['--confirm-delete']) throw new Error(usage);
+  const platform = options['--platform'] ?? 'supabase';
+  if (command === 'pilot' && !PILOT_PLATFORMS.includes(platform)) throw new Error(`unsupported V4 pilot platform: ${platform}`);
   const root = resolve(fileURLToPath(new URL('../', import.meta.url)));
   let token = process.env.LINODE_TOKEN;
   if (!token) {
@@ -63,6 +67,7 @@ async function main(argv) {
   await mkdir(dirname(inventoryPath), { recursive: true, mode: 0o700 });
   const progress = createProgressStore(join(dirname(inventoryPath), 'progress.json'), options['--run-id']);
   const result = await runPilot({
+    platform,
     onProgress: event => progress.receive(event),
     api, repositoryRoot: root, bootstrapScriptPath: resolve(root, 'services/linode/bootstrap.sh'), inventoryPath, campaignPath: resolve(options['--campaign']), controllerCidr: options['--controller-cidr'], maxHours: 8, transferReserveUsd: 2,
     config: { runId: options['--run-id'], image: 'linode/ubuntu24.04', subnetCidr: '10.203.0.0/24' }, liveApproval: process.env.LIVE_APPROVAL_PHRASE, deleteConfirmation: options['--confirm-delete'],

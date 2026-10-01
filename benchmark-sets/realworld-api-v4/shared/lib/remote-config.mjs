@@ -73,14 +73,21 @@ async function readSupabasePublicKey(path) {
 }
 
 export async function createRemoteConfig({ platform, runtime, runnerRoot, backendAddress, dockerSshTarget, publishableKey }) {
-  if (platform !== 'supabase' || !safeLocalPath(runtime) || !safeRemotePath(runnerRoot) || !isPrivateIpv4(backendAddress) || !validTarget(dockerSshTarget) || typeof publishableKey !== 'string' || !publishableKey || publishableKey.length > 4096 || /[\r\n\0]/.test(publishableKey)) throw new Error('invalid Supabase private IPv4 remote configuration');
+  if (!['supabase', 'trailbase'].includes(platform) || !safeLocalPath(runtime) || !safeRemotePath(runnerRoot) || !isPrivateIpv4(backendAddress) || !validTarget(dockerSshTarget)) throw new Error('invalid private IPv4 remote configuration');
+  let env;
+  if (platform === 'supabase') {
+    if (typeof publishableKey !== 'string' || !publishableKey || publishableKey.length > 4096 || /[\r\n\0]/.test(publishableKey)) throw new Error('invalid Supabase publishable key');
+    env = { SUPABASE_URL: `https://${backendAddress}:8443`, SUPABASE_PUBLISHABLE_KEY: publishableKey };
+  } else {
+    env = { TRAILBASE_URL: `https://${backendAddress}:8443` };
+  }
   const config = {
     schema_version: 1,
     platform,
     docker_ssh_target: dockerSshTarget,
     ca_file: join(runnerRoot, '.runtime/benchmarks/realworld-api-v4/ca.pem'),
     ssh_config_file: join(runnerRoot, '.runtime/benchmarks/realworld-api-v4/ssh_config'),
-    env: { SUPABASE_URL: `https://${backendAddress}:8443`, SUPABASE_PUBLISHABLE_KEY: publishableKey },
+    env,
   };
   applyRemoteConfig(config, platform, {});
   await writeFile(join(runtime, 'remote-config.json'), `${JSON.stringify(config)}\n`, { mode: 0o600 });
@@ -117,7 +124,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     const [platform, runtime, runnerRoot, backendAddress, dockerSshTarget] = args;
     task = readStandardInput().then(publishableKey => createRemoteConfig({ platform, runtime, runnerRoot, backendAddress, dockerSshTarget, publishableKey: publishableKey.trim() }));
   } else {
-    console.error('usage: remote-config.mjs {prepare <platform> <runtime> <repository-root> <runner-root>|create <platform> <runtime> <runner-root> <backend-private-ip> <backend-docker-ssh-target> < publishable-key}');
+    console.error('usage: remote-config.mjs {prepare <platform> <runtime> <repository-root> <runner-root>|create <supabase|trailbase> <runtime> <runner-root> <backend-private-ip> <backend-docker-ssh-target> < optional-supabase-key}');
     process.exitCode = 2;
   }
   if (task) void task.catch(error => { console.error(String(error?.message ?? error).slice(0, 300)); process.exitCode = 1; });

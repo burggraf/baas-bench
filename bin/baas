@@ -125,6 +125,28 @@ setup_v4_supabase_tls() {
   set_env "$dir/.env" SITE_URL "https://$private_ip:8443"
 }
 
+setup_v4_trailbase_tls() {
+  [ "$VERSION_PROFILE" = realworld-api-v4 ] || return 0
+  private_ip=${BAAS_BENCH_V4_BACKEND_PRIVATE_IP:-}
+  valid_private_ipv4 "$private_ip" || { echo "V4 TrailBase requires a private BAAS_BENCH_V4_BACKEND_PRIVATE_IP" >&2; exit 1; }
+  runtime=$RUNTIME/benchmarks/realworld-api-v4/trailbase
+  tls_dir=$RUNTIME/trailbase/tls
+  stamp=$runtime/.private-ip
+  mkdir -p "$runtime" "$tls_dir"
+  chmod 700 "$runtime" "$tls_dir"
+  if [ ! -f "$stamp" ] || [ "$(cat "$stamp")" != "$private_ip" ]; then rm -f "$runtime/ca.pem" "$runtime/ca.key" "$tls_dir/server.crt" "$tls_dir/server.key" "$stamp"; fi
+  if [ ! -f "$runtime/ca.pem" ] || [ ! -f "$runtime/ca.key" ] || [ ! -f "$tls_dir/server.crt" ] || [ ! -f "$tls_dir/server.key" ]; then
+    umask 077
+    openssl req -x509 -newkey rsa:2048 -sha256 -days 7 -nodes -keyout "$runtime/ca.key" -out "$runtime/ca.pem" -subj '/CN=baas-bench-v4-trailbase-private-ca' >/dev/null 2>&1
+    openssl req -newkey rsa:2048 -nodes -keyout "$tls_dir/server.key" -out "$tls_dir/server.csr" -subj "/CN=$private_ip" >/dev/null 2>&1
+    printf 'subjectAltName=IP:%s\n' "$private_ip" > "$tls_dir/server.ext"
+    openssl x509 -req -in "$tls_dir/server.csr" -CA "$runtime/ca.pem" -CAkey "$runtime/ca.key" -CAcreateserial -out "$tls_dir/server.crt" -days 7 -sha256 -extfile "$tls_dir/server.ext" >/dev/null 2>&1
+    rm -f "$tls_dir/server.csr" "$tls_dir/server.ext" "$runtime/ca.srl"
+    printf '%s\n' "$private_ip" > "$stamp"
+  fi
+  chmod 600 "$runtime/ca.pem" "$runtime/ca.key" "$tls_dir/server.crt" "$tls_dir/server.key" "$stamp"
+}
+
 setup_supabase() {
   sparse_checkout supabase supabase/supabase "$SUPABASE_REF" docker
   dir="$RUNTIME/supabase/docker"
@@ -276,7 +298,8 @@ setup_one() {
     appwrite) setup_appwrite ;;
     nhost) setup_nhost ;;
     directus) setup_directus ;;
-    pocketbase|trailbase) : ;;
+    pocketbase) : ;;
+    trailbase) setup_v4_trailbase_tls ;;
   esac
   compose "$service" config --quiet
   echo "$service: ready"
@@ -317,7 +340,14 @@ run_compose() {
   shift
   dir=$(compose_dir "$service")
   env=$(compose_env "$service")
-  if [ "$service" = neon ]; then
+  if [ "$service" = trailbase ] && [ "$VERSION_PROFILE" = realworld-api-v4 ]; then
+    TRAILBASE_HTTP_BIND=127.0.0.1 \
+    TRAILBASE_V4_ENVOY_CONFIG="$ROOT/services/trailbase/envoy.yaml" \
+    TRAILBASE_V4_TLS_CERT="$RUNTIME/trailbase/tls/server.crt" \
+    TRAILBASE_V4_TLS_KEY="$RUNTIME/trailbase/tls/server.key" \
+      docker compose -p "baas-$service" --project-directory "$dir" --env-file "$ROOT/versions.env" --env-file "$PROFILE_FILE" \
+        -f "$(compose_path "$service")" -f "$ROOT/services/trailbase/v4-gateway.yml" "$@"
+  elif [ "$service" = neon ]; then
     if [ -n "$PROFILE_FILE" ]; then
       NEON_SOURCE_DIR="$RUNTIME/neon" NEON_PROXY_DOCKERFILE="$ROOT/services/neon/proxy.Dockerfile" \
         docker compose -p "baas-$service" --project-directory "$dir" --env-file "$ROOT/versions.env" --env-file "$PROFILE_FILE" --env-file "$env" \
@@ -378,7 +408,15 @@ smoke_one() {
     nhost) curl -fsS --resolve local.graphql.local.nhost.run:80:127.0.0.1 http://local.graphql.local.nhost.run/v1/version >/dev/null ;;
     directus) curl -fsS http://localhost:8055/server/ping >/dev/null ;;
     pocketbase) curl -fsS http://localhost:8090/api/health >/dev/null ;;
-    trailbase) curl -fsS http://localhost:4000/api/healthcheck >/dev/null ;;
+    trailbase)
+      if [ "$VERSION_PROFILE" = realworld-api-v4 ]; then
+        private_ip=${BAAS_BENCH_V4_BACKEND_PRIVATE_IP:-}
+        valid_private_ipv4 "$private_ip" || { echo "V4 TrailBase requires a private BAAS_BENCH_V4_BACKEND_PRIVATE_IP" >&2; return 1; }
+        curl -fsS --cacert "$RUNTIME/benchmarks/realworld-api-v4/trailbase/ca.pem" "https://$private_ip:8443/api/healthcheck" >/dev/null
+      else
+        curl -fsS http://localhost:4000/api/healthcheck >/dev/null
+      fi
+      ;;
   esac
 }
 

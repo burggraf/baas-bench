@@ -11,12 +11,12 @@ services:
       - data:/app/traildepot
 
   trailbase:
-    image: trailbase/trailbase:${TRAILBASE_VERSION}
+    image: ${TRAILBASE_IMAGE:-trailbase/trailbase:${TRAILBASE_VERSION}}
     depends_on:
       wasm-install:
         condition: service_completed_successfully
     ports:
-      - 4000:4000
+      - ${TRAILBASE_HTTP_BIND:-0.0.0.0}:4000:4000
     environment:
       ADDRESS: 0.0.0.0:4000
     volumes:

@@ -6,7 +6,7 @@ Each independent observation provisions a fresh backend/runner pair in a same-re
 
 The workload contract and platform access paths derive from [`realworld-api-v3`](../realworld-api-v3/README.md). V4 does not include results yet. Do not combine V3 local co-located runs with V4 remote two-host results. See [`METHODOLOGY.md`](benchmarks/project-management-capacity/METHODOLOGY.md) and the [V4 implementation plan](../../docs/plans/2026-09-29-realworld-api-v4-remote-capacity-plan.md).
 
-## Versions checked 2026-09-29
+## Versions checked 2026-09-29 (TrailBase rechecked 2026-10-01)
 
 V4 overrides the repository defaults in [`versions.env`](versions.env); V3's existing pins remain unchanged. Upstream releases and registry digests were checked on this date. No floating `latest` BaaS image tag is used; V4 records exact release versions, immutable source refs, and image digests where applicable.
 
@@ -19,13 +19,13 @@ V4 overrides the repository defaults in [`versions.env`](versions.env); V3's exi
 | Nhost | Source `d417c72d`; Traefik 3.7.13 | `@nhost/nhost-js` 4.8.0 |
 | Directus | 12.4.1 | `@directus/sdk` 26.0.0 |
 | PocketBase | 0.40.4 | `pocketbase` 0.28.1 |
-| TrailBase | 0.34.1 | `trailbase` 0.14.1 |
+| TrailBase | 0.34.2 | `trailbase` 0.14.1 |
 
 The administrative Appwrite Node SDK is pinned separately at `node-appwrite` 29.0.0. These are current stable pins at the check date, not a promise to auto-track future releases; refresh and revalidate them before a later campaign.
 
 ## Controller status
 
-The controller library has mocked Linode API provisioning, campaign-budget reservations, restrictive local inventories, ownership-checked cleanup, and interruption recovery. The manual `bin/bench-v4-linode.mjs inspect INVENTORY.json` command shows local ownership state without printing IP addresses; `recover INVENTORY.json --campaign LEDGER.json --confirm-delete RUN_ID` is destructive, requires `LINODE_TOKEN` on the controller and an exact run-ID confirmation, and charges the full reserved ceiling after recovery. Do not use it without account-owner approval. Before querying Linode or creating credentials, the `pilot` command checks local controller tools, validates the Supabase case, and rejects dirty V4 definitions or launch scripts. It then resolves the current eligible profile, creates an ephemeral SSH credential and private observation-scoped host-key state, adds the account's exact `mba-m1` public key to both hosts, bootstraps both x86_64 hosts with pinned Node/Docker/Compose binaries, deploys the checkout, runs the Supabase observation, verifies its local bundle, and cleans up. Missing or ambiguous account keys fail before host creation. Live Supabase pilots have exercised private HTTPS, fixture verification, workload correctness, evidence transfer, and cleanup, but a fully valid capacity pilot is still pending. Pilot acceptance checks transferred checksums and rejects invalid measured stages, even when the orchestration process completed successfully. Native HTTPS work for other platforms and complete host provenance remain unfinished.
+The controller library has mocked Linode API provisioning, campaign-budget reservations, restrictive local inventories, ownership-checked cleanup, and interruption recovery. The manual `bin/bench-v4-linode.mjs inspect INVENTORY.json` command shows local ownership state without printing IP addresses; `recover INVENTORY.json --campaign LEDGER.json --confirm-delete RUN_ID` is destructive, requires `LINODE_TOKEN` on the controller and an exact run-ID confirmation, and charges the full reserved ceiling after recovery. Do not use it without account-owner approval. Before querying Linode or creating credentials, `pilot --platform PLATFORM` checks local controller tools, validates the selected case, and rejects dirty V4 definitions, service files, version pins, or launch scripts. It resolves the current eligible profile, creates an ephemeral SSH credential and private observation-scoped host-key state, adds the account's exact `mba-m1` public key to both hosts, bootstraps both x86_64 hosts with pinned Node/Docker/Compose binaries, deploys the checkout, runs the selected Supabase or TrailBase observation, verifies its local bundle, and cleans up. Missing or ambiguous account keys fail before host creation. One valid Supabase capacity observation is complete; it is not a formal result or comparison. TrailBase 0.34.2 now has private HTTPS pilot support, but its live observation has not run. Pilot acceptance checks transferred checksums and rejects invalid measured stages, even when orchestration completed successfully. Native HTTPS for the other platforms and complete host provenance remain unfinished.
 
 ## Live progress
 
