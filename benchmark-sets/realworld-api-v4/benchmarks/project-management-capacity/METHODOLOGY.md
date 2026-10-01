@@ -1,5 +1,7 @@
 # Project-management capacity methodology
 
+> **In brief:** We estimate how many concurrent virtual users a self-hosted BaaS can serve while meeting fixed service targets on the declared hardware. We seed and verify the same 1-million-record project-management dataset, then send authenticated app-style API workflows from a separate same-region runner through each case's documented access path. After a 2-minute warm-up, adaptive 5-minute stages find the highest passing user count. A stage must achieve at least 95% of its target users, keep read/write/auth-search p95 latency within 500/750/1,000 ms, and keep each error rate below 1%, with valid telemetry. This is capacity for this workload, access path, and hardware profile—not a universal connection or account limit.
+
 ## Scope
 
 V4 measures the same SLO-qualified authenticated project-management workload as V3, with the self-hosted BaaS and load generator on separate same-region Linode VMs. It answers capacity for the declared VM plans and private-network path, not arbitrary production deployments, geographic latency, managed BaaS offerings, or a platform-independent hardware ranking. V3 local/co-located results and V4 remote results are separate evidence series.
@@ -20,7 +22,23 @@ Every observation verifies exact counts and the V3 correctness contract: valid/i
 
 ## Workload and stages
 
-The workload retains V3's dashboard, task-list, task-detail, create-task, update-task, add-comment, search, profile-update and sign-out/sign-in weights. Each virtual user performs one complete workflow at a time with deterministic selection and 1,000–5,000 ms think time. Requests time out after five seconds; there are no retries. The run warms up for 120 seconds at 50 users, then searches for capacity using adaptive 300-second measured stages. The initial measured target is 100 users, based on the completed Supabase pilot. A valid SLO pass doubles the target up to 10,000 users. A valid SLO failure backs off by halves until a passing lower bound is found; the controller then bisects the pass/fail bracket with at most four integer midpoints. If no tested stage passes, halving continues to one user. Invalid stages do not define a capacity bound or trigger further load: the search stops and the observation is invalid. Stages below five users extend duration to preserve sample exposure. Warm-up writes remain in the measured database state.
+Each virtual user repeatedly selects one complete workflow at a time using the deterministic weights below. These are workflow-selection probabilities, not percentages of HTTP requests: some workflows fan out into multiple API calls.
+
+| Workflow | Weight | What it does |
+| --- | ---: | --- |
+| Dashboard | 20% | Reads the user's organization, projects, and recent activity. |
+| Task list | 25% | Reads the first page of tasks in the user's organization and project. |
+| Task detail | 15% | Reads a task, its comments, creator, and optional assignee. |
+| Create task | 10% | Creates a task. |
+| Update task | 12% | Updates a task. |
+| Add comment | 10% | Adds a comment to a task. |
+| Search | 5% | Searches task titles for `workload`. |
+| Profile update | 1% | Changes the user's display name. |
+| Sign out/in | 2% | Signs out, authenticates again, then reads the profile. |
+
+Each virtual user has a seeded synthetic identity and its own session. Paged reads use the first page with a randomized page size of 1–25. Users wait a randomized 1–5 seconds between workflows. Initial sessions are prepared before measurement; requests during measured stages time out after five seconds and are not retried. The sign-out/in workflow does exercise reauthentication during measurement.
+
+The run warms up for 120 seconds at 50 users, then searches for capacity using adaptive 300-second measured stages. The initial measured target is 100 users, based on the completed Supabase pilot. A valid SLO pass doubles the target up to 10,000 users. A valid SLO failure backs off by halves until a passing lower bound is found; the controller then bisects the pass/fail bracket with at most four integer midpoints. If no tested stage passes, halving continues to one user. Invalid stages do not define a capacity bound or trigger further load: the search stops and the observation is invalid. Stages below five users extend duration to preserve sample exposure. Warm-up writes remain in the measured database state.
 
 Capacity is the primary goal, not a uniformly dense low-to-high performance curve. Search stages and the final passing/failing bracket remain in raw evidence for audit, but routine 5/10/25/50-user stages are omitted when the 100-user start passes.
 
