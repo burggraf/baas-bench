@@ -2,7 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { nativeSourceManifest } from './native_v5_provenance.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { SCALE_SNAPSHOT_MIGRATION, RESTORE_APPLICATION_SQL, restoreTrailBaseScaleBaseline } from './native_v5_trailbase_scale.mjs';
 import { runNativeConformance, closeNativeSessions } from '../benchmark-sets/realworld-api-v5/shared/lib/native-conformance.mjs';
@@ -83,6 +86,30 @@ test('native probe CLIs reject missing or unexpected authorization arguments bef
       assert.equal(result.stdout, '');
     }
   }
+});
+
+test('native provenance hashes source bytes and paths, excludes private runtime contents', () => {
+  const root = mkdtempSync(join(tmpdir(), 'v5-provenance-'));
+  const put = (path, value) => { const file = join(root, path); mkdirSync(join(file, '..'), { recursive: true }); writeFileSync(file, value); };
+  try {
+    put('benchmark-sets/realworld-api-v5/shared/schema.sql', 'schema');
+    put('test/native_v5_driver.mjs', 'driver');
+    put('benchmark-sets/realworld-api-v4/shared/lib/admin/trailbase-bootstrap.mjs', 'bootstrap');
+    put('bin/baas', 'setup');
+    put('versions.env', 'pins');
+    put('.runtime/conformance-v5/sdk/package-lock.json', '{}');
+    put('.runtime/conformance-v5/secret.env', 'never report this');
+    const initial = nativeSourceManifest(root);
+    assert.deepEqual(nativeSourceManifest(root), initial);
+    assert.equal(JSON.stringify(initial).includes('never report this'), false);
+    assert.equal(initial.files.some(row => row.path.endsWith('secret.env')), false);
+    put('.runtime/conformance-v5/secret.env', 'changed private data');
+    assert.deepEqual(nativeSourceManifest(root), initial);
+    put('benchmark-sets/realworld-api-v5/shared/schema.sql', 'changed schema');
+    assert.notEqual(nativeSourceManifest(root).sha256, initial.sha256);
+    put('test/native_v5_extra.mjs', 'new source');
+    assert.equal(nativeSourceManifest(root).files.length, initial.files.length + 1);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test('native session cleanup tries every session and preserves the primary error', async () => {

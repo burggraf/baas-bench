@@ -10,6 +10,7 @@ import { createTrailBaseAdapter } from '../benchmark-sets/realworld-api-v5/share
 import { runNativeConformance } from '../benchmark-sets/realworld-api-v5/shared/lib/native-conformance.mjs';
 import { parseBootstrapCredentials } from '../benchmark-sets/realworld-api-v4/shared/lib/admin/trailbase-bootstrap.mjs';
 import { runTrailBaseScaleProbe, SCALE_SNAPSHOT_MIGRATION } from './native_v5_trailbase_scale.mjs';
+import { nativeProbeProvenance, nativeSourceManifest } from './native_v5_provenance.mjs';
 
 if (process.argv.length !== 3 || !['--local-disposable', '--local-declared-scale'].includes(process.argv[2])) {
   console.error('usage: node test/native_v5_trailbase_probe.mjs {--local-disposable|--local-declared-scale}');
@@ -45,6 +46,7 @@ async function query(sql) {
 }
 async function denied(action, constraint = false) { await assert.rejects(action(), error => Number(error.status) >= 400 && Number(error.status) < (constraint ? 600 : 500)); }
 async function main() {
+  report.provenance = nativeProbeProvenance(root);
   report.phase = 'image-preflight';
   const contextHost = docker(['context', 'inspect', '--format', '{{.Endpoints.docker.Host}}']).trim();
   const dockerHost = process.env.DOCKER_CONTEXT ? contextHost : process.env.DOCKER_HOST || contextHost;
@@ -199,6 +201,10 @@ async function main() {
 try { await main(); }
 catch (error) { report.failed = true; report.failure_type = error?.name ?? 'Error'; if (Number.isInteger(error?.status) && error.status >= 100 && error.status <= 599) report.failure_http_status = error.status; if (error?.cleanupErrors) report.session_cleanup_failure_types = error.cleanupErrors.map(item => item?.name ?? 'Error'); process.exitCode = 1; }
 finally {
+  if (report.provenance) {
+    try { report.provenance.source_changed_during_probe = nativeSourceManifest(root).sha256 !== report.provenance.sources.sha256; }
+    catch { report.provenance.source_verification_failed = true; process.exitCode = 1; }
+  }
   if (scale && !report.scale) {
     try { report.scale = JSON.parse(readFileSync(join(dir, 'scale-evidence.json'), 'utf8')); }
     catch (error) { if (error.code !== 'ENOENT') { report.evidence_read_failed = true; process.exitCode = 1; } }

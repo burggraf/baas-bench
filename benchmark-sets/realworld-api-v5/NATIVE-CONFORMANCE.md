@@ -116,6 +116,19 @@ qualification, or proof that the full native adversarial suite has passed at
 scale. Both V5 hard guards remain. Do not pool the small- and full-scale reports
 into automatic admission evidence.
 
+## Diagnostic source provenance
+
+New attempts record the starting Git commit, dirty-worktree flag, actual Node
+version, and a path/content SHA-256 manifest for the V5 definition, native probe
+sources, setup tooling/pins, imported bootstrap helper, and private SDK lockfile.
+Only the lockfile hash is recorded; other private runtime contents are excluded.
+The finishing source digest flags changes during the attempt. A changed or dirty
+source remains diagnostic and requires frozen-revision revalidation. A lockfile
+hash does not attest installed dependency bytes, and provenance alone does not
+qualify a backend. `admission_evidence` remains false; neither guard is relaxed.
+The already-running Supabase attempt predates this addition and will not acquire
+provenance retroactively.
+
 ## Pending
 - Expand the remaining value/relationship corpus. Live membership removal now
   uses a separate tenant without member-owned/assigned rows: the same session must
