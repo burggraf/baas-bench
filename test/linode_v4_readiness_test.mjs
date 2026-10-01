@@ -627,6 +627,7 @@ test('V4 SSH state is private and isolated from earlier/global hosts; runner pin
       assert.equal(config.status, 0, config.stderr);
       assert.match(config.stdout, /stricthostkeychecking accept-new/);
       assert.match(config.stdout, /^hostkeyalgorithms ssh-ed25519$/m);
+      assert.match(config.stdout, /^connectionattempts 3$/m);
       assert.ok(config.stdout.includes(`userknownhostsfile ${state.knownHostsPath}`));
       assert.match(config.stdout, /globalknownhostsfile \/dev\/null/);
       assert.equal(config.stdout.includes('.ssh/known_hosts'), false);
@@ -640,6 +641,7 @@ test('V4 SSH state is private and isolated from earlier/global hosts; runner pin
     assert.match(runner, /StrictHostKeyChecking yes/);
     assert.match(runner, /UserKnownHostsFile.*realworld-api-v4\/known_hosts/);
     assert.match(runner, /IdentityFile.*realworld-api-v4\/id_ed25519/);
+    assert.match(runner, /ConnectionAttempts 3/);
     for (const change of [{ backendTarget: 'root@172.233.137.154' }, { backendPrivateIp: '10.203.0.11' }]) {
       await assert.rejects(prepareRunnerSsh({ configPath: first.configPath, backendTarget: 'root@172.233.137.153', backendPrivateIp: '10.203.0.10', runnerRoot: '/opt/baas-bench', ...change }), /backend.*match/i);
     }

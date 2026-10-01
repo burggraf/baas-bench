@@ -6,7 +6,7 @@ import { pathToFileURL } from 'node:url';
 
 const safePath = value => typeof value === 'string' && /^\/[A-Za-z0-9._/-]+$/.test(value) && !value.split('/').some(part => part === '.' || part === '..') && !value.includes('//');
 function configText(directory, runner = false) {
-  return `Host *\n  BatchMode yes\n  HostKeyAlgorithms ssh-ed25519\n  StrictHostKeyChecking ${runner ? 'yes' : 'accept-new'}\n  UserKnownHostsFile "${join(directory, 'known_hosts')}"\n  GlobalKnownHostsFile /dev/null\n  HashKnownHosts no\n  UpdateHostKeys no\n${runner ? `  IdentityFile "${join(directory, 'id_ed25519')}"\n  IdentitiesOnly yes\n` : ''}`;
+  return `Host *\n  BatchMode yes\n  ConnectionAttempts 3\n  HostKeyAlgorithms ssh-ed25519\n  StrictHostKeyChecking ${runner ? 'yes' : 'accept-new'}\n  UserKnownHostsFile "${join(directory, 'known_hosts')}"\n  GlobalKnownHostsFile /dev/null\n  HashKnownHosts no\n  UpdateHostKeys no\n${runner ? `  IdentityFile "${join(directory, 'id_ed25519')}"\n  IdentitiesOnly yes\n` : ''}`;
 }
 async function privateFile(path) {
   const info = await lstat(path);
