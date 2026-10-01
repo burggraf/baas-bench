@@ -16,7 +16,27 @@ export async function closeNativeSessions(sessions, primary) {
 
 // Native drivers supply raw API/security, fixture, reset and persistence checks.
 // Adapter checks below are shared; they never substitute for the raw API checks.
-export async function runNativeConformance({ sessions, fixture, readAuthState, checks = {} }) {
+async function verifyMembershipRemoval(member, removal) {
+  assert.ok(removal && typeof removal.remove === 'function' && typeof removal.restore === 'function', 'live membership-removal fixture required');
+  assert.ok(Array.isArray(removal.taskIds) && removal.taskIds.length > 0);
+  const list = () => member.listTasks({ ...removal.scope, page: 0, pageSize: 100 });
+  assert.deepEqual((await list()).items.map(row => row.id), removal.taskIds);
+  const profile = await member.getProfile();
+  let failure;
+  try {
+    await removal.remove();
+    const page = await list();
+    assert.deepEqual(page.items, []); assert.equal(page.total, 0);
+    assert.deepEqual(await member.getProfile(), profile, 'membership removal must not sign the actor out');
+    await assert.rejects(member.createTask({ ...removal.scope, title: 'Forbidden after removal', description: '' }), error => Number(error.status) === 403);
+  } catch (error) { failure = error; }
+  try { await removal.restore(); }
+  catch (error) { if (!failure) throw error; failure.cleanupErrors = [error]; }
+  if (failure) throw failure;
+  assert.deepEqual((await list()).items.map(row => row.id), removal.taskIds);
+}
+
+export async function runNativeConformance({ sessions, fixture, readAuthState, membershipRemoval, checks = {} }) {
   const { member, owner } = sessions;
   const scope = { organizationId: fixture.organizationId, projectId: fixture.projectId };
   return runConformance({
@@ -65,6 +85,7 @@ export async function runNativeConformance({ sessions, fixture, readAuthState, c
         await owner.updateMembershipRole({ ...role, role: 'member' });
         await owner.updateComment({ ...input, body: comment.body });
       }
+      await verifyMembershipRemoval(member, membershipRemoval);
       return true;
     },
     async 'application-only-profile'() {

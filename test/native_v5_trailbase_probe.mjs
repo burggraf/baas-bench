@@ -105,6 +105,10 @@ async function main() {
     INSERT INTO memberships VALUES(1,'mowner','orga','owner','owner','${now}'),(2,'madmin','orga','admin','admin','${now}'),(3,'mmember','orga','member','member','${now}'),(4,'moutsider','orgb','outsider','owner','${now}');
     INSERT INTO projects VALUES(1,'projecta','orga','A','active','${now}','${now}'),(2,'projectb','orgb','B','active','${now}','${now}');
     INSERT INTO tasks VALUES(1,'taska','orga','projecta','owner','member',${quote(title)},'','todo','low',NULL,'${now}','${now}',NULL),(2,'tasknull','orga','projecta','owner',NULL,'Null assignee','','todo','low',NULL,'${now}','${now}',NULL),(3,'taskb','orgb','projectb','outsider',NULL,'Outside','','todo','low',NULL,'${now}','${now}',NULL);
+    INSERT INTO organizations VALUES(3,'revorg','Revocation','owner','${now}');
+    INSERT INTO memberships VALUES(5,'revowner','revorg','owner','owner','${now}'),(6,'revmember','revorg','member','member','${now}');
+    INSERT INTO projects VALUES(3,'revproject','revorg','Revocation','active','${now}','${now}');
+    INSERT INTO tasks VALUES(4,'revtask','revorg','revproject','owner',NULL,'Revocation control','','todo','low',NULL,'${now}','${now}',NULL);
     INSERT INTO comments VALUES(1,'commenta','orga','projecta','taska','owner','Original','${now}','${now}',NULL);`);
   report.phase = 'session-prepare';
   const adapter = createTrailBaseAdapter({ initClient, endpoint: base, timeoutMs: 5000 });
@@ -186,7 +190,7 @@ async function main() {
     },
   };
   report.phase = 'native-checks';
-  report.conformance = await runNativeConformance({ sessions, fixture: { ...scope, taskId: 'taska', otherAuthorCommentId: 'commenta', memberMembershipId: 'mmember', taskIds: ['taska', 'tasknull'], unassignedTaskIds: ['tasknull'], searches: [{ query: String.raw`100%_work\load [special].*`, ids: ['taska'] }, { query: 'LITERAL', ids: ['taska'] }, { query: 'nonmatching sentinel', ids: [] }] }, readAuthState: () => query("SELECT * FROM _user WHERE email='member@v5-probe.example.test'"), checks });
+  report.conformance = await runNativeConformance({ sessions, fixture: { ...scope, taskId: 'taska', otherAuthorCommentId: 'commenta', memberMembershipId: 'mmember', taskIds: ['taska', 'tasknull'], unassignedTaskIds: ['tasknull'], searches: [{ query: String.raw`100%_work\load [special].*`, ids: ['taska'] }, { query: 'LITERAL', ids: ['taska'] }, { query: 'nonmatching sentinel', ids: [] }] }, membershipRemoval: { scope: { organizationId: 'revorg', projectId: 'revproject' }, taskIds: ['revtask'], remove: () => query("DELETE FROM memberships WHERE external_id='revmember'"), restore: () => query(`INSERT OR IGNORE INTO memberships VALUES(6,'revmember','revorg','member','member','${now}')`) }, readAuthState: () => query("SELECT * FROM _user WHERE email='member@v5-probe.example.test'"), checks });
   // Fixture-scale identity and complete Auth/session reset are deliberately absent.
   const expectedMissing = ['fixture-integrity', 'reset-baseline'];
   report.local_checks_passed = report.conformance.findings.every(row => row.passed === !expectedMissing.includes(row.name));

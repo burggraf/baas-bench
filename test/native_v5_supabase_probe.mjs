@@ -117,6 +117,10 @@ async function main() {
     INSERT INTO public.memberships VALUES('mowner','orga','owner','owner','${now}'),('madmin','orga','admin','admin','${now}'),('mmember','orga','member','member','${now}'),('moutsider','orgb','outsider','owner','${now}');
     INSERT INTO public.projects VALUES('projecta','orga','A','active','${now}','${now}'),('projectb','orgb','B','active','${now}','${now}');
     INSERT INTO public.tasks(id,organization_id,project_id,creator_id,assignee_id,title,description,status,priority,due_date,created_at,updated_at) VALUES('taska','orga','projecta','owner','member',${quote(title)},'','todo','low',NULL,'${now}','${now}'),('tasknull','orga','projecta','owner',NULL,'Null assignee','','todo','low',NULL,'${now}','${now}'),('taskb','orgb','projectb','outsider',NULL,'Outside','','todo','low',NULL,'${now}','${now}');
+    INSERT INTO public.organizations VALUES('revorg','Revocation','owner','${now}');
+    INSERT INTO public.memberships VALUES('revowner','revorg','owner','owner','${now}'),('revmember','revorg','member','member','${now}');
+    INSERT INTO public.projects VALUES('revproject','revorg','Revocation','active','${now}','${now}');
+    INSERT INTO public.tasks(id,organization_id,project_id,creator_id,title,description,status,priority,created_at,updated_at) VALUES('revtask','revorg','revproject','owner','Revocation control','','todo','low','${now}','${now}');
     INSERT INTO public.comments VALUES('commenta','orga','projecta','taska','owner','Original','${now}','${now}');
     DELETE FROM public.activities;
     CREATE TABLE public.v5_probe_failure(id integer PRIMARY KEY);
@@ -198,7 +202,7 @@ async function main() {
     },
   };
   report.phase = 'native-checks';
-  report.conformance = await runNativeConformance({ sessions, fixture: { ...scope, taskId: 'taska', otherAuthorCommentId: 'commenta', memberMembershipId: 'mmember', taskIds: ['taska', 'tasknull'], unassignedTaskIds: ['tasknull'], searches: [{ query: String.raw`100%_work\load [special].*`, ids: ['taska'] }, { query: 'LITERAL', ids: ['taska'] }, { query: 'nonmatching sentinel', ids: [] }] }, readAuthState: async () => JSON.parse(sql("SELECT row_to_json(u) FROM auth.users u WHERE email='member@v5-probe.example.test'")), checks });
+  report.conformance = await runNativeConformance({ sessions, fixture: { ...scope, taskId: 'taska', otherAuthorCommentId: 'commenta', memberMembershipId: 'mmember', taskIds: ['taska', 'tasknull'], unassignedTaskIds: ['tasknull'], searches: [{ query: String.raw`100%_work\load [special].*`, ids: ['taska'] }, { query: 'LITERAL', ids: ['taska'] }, { query: 'nonmatching sentinel', ids: [] }] }, membershipRemoval: { scope: { organizationId: 'revorg', projectId: 'revproject' }, taskIds: ['revtask'], remove: async () => sql("DELETE FROM public.memberships WHERE id='revmember'"), restore: async () => sql(`INSERT INTO public.memberships VALUES('revmember','revorg','member','member','${now}') ON CONFLICT DO NOTHING`) }, readAuthState: async () => JSON.parse(sql("SELECT row_to_json(u) FROM auth.users u WHERE email='member@v5-probe.example.test'")), checks });
   const expectedMissing = ['fixture-integrity', 'reset-baseline'];
   report.local_checks_passed = report.conformance.findings.every(row => row.passed === !expectedMissing.includes(row.name));
   assert.equal(report.local_checks_passed, true, 'native assertions failed; inspect private report');

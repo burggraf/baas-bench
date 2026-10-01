@@ -117,11 +117,13 @@ scale. Both V5 hard guards remain. Do not pool the small- and full-scale reports
 into automatic admission evidence.
 
 ## Pending
-- Expand adversarial coverage, including actual membership removal on a live
-  session (the current role check covers promotion/demotion only) and the remaining
-  value/relationship corpus. Protected user/membership/comment identity-column
-  write probes and valid raw-write controls are now implemented but await fresh
-  native runs; older synthetic findings do not cover these additions.
+- Expand the remaining value/relationship corpus. Live membership removal now
+  uses a separate tenant without member-owned/assigned rows: the same session must
+  lose task visibility and receive HTTP 403 on creation while its self profile
+  remains readable; membership restoration must recover visibility. This check,
+  protected user/membership/comment identity-column writes, and valid raw-write
+  controls are implemented but await fresh native runs. Older synthetic findings
+  do not cover these additions.
 - Establish passing results for both complete declared-scale fixture identity and
   Auth/session reset procedures; one successful cycle is insufficient.
 - Qualify reset/verify/identical-warm-up/measure integration and bind native

@@ -95,19 +95,21 @@ test('native session cleanup tries every session and preserves the primary error
   assert.deepEqual(calls, [1, 2]);
 });
 
-function probe({ badSearch = false, badCount = false, staleRole = false, authWrite = false } = {}) {
+function probe({ badSearch = false, badCount = false, staleRole = false, authWrite = false, staleMembership = false } = {}) {
+  let active = true;
   let role = 'member', body = 'Original', displayName = 'Member', authName = 'Native';
   const fixture = { organizationId: 'org', projectId: 'project', taskId: 'a', otherAuthorCommentId: 'comment', memberMembershipId: 'membership', taskIds: ['a', 'b'], unassignedTaskIds: ['b'], searches: [{ query: 'literal_%\\.*', ids: ['a'] }, { query: 'missing', ids: [] }] };
   const member = {
     async searchTasks({ query }) { const ids = query === 'missing' ? [] : ['a']; return { items: (badSearch ? ['wrong'] : ids).map(id => ({ id })), total: ids.length, hasNext: false }; },
-    async listTasks({ assigneeId, page }) { const ids = assigneeId === null ? ['b'] : ['a', 'b']; return { items: ids.slice(page, page + 1).map(id => ({ id })), total: badCount && page >= ids.length ? 0 : ids.length, hasNext: page + 1 < ids.length, page, pageSize: 1 }; },
+    async createTask() { if (!active && !staleMembership) throw Object.assign(new Error('denied'), { status: 403 }); return { id: 'unexpected' }; },
+    async listTasks({ organizationId, assigneeId, page }) { if (organizationId === 'revorg') { const ids = active || staleMembership ? ['revtask'] : []; return { items: ids.map(id => ({ id })), total: ids.length }; } const ids = assigneeId === null ? ['b'] : ['a', 'b']; return { items: ids.slice(page, page + 1).map(id => ({ id })), total: badCount && page >= ids.length ? 0 : ids.length, hasNext: page + 1 < ids.length, page, pageSize: 1 }; },
     async getTask() { return { comments: { items: [{ id: 'comment', body }] } }; },
     async updateComment(input) { if (role !== 'admin' && !staleRole) throw Object.assign(new Error('denied'), { status: 403 }); body = input.body; return { body }; },
     async getProfile() { return { displayName }; },
     async updateProfile(input) { displayName = input.displayName; if (authWrite) authName = displayName; return { displayName }; },
   };
   const owner = { async updateMembershipRole(input) { role = input.role; }, async updateComment(input) { body = input.body; } };
-  return { sessions: { member, owner }, fixture, async readAuthState() { return { name: authName }; }, state() { return { role, body, displayName }; } };
+  return { sessions: { member, owner }, fixture, membershipActive: () => active, membershipRemoval: { scope: { organizationId: 'revorg', projectId: 'revproject' }, taskIds: ['revtask'], async remove() { active = false; }, async restore() { active = true; } }, async readAuthState() { return { name: authName }; }, state() { return { role, body, displayName }; } };
 }
 
 test('shared native checks require remaining native evidence and restore their mutations', async () => {
@@ -117,16 +119,24 @@ test('shared native checks require remaining native evidence and restore their m
   assert.equal(report.passed, false);
   assert.throws(() => assertConformance(report), /incomplete/);
   assert.deepEqual(input.state(), { role: 'member', body: 'Original', displayName: 'Member' });
+  assert.equal(input.membershipActive(), true);
 });
 
-for (const [option, name] of [['badSearch', 'search-semantics'], ['badCount', 'pagination-and-null-filters'], ['staleRole', 'live-role-revocation'], ['authWrite', 'application-only-profile']]) {
+for (const [option, name] of [['badSearch', 'search-semantics'], ['badCount', 'pagination-and-null-filters'], ['staleRole', 'live-role-revocation'], ['staleMembership', 'live-role-revocation'], ['authWrite', 'application-only-profile']]) {
   test(`shared native checks reject ${option}`, async () => {
     const input = probe({ [option]: true });
     const report = await runNativeConformance(input);
     assert.equal(report.findings.find(row => row.name === name).passed, false);
     assert.deepEqual(input.state(), { role: 'member', body: 'Original', displayName: 'Member' });
+    assert.equal(input.membershipActive(), true);
   });
 }
+
+test('live revocation cannot pass without a membership-removal fixture', async () => {
+  const input = probe(); delete input.membershipRemoval;
+  const report = await runNativeConformance(input);
+  assert.equal(report.findings.find(row => row.name === 'live-role-revocation').passed, false);
+});
 
 test('empty search or pagination fixtures cannot pass vacuously', async () => {
   const input = probe(); input.fixture.searches = []; input.fixture.taskIds = [];
