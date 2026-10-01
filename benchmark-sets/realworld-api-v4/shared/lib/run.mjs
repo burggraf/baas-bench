@@ -5,7 +5,8 @@ import { runCorrectness } from './correctness.mjs';
 import { StageMetricsAccumulator } from './metrics.mjs';
 import { evaluateCapacity, nextCapacityStage } from './capacity.mjs';
 import { runWorkload } from './workload.mjs';
-import { collectResources, discoverPlatformContainers, evaluateRunnerOverload, RESOURCE_SAMPLE_INTERVAL_MS } from './resources.mjs';
+import { runParallelWorkload } from './parallel-workload.mjs';
+import { collectResources, collectRemoteResources, discoverPlatformContainers, evaluateRunnerOverload, RESOURCE_SAMPLE_INTERVAL_MS } from './resources.mjs';
 import { sampleLocalHost, sampleRemoteHost } from './host-telemetry.mjs';
 import { summarize } from './summary.mjs';
 import { createProgress } from './progress.mjs';
@@ -79,8 +80,11 @@ async function executeMeasuredRun(context, dependencies, progress) {
   if (!fixture || !Array.isArray(users)) throw new Error('backend did not provide fixture and users');
   const config = { ...DEFAULT_CONFIG, ...dependencies.config, stageSeconds: stageMs / 1_000 };
   const correctnessFn = dependencies.correctness ?? runCorrectness;
-  const workloadFn = dependencies.workload ?? runWorkload;
-  const resourcesFn = dependencies.collectResources ?? collectResources;
+  const workloadFn = dependencies.workload ?? (dependencies.multicore ? async (backend, config, options) => {
+    await backend.prepareWorkload?.();
+    return runParallelWorkload(context.platform, config, options);
+  } : runWorkload);
+  const resourcesFn = dependencies.collectResources ?? (dependencies.multicore ? collectRemoteResources : collectResources);
   const evaluate = dependencies.evaluateCapacity ?? evaluateCapacity;
   const chooseNext = dependencies.nextStage ?? nextCapacityStage;
   const monotonic = dependencies.monotonic ?? (() => performance.now());
@@ -92,12 +96,13 @@ async function executeMeasuredRun(context, dependencies, progress) {
 
   // Deliberately do not reset after this write-capable warm-up: its state remains for measured stages.
   progress.phase('prepare-sessions', { stage_users: 50 });
-  await workloadFn(backend, config, {
+  const warmupResult = await workloadFn(backend, config, {
     users: users.slice(0, 50), durationMs: warmupMs, graceMs: config.timeoutMs,
     onProgress: (phase, fields) => phase === 'prepare-sessions' ? progress.count(fields) : progress.phase(phase, fields),
     onMeasuredStart: () => progress.phase('warmup', { stage_users: 50, duration_ms: warmupMs }),
     onSample: () => {},
   });
+  if (dependencies.multicore && (warmupResult?.stageFailed || warmupResult?.preparationFailed)) throw new Error('warmup workload failed');
 
   const stages = [];
   const resources = [];
@@ -112,10 +117,11 @@ async function executeMeasuredRun(context, dependencies, progress) {
     const requestedUsers = chooseNext({ measuredUsers, lowerPass, upperFailure, refinements, maxUsers: users.length });
     if (requestedUsers === null) break;
     if (!Number.isSafeInteger(requestedUsers) || requestedUsers < 1 || requestedUsers > users.length || measuredUsers.includes(requestedUsers)) throw new Error('invalid adaptive capacity decision');
-    const accumulator = (dependencies.metricsFactory ?? (options => new StageMetricsAccumulator(options)))({ maxErrorExamples: 100, maxLatencySamples: 1_000_000 });
+    const accumulator = (dependencies.metricsFactory ?? (options => new StageMetricsAccumulator(options)))({ maxErrorExamples: 100, maxLatencySamples: dependencies.multicore ? 5_000_000 : 1_000_000 });
     let start;
     let end;
     let resourcePromise;
+    const telemetryController = new AbortController();
     const durationMs = capacityStageDurationMs(stageMs, requestedUsers);
     const resourceSamples = Math.max(1, Math.ceil(durationMs / RESOURCE_SAMPLE_INTERVAL_MS));
     const containerIds = dependencies.containerIds ?? [];
@@ -131,15 +137,20 @@ async function executeMeasuredRun(context, dependencies, progress) {
         counters[key]++;
         progress.count({ [key]: counters[key] });
       },
-      onMeasuredStart: async () => {
-        start = monotonic();
+      onMeasuredStart: async ({ startAt } = {}) => {
+        start = monotonic() + (startAt === undefined ? 0 : Math.max(0, startAt - Date.now()));
         progress.phase('measure', { ...stageFields, ...counters, duration_ms: durationMs });
         const hostTelemetry = dockerSshTarget ? { runnerHostProbe: () => sampleLocalHost(), backendHostProbe: () => sampleRemoteHost(dockerSshTarget) } : {};
-        resourcePromise = resourcesFn({ platform: context.platform, containerIds, dockerSshTarget, samples: resourceSamples, intervalMs: RESOURCE_SAMPLE_INTERVAL_MS, ...hostTelemetry,
+        resourcePromise = resourcesFn({ platform: context.platform, containerIds, dockerSshTarget, samples: resourceSamples, intervalMs: RESOURCE_SAMPLE_INTERVAL_MS, startAt, signal: telemetryController.signal, ...hostTelemetry,
           onProgress: count => { counters.telemetry_samples = count; progress.count({ telemetry_samples: count }); },
         });
+        resourcePromise.catch(() => {});
       },
       onMeasuredEnd: async () => { end = monotonic(); },
+    }).catch(async error => {
+      telemetryController.abort();
+      await resourcePromise?.catch(() => {});
+      throw error;
     });
     let resource;
     let stage;
@@ -163,6 +174,15 @@ async function executeMeasuredRun(context, dependencies, progress) {
     }
     const overload = evaluateRunnerOverload(resource.samples ?? []);
     if (overload) stage.validityReasons.push(overload);
+    const workerResources = result.workerResources ?? [];
+    delete result.workerResources;
+    for (const [index, worker] of workerResources.entries()) {
+      const workerOverload = evaluateRunnerOverload(worker.samples ?? []);
+      if (workerOverload) stage.validityReasons.push(`worker ${index + 1}: ${workerOverload}`);
+      if (!worker.valid || worker.samples?.length !== resourceSamples) stage.validityReasons.push(`worker ${index + 1}: resource samples incomplete or invalid`);
+      if (worker.samples?.some((sample, i) => !Number.isFinite(sample.timestampMs) || Math.abs(sample.timestampMs - worker.startedAt - (i + 1) * RESOURCE_SAMPLE_INTERVAL_MS) >= RESOURCE_SAMPLE_INTERVAL_MS)) stage.validityReasons.push(`worker ${index + 1}: telemetry alignment exceeded one interval`);
+    }
+    if (dependencies.multicore && !workerResources.length) stage.validityReasons.push('worker resource samples unavailable');
     if (!resource.valid) stage.validityReasons.push(...(resource.validityReasons ?? ['resource collection failed']));
     if (result.stageFailed) stage.validityReasons.push('workload failed');
     if (dependencies.containerDiscoveryError) stage.validityReasons.push(`container discovery failed: ${String(dependencies.containerDiscoveryError?.message ?? dependencies.containerDiscoveryError).slice(0, 300)}`);
@@ -170,7 +190,7 @@ async function executeMeasuredRun(context, dependencies, progress) {
     failures.push(...(stage.errorExamples ?? []));
     stage.errorExamples = safeErrors(stage.errorExamples ?? []);
     stage.workload = result;
-    stages.push(stage); resources.push({ requestedUsers, samples: resource.samples ?? [] }); measuredUsers.push(requestedUsers);
+    stages.push(stage); resources.push({ requestedUsers, samples: resource.samples ?? [], ...(workerResources.length ? { workers: workerResources } : {}) }); measuredUsers.push(requestedUsers);
     stages.sort((a, b) => a.requestedUsers - b.requestedUsers);
     capacity = evaluate(stages, config, { minSamples: 20 });
     const current = capacity.stages.find(item => item.requestedUsers === requestedUsers);
@@ -182,7 +202,7 @@ async function executeMeasuredRun(context, dependencies, progress) {
     if (refining) refinements++;
   }
 
-  const raw = { schemaVersion: 1, platform: context.platform, trial: context.trial, accessPath: context.accessPath ?? backend.accessPath ?? 'unknown', deviations: [...(context.deviations ?? backend.deviations ?? [])], correctness, warmup: { users: 50, durationMs: warmupMs, writesReset: false }, stages, resources, capacity, errors: safeErrors(failures) };
+  const raw = { schemaVersion: 1, runnerProfile: dependencies.multicore ? 'multicore-3-backend-local-telemetry' : 'single-process', platform: context.platform, trial: context.trial, accessPath: context.accessPath ?? backend.accessPath ?? 'unknown', deviations: [...(context.deviations ?? backend.deviations ?? [])], correctness, warmup: { users: 50, durationMs: warmupMs, writesReset: false }, stages, resources, capacity, errors: safeErrors(failures) };
   await writeFile(join(context.outputDir, 'raw.json'), `${JSON.stringify(raw, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
   await writeFile(join(context.outputDir, 'summary.json'), `${JSON.stringify(summarize(stages, capacity), null, 2)}\n`, { mode: 0o600, flag: 'wx' });
   return raw;
@@ -198,7 +218,7 @@ export async function runFromArguments(args, dependencies = {}) {
   try { ids = await (dependencies.discoverContainers ?? discoverPlatformContainers)(context.platform, undefined, { sshTarget: dockerSshTarget }); }
   catch (error) { containerDiscoveryError = error; }
   return preservePrimaryFailure(
-    () => executeRun({ ...context, accessPath: backend.accessPath, deviations: backend.deviations }, { ...dependencies, backend, containerIds: ids, containerDiscoveryError, dockerSshTarget }),
+    () => executeRun({ ...context, accessPath: backend.accessPath, deviations: backend.deviations }, { ...dependencies, multicore: Boolean(dockerSshTarget), backend, containerIds: ids, containerDiscoveryError, dockerSshTarget }),
     () => dependencies.teardown?.(context) ?? Promise.resolve(),
   );
 }

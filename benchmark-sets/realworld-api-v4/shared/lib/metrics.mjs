@@ -177,7 +177,7 @@ export class StageMetricsAccumulator {
                 aggregate.attempted += b.attempted;
                 aggregate.completed += b.completed;
                 aggregate.failed += b.failed;
-                aggregate.latencies.push(...b.latencies);
+                for (const latency of b.latencies) aggregate.latencies.push(latency);
             }
             else {
                 remoteDone += b.completed;

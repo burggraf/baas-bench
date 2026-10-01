@@ -15,7 +15,7 @@ const defaultSleep = (milliseconds, signal) => new Promise((resolve, reject) => 
 });
 const abortError = () => Object.assign(new Error("Workload aborted"), { name: "AbortError" });
 const isAbort = (error) => error instanceof Error && error.name === "AbortError";
-const deriveSeed = (seed, index) => (seed + Math.imul(index, 0x9e3779b9)) >>> 0;
+export const deriveUserSeed = (seed, index) => (seed + Math.imul(index, 0x9e3779b9)) >>> 0;
 const emit = (callback, sample, enabled) => {
     if (enabled)
         callback?.({ ...sample, elapsedMs: Math.max(0, sample.elapsedMs), error: sample.error && { ...sample.error } });
@@ -42,14 +42,16 @@ export async function runWorkload(backend, config, options) {
         throw new RangeError("invalid session preparation batch delay");
     if (!Array.isArray(options.users))
         throw new TypeError("users must be an array");
+    const userOffset = options.userOffset ?? 0;
+    if (!Number.isSafeInteger(userOffset) || userOffset < 0) throw new RangeError('invalid global user offset');
     if (options.users.some(user => !user || !validCredentials(user.credentials) || !user.organizationId || !user.projectId || !user.taskId))
         throw new TypeError("each virtual user requires valid password credentials and tenant/project/task context");
-    const redactValues = options.users.map(user => user.credentials.password);
+    const redactValues = [...new Set(options.users.map(user => user.credentials.password))];
     const durationMs = options.durationMs ?? config.stageSeconds * 1000;
     const graceMs = options.graceMs ?? Math.max(0, config.timeoutMs);
     if (!Number.isFinite(durationMs) || durationMs < 0 || !Number.isFinite(graceMs) || graceMs < 0)
         throw new RangeError("invalid workload duration or grace");
-    if (backend.prepareWorkload)
+    if (backend.prepareWorkload && !options.skipPrepareWorkload)
         await backend.prepareWorkload();
     const loopController = new AbortController();
     const requestController = new AbortController();
@@ -175,7 +177,7 @@ export async function runWorkload(backend, config, options) {
         summary.startedUsers = options.users.length;
         return true;
     };
-    const users = options.users.map((spec, index) => ({ spec, random: mulberry32(deriveSeed(config.seed, index)) }));
+    const users = options.users.map((spec, index) => ({ spec, random: mulberry32(deriveUserSeed(config.seed, userOffset + index)) }));
     const runUser = async (spec, random, initial, deadline) => {
         let session = initial;
         let retired = false;
@@ -265,7 +267,8 @@ export async function runWorkload(backend, config, options) {
         measurementStarted = true;
         measuring = true;
         const deadline = now() + durationMs;
-        const workers = users.map(({ spec, random }, index) => runUser(spec, random, [...active][index], deadline).catch(error => { fail('worker_exception'); if (!isAbort(error))
+        const sessions = [...active];
+        const workers = users.map(({ spec, random }, index) => runUser(spec, random, sessions[index], deadline).catch(error => { fail('worker_exception'); if (!isAbort(error))
             summary.failedWorkflowCount++; }));
         allWorkers = Promise.all(workers).then(() => undefined);
         const workersDone = allWorkers;
@@ -290,7 +293,7 @@ export async function runWorkload(backend, config, options) {
         measuring = false;
         measuredEnded = true;
         boundaryClosing = true;
-        await options.onMeasuredEnd?.();
+        await options.onMeasuredEnd?.(summary);
     }
     catch (error) {
         fail('measurement_exception');
@@ -305,7 +308,7 @@ export async function runWorkload(backend, config, options) {
             boundaryClosing = true;
             measuredEnded = true;
             try {
-                await options.onMeasuredEnd?.();
+                await options.onMeasuredEnd?.(summary);
             }
             catch {
                 fail('measurement_boundary');

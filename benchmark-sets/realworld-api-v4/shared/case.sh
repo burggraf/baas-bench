@@ -92,14 +92,14 @@ prepare_supabase_runner_config() {
   backend_runtime=$backend_root/.runtime/benchmarks/realworld-api-v4
   copy_backend_ca "$backend_runtime/ca.pem"
   publishable_key=$(v4_ssh -o BatchMode=yes -o ConnectTimeout=5 "$backend_target" "grep '^SUPABASE_PUBLISHABLE_KEY=' '$backend_root/.runtime/supabase/docker/.env'" | sed 's/^SUPABASE_PUBLISHABLE_KEY=//')
-  printf '%s\n' "$publishable_key" | node "$runtime/lib/remote-config.mjs" create supabase "$runtime" "$runner_root" "$backend_private_ip" "$backend_docker_target"
+  printf '%s\n' "$publishable_key" | node "$runtime/lib/remote-config.mjs" create supabase "$runtime" "$runner_root" "$backend_private_ip" "$backend_docker_target" "$backend_root"
 }
 
 prepare_trailbase_runner_config() {
   validate_backend
   backend_tls_dir=$backend_root/.runtime/benchmarks/realworld-api-v4/trailbase
   copy_backend_ca "$backend_tls_dir/ca.pem"
-  printf '\n' | node "$runtime/lib/remote-config.mjs" create trailbase "$runtime" "$runner_root" "$backend_private_ip" "$backend_docker_target"
+  printf '\n' | node "$runtime/lib/remote-config.mjs" create trailbase "$runtime" "$runner_root" "$backend_private_ip" "$backend_docker_target" "$backend_root"
 }
 
 configure_runner_backend_ssh() {

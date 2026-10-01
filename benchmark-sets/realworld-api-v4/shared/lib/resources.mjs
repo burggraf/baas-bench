@@ -1,5 +1,8 @@
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { runCommand } from './command.mjs';
+import { runLongCommand } from './remote-execution.mjs';
+import { sampleLocalHost } from './host-telemetry.mjs';
+import { pathToFileURL } from 'node:url';
 
 const PLATFORMS = new Set(['supabase', 'convex', 'appwrite', 'nhost', 'directus', 'pocketbase', 'trailbase', 'neon']);
 export const RESOURCE_SAMPLE_INTERVAL_MS = 5_000;
@@ -61,13 +64,14 @@ export async function collectResources(options) {
   const now = options.now ?? Date.now;
   const cpuUsage = options.cpuUsage ?? process.cpuUsage;
   const memoryUsage = options.memoryUsage ?? process.memoryUsage;
+  if (options.startAt !== undefined) await sleep(Math.max(0, options.startAt - now()), options.signal);
   const monitor = (options.monitorFactory ?? createMonitor)();
   monitor.enable?.();
   let previousCpu = cpuUsage();
   let previousTime = now();
   const samples = [];
   const validityReasons = [];
-  let nextSampleAt = now() + intervalMs;
+  let nextSampleAt = (options.startAt ?? now()) + intervalMs;
   try {
     for (let index = 0; index < count && !options.signal?.aborted; index++) {
       await sleep(Math.max(0, nextSampleAt - now()), options.signal);
@@ -96,7 +100,9 @@ export async function collectResources(options) {
       }
       const p99 = monitor.percentile(99) / 1e6;
       const max = (typeof monitor.max === 'function' ? monitor.max() : monitor.max) / 1e6;
+      if (![runner.cpuPercent, runner.rssBytes, p99, max].every(value => Number.isFinite(value) && value >= 0)) validityReasons.push(`sample ${index + 1}: malformed runner telemetry`);
       samples.push({ timestampMs, runner, eventLoop: { p99Ms: Number.isFinite(p99) ? p99 : null, maxMs: Number.isFinite(max) ? max : null }, containers, hosts });
+      options.onSample?.(samples.at(-1));
       try { options.onProgress?.(samples.length); } catch { /* diagnostic only */ }
       monitor.reset();
       previousCpu = currentCpu; previousTime = timestampMs;
@@ -123,4 +129,51 @@ export function evaluateRunnerOverload(samples, thresholds = {}) {
     return 'runner overload for three consecutive samples; backend capacity attribution invalid';
   }
   return null;
+}
+
+export async function collectRemoteResources(options) {
+  const script = options.remoteScript ?? process.env.BAAS_BENCH_V4_TELEMETRY_SCRIPT;
+  if (typeof script !== 'string' || !/^\/[A-Za-z0-9._/-]+$/.test(script) || script.split('/').some(part => part === '..' || part === '.')) throw new Error('invalid backend telemetry script');
+  const count = options.samples;
+  const intervalMs = options.intervalMs;
+  const startAt = options.startAt ?? Date.now();
+  if (!Number.isSafeInteger(count) || count < 1 || count > 720 || !Number.isSafeInteger(intervalMs) || intervalMs < 1 || !Number.isSafeInteger(startAt) || startAt < 0 || !options.containerIds?.length || options.containerIds.some(id => !/^[0-9a-f]{12,64}$/.test(id))) throw new Error('invalid backend telemetry options');
+  // One command per stage; docker and /proc sampling occur on the backend itself.
+  const [exe, args] = dockerInvocation([], options.dockerSshTarget);
+  if (exe !== 'ssh') throw new Error('backend telemetry requires SSH');
+  args[args.length - 1] = `node ${shellQuote(script)} stream ${count} ${intervalMs} ${startAt} ${options.containerIds.join(' ')}`;
+  const remotePromise = (options.command ?? runLongCommand)(exe, args, { timeoutMs: count * intervalMs + 30_000, captureOutput: true, signal: options.signal })
+    .then(({ stdout }) => JSON.parse(stdout))
+    .catch(() => ({ samples: [], valid: false, validityReasons: ['backend-local telemetry command failed'] }));
+  const localPromise = (options.collectLocal ?? collectResources)({ samples: count, intervalMs, startAt, signal: options.signal, runnerHostProbe: () => sampleLocalHost(), onProgress: options.onProgress });
+  const [local, remote] = await Promise.all([localPromise, remotePromise]);
+  const reasons = [...local.validityReasons];
+  if (local.samples.length !== count) reasons.push('coordinator telemetry missing samples');
+  if (!Array.isArray(remote.samples) || remote.samples.length !== count || typeof remote.valid !== 'boolean' || !Array.isArray(remote.validityReasons)) reasons.push('backend-local telemetry missing or malformed');
+  if (remote.valid !== true) reasons.push(...(Array.isArray(remote.validityReasons) ? remote.validityReasons : ['backend-local telemetry invalid']));
+  for (let index = 0; index < local.samples.length; index++) {
+    const row = remote.samples?.[index];
+    const expectedAt = startAt + (index + 1) * intervalMs;
+    const host = row?.hosts?.backend;
+    const fields = { cpu: ['user', 'nice', 'system', 'idle', 'iowait', 'irq', 'softirq', 'steal', 'total'], memory: ['totalBytes', 'availableBytes', 'swapTotalBytes', 'swapFreeBytes'], network: ['rxBytes', 'txBytes', 'rxDrops', 'txDrops', 'interfaces'] };
+    const hostValid = host && Object.entries(fields).every(([field, keys]) => keys.every(key => Number.isFinite(host[field]?.[key]) && host[field][key] >= 0));
+    if (!row || !Number.isFinite(row.timestampMs) || row.containers?.count !== options.containerIds.length || ![row.containers.cpuPercent, row.containers.memoryBytes].every(value => Number.isFinite(value) && value >= 0) || !hostValid) {
+      reasons.push(`sample ${index + 1}: backend-local telemetry missing or malformed`);
+      continue;
+    }
+    if (Math.abs(row.timestampMs - expectedAt) >= intervalMs || Math.abs(local.samples[index].timestampMs - expectedAt) >= intervalMs) reasons.push(`sample ${index + 1}: telemetry alignment exceeded one interval`);
+    Object.assign(local.samples[index], { containers: row.containers, backendTimestampMs: row.timestampMs, hosts: { ...local.samples[index].hosts, backend: row.hosts.backend } });
+  }
+  return { samples: local.samples, valid: local.valid && remote.valid === true && reasons.length === 0, validityReasons: reasons };
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const [action, count, interval, epoch, ...ids] = process.argv.slice(2);
+  if (action !== 'stream' || ![count, interval, epoch].every(text => /^\d+$/.test(text ?? '')) || !ids.length || ids.some(id => !/^[0-9a-f]{12,64}$/.test(id)) || Number(count) < 1 || Number(count) > 720 || Number(interval) < 1 || Number(interval) > 60_000 || !Number.isSafeInteger(Number(epoch))) {
+    console.error('invalid backend telemetry arguments'); process.exitCode = 1;
+  } else {
+    void collectResources({ samples: Number(count), intervalMs: Number(interval), startAt: Number(epoch), containerIds: ids, backendHostProbe: () => sampleLocalHost() })
+      .then(result => process.stdout.write(`${JSON.stringify(result)}\n`))
+      .catch(() => { console.error('backend-local telemetry failed'); process.exitCode = 1; });
+  }
 }

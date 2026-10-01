@@ -19,9 +19,9 @@ export function runLongCommand(command, args, options = {}) {
     options.signal?.throwIfAborted();
     const transportArgs = await sshTransportArgs(command, args, options.env ?? process.env);
     const child = spawnManaged(command, transportArgs, { stdio: ['ignore', 'pipe', 'pipe'], env: options.env, cwd: options.cwd });
-    const { code, signal } = await waitForChild(child, { timeoutMs, signal: options.signal, label: 'remote command', tailOutput: true, onStderr: progressDecoder(event => { if (event.source === 'runner') emitProgress(event); }) });
+    const { code, signal, stdout, stderr } = await waitForChild(child, { timeoutMs, signal: options.signal, label: 'remote command', tailOutput: !options.captureOutput, onStderr: progressDecoder(event => { if (event.source === 'runner') emitProgress(event); }) });
     if (code !== 0) throw new Error(`remote command failed${code === null ? ` (${signal ?? 'signal'})` : ` (${code})`}`);
-    return { stdout: '', stderr: '' };
+    return options.captureOutput ? { stdout, stderr } : { stdout: '', stderr: '' };
   });
 }
 
