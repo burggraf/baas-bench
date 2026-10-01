@@ -5,7 +5,7 @@ import { runCorrectness } from './correctness.mjs';
 import { StageMetricsAccumulator } from './metrics.mjs';
 import { evaluateCapacity, nextCapacityStage } from './capacity.mjs';
 import { runWorkload } from './workload.mjs';
-import { collectResources, discoverPlatformContainers, evaluateRunnerOverload } from './resources.mjs';
+import { collectResources, discoverPlatformContainers, evaluateRunnerOverload, RESOURCE_SAMPLE_INTERVAL_MS } from './resources.mjs';
 import { sampleLocalHost, sampleRemoteHost } from './host-telemetry.mjs';
 import { summarize } from './summary.mjs';
 import { createProgress } from './progress.mjs';
@@ -117,7 +117,7 @@ async function executeMeasuredRun(context, dependencies, progress) {
     let end;
     let resourcePromise;
     const durationMs = capacityStageDurationMs(stageMs, requestedUsers);
-    const resourceSamples = Math.max(1, Math.ceil(durationMs / 1_000));
+    const resourceSamples = Math.max(1, Math.ceil(durationMs / RESOURCE_SAMPLE_INTERVAL_MS));
     const containerIds = dependencies.containerIds ?? [];
     const counters = { completed_operations: 0, failed_operations: 0, completed_workflows: 0, failed_workflows: 0, telemetry_samples: 0, telemetry_expected: resourceSamples };
     const stageFields = { stage_users: requestedUsers, stage_index: stages.length + 1, stages_completed: stages.length };
@@ -135,7 +135,7 @@ async function executeMeasuredRun(context, dependencies, progress) {
         start = monotonic();
         progress.phase('measure', { ...stageFields, ...counters, duration_ms: durationMs });
         const hostTelemetry = dockerSshTarget ? { runnerHostProbe: () => sampleLocalHost(), backendHostProbe: () => sampleRemoteHost(dockerSshTarget) } : {};
-        resourcePromise = resourcesFn({ platform: context.platform, containerIds, dockerSshTarget, samples: resourceSamples, intervalMs: 1_000, ...hostTelemetry,
+        resourcePromise = resourcesFn({ platform: context.platform, containerIds, dockerSshTarget, samples: resourceSamples, intervalMs: RESOURCE_SAMPLE_INTERVAL_MS, ...hostTelemetry,
           onProgress: count => { counters.telemetry_samples = count; progress.count({ telemetry_samples: count }); },
         });
       },
@@ -174,11 +174,11 @@ async function executeMeasuredRun(context, dependencies, progress) {
     stages.sort((a, b) => a.requestedUsers - b.requestedUsers);
     capacity = evaluate(stages, config, { minSamples: 20 });
     const current = capacity.stages.find(item => item.requestedUsers === requestedUsers);
-    progress.phase('stage-complete', { ...stageFields, stages_completed: stages.length, outcome: current?.passed ? 'pass' : current?.invalid ? 'invalid' : 'fail', ...counters });
-    if (current?.passed) lowerPass = Math.max(lowerPass ?? 0, requestedUsers);
-    else if (current && (!current.invalid || Object.values(current.operationClasses ?? {}).some(metric => metric.passed === false))) {
-      upperFailure = Math.min(upperFailure ?? requestedUsers, requestedUsers);
-    }
+    if (!current) throw new Error('capacity evaluation omitted measured stage');
+    progress.phase('stage-complete', { ...stageFields, stages_completed: stages.length, outcome: current.passed ? 'pass' : current.invalid ? 'invalid' : 'fail', ...counters });
+    if (current.invalid) break;
+    if (current.passed) lowerPass = Math.max(lowerPass ?? 0, requestedUsers);
+    else upperFailure = Math.min(upperFailure ?? requestedUsers, requestedUsers);
     if (refining) refinements++;
   }
 

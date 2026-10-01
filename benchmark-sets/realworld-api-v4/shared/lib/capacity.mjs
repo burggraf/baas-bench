@@ -165,7 +165,7 @@ export function evaluateCapacity(stages, config, options = {}) {
 }
 
 
-const INITIAL_STAGES = [5, 10, 25, 50];
+const INITIAL_STAGES = [100];
 export function nextCapacityStage({ measuredUsers, lowerPass, upperFailure, refinements = 0, maxUsers = 10_000 }) {
     if (!Array.isArray(measuredUsers) || measuredUsers.some(value => !Number.isSafeInteger(value) || value < 1))
         throw new RangeError("measuredUsers must contain positive integers");

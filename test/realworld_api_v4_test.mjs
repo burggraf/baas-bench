@@ -449,21 +449,18 @@ test('metrics keep workflow and remote calls separate and use nearest-rank p95',
   assert.equal(stage.operationClassMetrics.read.latencyP95Ms, 19);
 });
 
-test('capacity stages follow the approved doubling and bounded refinement', async () => {
+test('capacity-only search starts at 100, doubles on pass, backs off on failure, and bisects the bracket', async () => {
   const { nextCapacityStage } = await import('../benchmark-sets/realworld-api-v4/shared/lib/capacity.mjs');
-  assert.equal(nextCapacityStage({ measuredUsers: [] }), 5);
-  assert.equal(nextCapacityStage({ measuredUsers: [5] }), 10);
-  assert.equal(nextCapacityStage({ measuredUsers: [5, 10] }), 25);
-  assert.equal(nextCapacityStage({ measuredUsers: [5, 10, 25] }), 50);
-  assert.equal(nextCapacityStage({ measuredUsers: [5, 10, 25, 50] }), 100);
-  assert.equal(nextCapacityStage({ measuredUsers: [5, 10, 25, 50, 6_400] }), 10_000);
-  assert.equal(nextCapacityStage({ measuredUsers: [5], upperFailure: 5 }), 2);
-  assert.equal(nextCapacityStage({ measuredUsers: [5, 2], upperFailure: 2 }), 1);
-  assert.equal(nextCapacityStage({ measuredUsers: [5, 2], lowerPass: 2, upperFailure: 5 }), 3);
-  assert.equal(nextCapacityStage({ measuredUsers: [5, 2, 1], upperFailure: 1 }), null);
-  assert.equal(nextCapacityStage({ measuredUsers: [5, 10, 25, 50, 100], lowerPass: 50, upperFailure: 100, refinements: 0 }), 75);
-  assert.equal(nextCapacityStage({ measuredUsers: [5, 10, 25, 50, 51], lowerPass: 50, upperFailure: 51, refinements: 1 }), null);
-  assert.equal(nextCapacityStage({ measuredUsers: [5, 10, 25, 50, 75, 100], lowerPass: 50, upperFailure: 100, refinements: 4 }), null);
+  assert.equal(nextCapacityStage({ measuredUsers: [] }), 100);
+  assert.equal(nextCapacityStage({ measuredUsers: [100] }), 200);
+  assert.equal(nextCapacityStage({ measuredUsers: [100, 200] }), 400);
+  assert.equal(nextCapacityStage({ measuredUsers: [100], upperFailure: 100 }), 50);
+  assert.equal(nextCapacityStage({ measuredUsers: [100, 50], upperFailure: 50 }), 25);
+  assert.equal(nextCapacityStage({ measuredUsers: [100, 50, 25], lowerPass: 50, upperFailure: 100, refinements: 0 }), 75);
+  assert.equal(nextCapacityStage({ measuredUsers: [100, 50, 75], lowerPass: 75, upperFailure: 100, refinements: 1 }), 87);
+  assert.equal(nextCapacityStage({ measuredUsers: [100], upperFailure: 1 }), null);
+  assert.equal(nextCapacityStage({ measuredUsers: [100, 50, 75, 87], lowerPass: 75, upperFailure: 100, refinements: 4 }), null);
+  assert.equal(nextCapacityStage({ measuredUsers: [100, 200, 400, 800, 1_600, 3_200, 6_400] }), 10_000);
 });
 
 test('workload prepares outside measurement and closes each session once', async () => {
@@ -887,6 +884,25 @@ test('resources sample complete one-second windows and detect sustained overload
   assert.equal(evaluateRunnerOverload(mixed), null);
 });
 
+test('resource probes use a fixed cadence rather than adding probe time to every interval', async () => {
+  const { collectResources } = await import('../benchmark-sets/realworld-api-v4/shared/lib/resources.mjs');
+  let now = 0;
+  const sleeps = [];
+  const stats = '{"ID":"aaaaaaaaaaaa","CPUPerc":"1%","MemUsage":"1MiB / 2GiB"}';
+  const result = await collectResources({
+    platform: 'supabase', containerIds: ['aaaaaaaaaaaa'], samples: 3, intervalMs: 5_000,
+    now: () => now, sleep: async ms => { sleeps.push(ms); now += ms; },
+    cpuUsage: () => ({ user: 0, system: 0 }), memoryUsage: () => ({ rss: 1 }),
+    monitorFactory: () => ({ enable() {}, disable() {}, reset() {}, percentile: () => 0, max: 0 }),
+    command: async () => { now += 2_000; return { stdout: stats }; },
+    runnerHostProbe: async () => { now += 1_000; return {}; },
+    backendHostProbe: async () => { now += 1_000; return {}; },
+  });
+  assert.deepEqual(sleeps, [5_000, 1_000, 1_000]);
+  assert.deepEqual(result.samples.map(sample => sample.timestampMs), [5_000, 10_000, 15_000]);
+  assert.equal(result.valid, true);
+});
+
 test('resource collection invalidates missing and failed container probes', async () => {
   const { collectResources } = await import('../benchmark-sets/realworld-api-v4/shared/lib/resources.mjs');
   const base = {
@@ -921,7 +937,7 @@ test('runner performs correctness before warm-up, keeps warm-up writes, and foll
   const outputDir = await mkdtemp(join(tmpdir(), 'rw-runner-'));
   const events = [];
   try {
-    await executeRun({ platform: 'neon', phase: 'measure', trial: 1, outputDir, accessPath: 'sql-over-http', deviations: ['auth emulated'], warmupMs: 1, stageMs: 1 }, {
+    await executeRun({ platform: 'neon', phase: 'measure', trial: 1, outputDir, accessPath: 'sql-over-http', deviations: ['auth emulated'], warmupMs: 1, stageMs: 300_000 }, {
       adapter: { users: Array.from({ length: 100 }, (_, i) => ({ i })), fixture: {} },
       correctness: async () => { events.push('correctness'); return { findings: [{ passed: true }] }; },
       reset: async () => { events.push('reset'); },
@@ -933,7 +949,11 @@ test('runner performs correctness before warm-up, keeps warm-up writes, and foll
         return { startedUsers: users, lostUsers: 0, stageFailed: warmup, failedWorkflowCount: warmup ? 1 : 0 };
       },
       metricsFactory: () => ({ record() {}, finalize(_elapsed, counts) { return passingStage(counts.requestedUsers); } }),
-      collectResources: async () => ({ samples: Array.from({ length: 3 }, () => ({ runner: { cpuPercent: 95 }, eventLoop: { p99Ms: 0, maxMs: 0 } })), valid: true, validityReasons: [] }),
+      collectResources: async options => {
+        assert.equal(options.samples, 60);
+        assert.equal(options.intervalMs, 5_000);
+        return { samples: Array.from({ length: options.samples }, () => ({ runner: { cpuPercent: 95 }, eventLoop: { p99Ms: 0, maxMs: 0 } })), valid: true, validityReasons: [] };
+      },
       evaluateCapacity: (stages, config) => {
         assert.equal(config.slos.read.p95Ms, 500);
         assert.equal(config.slos.write.p95Ms, 750);
@@ -957,7 +977,7 @@ test('runner performs correctness before warm-up, keeps warm-up writes, and foll
   } finally { await rm(outputDir, { recursive: true, force: true }); }
 });
 
-test('adaptive search brackets on measured SLO failure even when cleanup invalidates the stage', async () => {
+test('an invalid measured stage stops capacity search instead of being treated as an SLO bound', async () => {
   const { executeRun } = await import('../benchmark-sets/realworld-api-v4/shared/lib/run.mjs');
   const outputDir = await mkdtemp(join(tmpdir(), 'rw-product-failure-'));
   try {
@@ -994,6 +1014,29 @@ test('adaptive search brackets on measured SLO failure even when cleanup invalid
     assert.deepEqual(raw.stages.map(stage => stage.requestedUsers), [5, 10]);
     assert.deepEqual(raw.stages[1].validityReasons, ['workload failed']);
     assert.equal(summary.metrics.capacity_bounded, 1);
+  } finally { await rm(outputDir, { recursive: true, force: true }); }
+});
+
+test('resource-invalid stage stops before trying a higher capacity level', async () => {
+  const { executeRun } = await import('../benchmark-sets/realworld-api-v4/shared/lib/run.mjs');
+  const outputDir = await mkdtemp(join(tmpdir(), 'rw-invalid-capacity-stop-'));
+  const measuredUsers = [];
+  try {
+    await executeRun({ platform: 'supabase', phase: 'measure', trial: 1, outputDir, warmupMs: 0, stageMs: 1 }, {
+      adapter: { users: Array.from({ length: 1_000 }, (_, i) => ({ i })), fixture: {} },
+      correctness: async () => ({ findings: [{ passed: true }] }),
+      workload: async (_adapter, _config, options) => {
+        if (options.durationMs) measuredUsers.push(options.users.length);
+        options.onMeasuredStart?.(); options.onMeasuredEnd?.();
+        return { startedUsers: options.users.length, lostUsers: 0, stageFailed: false };
+      },
+      metricsFactory: () => ({ record() {}, finalize(_elapsed, counts) { return passingStage(counts.requestedUsers); } }),
+      collectResources: async () => ({ samples: [], valid: false, validityReasons: ['remote host probe failed'] }),
+    });
+    const raw = JSON.parse(readFileSync(join(outputDir, 'raw.json'), 'utf8'));
+    assert.deepEqual(measuredUsers, [100]);
+    assert.deepEqual(raw.stages.map(stage => stage.requestedUsers), [100]);
+    assert.match(raw.stages[0].validityReasons.join(' '), /remote host probe failed/);
   } finally { await rm(outputDir, { recursive: true, force: true }); }
 });
 

@@ -2,6 +2,7 @@ import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { runCommand } from './command.mjs';
 
 const PLATFORMS = new Set(['supabase', 'convex', 'appwrite', 'nhost', 'directus', 'pocketbase', 'trailbase', 'neon']);
+export const RESOURCE_SAMPLE_INTERVAL_MS = 5_000;
 const byteUnits = { B: 1, KiB: 1024, MiB: 1024 ** 2, GiB: 1024 ** 3, TiB: 1024 ** 4, KB: 1_000, MB: 1_000_000, GB: 1_000_000_000 };
 
 function bytes(text) {
@@ -52,8 +53,8 @@ const sleepDefault = ms => new Promise(resolve => setTimeout(resolve, ms));
 const createMonitor = () => { const monitor = monitorEventLoopDelay({ resolution: 10 }); monitor.enable(); return monitor; };
 
 export async function collectResources(options) {
-  const count = options.samples ?? 300;
-  const intervalMs = options.intervalMs ?? 1_000;
+  const count = options.samples ?? 60;
+  const intervalMs = options.intervalMs ?? RESOURCE_SAMPLE_INTERVAL_MS;
   if (!Number.isSafeInteger(count) || count < 1 || !Number.isFinite(intervalMs) || intervalMs <= 0) throw new Error('invalid resource sampling options');
   const command = options.command ?? runCommand;
   const sleep = options.sleep ?? sleepDefault;
@@ -66,10 +67,12 @@ export async function collectResources(options) {
   let previousTime = now();
   const samples = [];
   const validityReasons = [];
+  let nextSampleAt = now() + intervalMs;
   try {
     for (let index = 0; index < count && !options.signal?.aborted; index++) {
-      await sleep(intervalMs, options.signal);
+      await sleep(Math.max(0, nextSampleAt - now()), options.signal);
       const timestampMs = now();
+      nextSampleAt += intervalMs;
       const currentCpu = cpuUsage();
       const elapsedMs = timestampMs - previousTime;
       const usedMicros = currentCpu.user + currentCpu.system - previousCpu.user - previousCpu.system;
