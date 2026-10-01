@@ -144,7 +144,10 @@ setup_v4_trailbase_tls() {
     rm -f "$tls_dir/server.csr" "$tls_dir/server.ext" "$runtime/ca.srl"
     printf '%s\n' "$private_ip" > "$stamp"
   fi
-  chmod 600 "$runtime/ca.pem" "$runtime/ca.key" "$tls_dir/server.crt" "$tls_dir/server.key" "$stamp"
+  # envoyproxy/envoy drops to the pinned image's envoy group (GID 101).
+  chgrp 101 "$tls_dir/server.crt" "$tls_dir/server.key"
+  chmod 600 "$runtime/ca.pem" "$runtime/ca.key" "$stamp"
+  chmod 640 "$tls_dir/server.crt" "$tls_dir/server.key"
 }
 
 setup_supabase() {

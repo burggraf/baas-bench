@@ -156,7 +156,11 @@ case "$1" in
     ;;
 esac
 EOF
-chmod +x "$TMP/bin/docker" "$TMP/bin/envoy" "$TMP/bin/ssh" "$TMP/bin/curl" "$TMP/bin/openssl"
+cat > "$TMP/bin/chgrp" <<'EOF'
+#!/bin/sh
+echo "chgrp $*" >> "$BAAS_TEST_LOG"
+EOF
+chmod +x "$TMP/bin/docker" "$TMP/bin/envoy" "$TMP/bin/ssh" "$TMP/bin/curl" "$TMP/bin/openssl" "$TMP/bin/chgrp"
 
 export PATH="$TMP/bin:$PATH"
 export BAAS_RUNTIME_DIR="$TMP/runtime"
@@ -195,6 +199,8 @@ grep -q '^trailbase-resolved-image=trailbase/trailbase:0.34.2@sha256:19c0d307b04
 grep -q '^trailbase-resolved-envoy=envoyproxy/envoy@sha256:57e14a549d7bd43c8d3f6d03e8cfa653e037d4b38e133acd9b54f38c524401b4$' "$BAAS_TEST_LOG" || fail "V4 TrailBase digest-pinned gateway was not used"
 [ -f "$BAAS_RUNTIME_DIR/benchmarks/realworld-api-v4/trailbase/ca.pem" ] || fail "V4 TrailBase private CA missing"
 [ -f "$BAAS_RUNTIME_DIR/trailbase/tls/server.crt" ] || fail "V4 TrailBase TLS certificate missing"
+[ "$(ls -l "$BAAS_RUNTIME_DIR/trailbase/tls/server.key" | awk '{print $1}' | sed 's/[+@.]*$//')" = '-rw-r-----' ] || fail "V4 TrailBase Envoy key is not group-readable with restricted permissions"
+grep -q '^chgrp 101 .*server.crt .*server.key$' "$BAAS_TEST_LOG" || fail "V4 TrailBase Envoy certs are not group-owned by the pinned Envoy GID"
 grep -Fxq 'subjectAltName=IP:10.0.0.10' "$BAAS_TEST_LOG" || fail "V4 TrailBase TLS certificate is missing its private IP SAN"
 : > "$BAAS_TEST_LOG"
 BAAS_VERSION_PROFILE=realworld-api-v4 BAAS_BENCH_V4_BACKEND_PRIVATE_IP=10.0.0.10 "$BAAS" start trailbase >/dev/null
