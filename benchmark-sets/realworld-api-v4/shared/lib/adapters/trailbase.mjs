@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { buildVirtualUserSpecs } from '../dataset.mjs';
 import { measureRemoteCall } from '../measurement.mjs';
+import { BenchmarkOperationError, classifyOperationError } from '../correctness.mjs';
 
 const logicalId = row => row?.external_id ?? row?.id;
 const mapUser = row => ({ id: logicalId(row), email: row?.email, displayName: row?.display_name ?? row?.displayName, createdAt: row?.created_at ?? row?.createdAt, updatedAt: row?.updated_at ?? row?.updatedAt });
@@ -17,11 +18,16 @@ export function createTrailBaseAdapter({ initClient, client, endpoint = process.
   async function remote(operation, signal, limit = timeoutMs) {
     return measureRemoteCall(async () => {
       let timerId;
-      const timer = new Promise((_, reject) => { timerId = setTimeout(() => reject(new Error('TrailBase request timed out')), limit); });
+      const timer = new Promise((_, reject) => { timerId = setTimeout(() => reject(new BenchmarkOperationError('timeout', { code: 'timeout', status: 408 })), limit); });
       let onAbort;
       const cancelled = signal && new Promise((_, reject) => { onAbort = () => reject(signal.reason ?? new Error('TrailBase request aborted')); if (signal.aborted) onAbort(); else signal.addEventListener('abort', onAbort, { once: true }); });
       try { return await Promise.race(cancelled ? [operation, timer, cancelled] : [operation, timer]); }
-      finally { clearTimeout(timerId); if (onAbort) signal.removeEventListener('abort', onAbort); }
+      catch (error) {
+        if (error instanceof BenchmarkOperationError || error?.name === 'AbortError') throw error;
+        const status = Number(error?.status ?? error?.code);
+        const classification = classifyOperationError(error);
+        throw new BenchmarkOperationError(classification, { code: Number.isFinite(status) ? String(status) : classification === 'timeout' ? 'timeout' : 'sdk_error', ...(Number.isInteger(status) && status >= 100 && status <= 599 ? { status } : {}) });
+      } finally { clearTimeout(timerId); if (onAbort) signal.removeEventListener('abort', onAbort); }
     });
   }
   const makeClient = () => client ?? initClient(endpoint);

@@ -1853,6 +1853,22 @@ test('TrailBase adapter uses the official record client with isolated auth sessi
   await session.close();
 });
 
+test('TrailBase request failures are scored instead of invalidating measurements', async () => {
+  const { createTrailBaseAdapter } = await import('../benchmark-sets/realworld-api-v4/shared/lib/adapters/trailbase.mjs');
+  const { isScoredMeasuredError } = await import('../benchmark-sets/realworld-api-v4/shared/lib/errors.mjs');
+  for (const [list, classification] of [[() => new Promise(() => {}), 'timeout'], [async () => { throw new TypeError('fetch failed'); }, 'transport/sdk']]) {
+    const client = { auth: { async login() { return { user: { id: 'usr' } }; }, async logout() {} }, records() { return { list }; } };
+    const adapter = createTrailBaseAdapter({ client, timeoutMs: 1 });
+    const session = await adapter.createSession({ email: 'u@example.test', password: 'pw' });
+    await assert.rejects(session.listTasks({ organizationId: 'org', projectId: 'prj' }), error => {
+      assert.equal(error.classification, classification);
+      assert.equal(isScoredMeasuredError(error), true);
+      return true;
+    });
+    await session.close();
+  }
+});
+
 test('TrailBase getTask forwards comment pagination to the record API', async () => {
   const { createTrailBaseAdapter } = await import('../benchmark-sets/realworld-api-v4/shared/lib/adapters/trailbase.mjs');
   const calls = [];
