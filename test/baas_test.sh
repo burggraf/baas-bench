@@ -188,6 +188,7 @@ grep -q '^trailbase-resolved-version=0.34.1$' "$BAAS_TEST_LOG" || fail "V4 Trail
 : > "$BAAS_TEST_LOG"
 BAAS_VERSION_PROFILE=realworld-api-v4 "$BAAS" setup pocketbase >/dev/null
 grep -q '^pocketbase-resolved-dockerfile=benchmark-sets/realworld-api-v4/shared/pocketbase-go/Dockerfile$' "$BAAS_TEST_LOG" || fail "V4 PocketBase helper was not selected"
+grep -Fq 'COPY benchmark-sets/realworld-api-v4/shared/pocketbase-go/go.mod benchmark-sets/realworld-api-v4/shared/pocketbase-go/go.sum ./' "$ROOT/benchmark-sets/realworld-api-v4/shared/pocketbase-go/Dockerfile" || fail "V4 PocketBase build is not using its pinned module version"
 mkdir -p "$BAAS_RUNTIME_DIR/supabase/docker/volumes/api/envoy"
 SUPABASE_V4_REF=$(awk -F= '$1 == "SUPABASE_REF" { print $2 }' "$ROOT/benchmark-sets/realworld-api-v4/versions.env")
 printf '%s\n' "$SUPABASE_V4_REF" > "$BAAS_RUNTIME_DIR/supabase/.baas-ref"

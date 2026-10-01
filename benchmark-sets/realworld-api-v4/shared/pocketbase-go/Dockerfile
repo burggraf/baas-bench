@@ -1,9 +1,9 @@
 ARG GO_IMAGE
 FROM ${GO_IMAGE} AS build
 WORKDIR /src
-COPY benchmark-sets/basic-js-v2/shared/pocketbase-go/go.mod benchmark-sets/basic-js-v2/shared/pocketbase-go/go.sum ./
+COPY benchmark-sets/realworld-api-v4/shared/pocketbase-go/go.mod benchmark-sets/realworld-api-v4/shared/pocketbase-go/go.sum ./
 RUN go mod download
-COPY benchmark-sets/basic-js-v2/shared/pocketbase-go/main.go ./
+COPY benchmark-sets/realworld-api-v4/shared/pocketbase-go/main.go ./
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /pocketbase .
 
 FROM scratch
