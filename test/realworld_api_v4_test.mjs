@@ -325,6 +325,66 @@ test('Supabase adapter maps PostgREST rows and enforces tenant-bound pagination'
   await assert.rejects(adapter.listTasks({ organizationId: 'org', projectId: 'foreign', page: 0, pageSize: 10 }), /tenant|boundary/i);
 });
 
+test('Supabase requests exact totals only for paginated task, comment, and search reads', async () => {
+  const { createSupabaseAdapter } = await import('../benchmark-sets/realworld-api-v4/shared/lib/adapters/supabase.mjs');
+  const calls = [];
+  const rows = {
+    organizations: [{ id: 'org', name: 'Org', owner_id: 'usr' }],
+    projects: [{ id: 'prj', organization_id: 'org' }],
+    activities: [{ id: 'act', organization_id: 'org', project_id: 'prj' }],
+    tasks: [{ id: 'tsk', organization_id: 'org', project_id: 'prj', creator_id: 'usr', assignee_id: 'usr' }],
+    comments: [{ id: 'cmt', organization_id: 'org', project_id: 'prj', task_id: 'tsk' }],
+    users: [{ id: 'usr' }],
+  };
+  const client = { from(table) {
+    let options;
+    return {
+      select(_fields, value) { options = value; calls.push([table, value?.count]); return this; },
+      eq() { return this; }, ilike() { return this; }, order() { return this; }, range() { return this; },
+      single() { return Promise.resolve({ data: rows[table][0] }); },
+      then(resolve, reject) { return Promise.resolve({ data: rows[table], count: options?.count === 'exact' ? 42 : null }).then(resolve, reject); },
+    };
+  } };
+  const adapter = createSupabaseAdapter({ client });
+  const context = { organizationId: 'org', projectId: 'prj', taskId: 'tsk', pageSize: 1 };
+  await adapter.dashboard(context);
+  await adapter.getUser('usr');
+  await adapter.getUserByAuthSubject('authusr');
+  const detail = await adapter.getTask(context);
+  for (const page of [detail.comments, await adapter.listTasks(context), await adapter.listComments(context), await adapter.searchTasks({ ...context, query: 'workload' })]) {
+    assert.equal(page.total, 42);
+    assert.equal(page.hasNext, true);
+  }
+  assert.deepEqual(calls, [
+    ['organizations', undefined], ['projects', undefined], ['activities', undefined],
+    ['users', undefined], ['users', undefined], ['tasks', undefined], ['comments', 'exact'],
+    ['users', undefined], ['users', undefined], ['tasks', 'exact'], ['comments', 'exact'], ['tasks', 'exact'],
+  ]);
+});
+
+test('Supabase setup applies its statement-scoped RLS overlay without changing the shared schema', async () => {
+  const { createSupabaseAdmin } = await import('../benchmark-sets/realworld-api-v4/shared/lib/admin/supabase.mjs');
+  let schema;
+  const admin = createSupabaseAdmin({ root: '/fake', runtime: '/fake', run: async (_command, _args, options) => {
+    if (typeof options.input === 'string' && options.input.includes('CREATE TABLE public.users')) {
+      schema = options.input;
+      throw new Error('stop after schema capture');
+    }
+    return { stdout: '' };
+  } });
+  await assert.rejects(admin.setup(), /stop after schema capture/);
+  assert.ok(schema.includes(text('shared/sql/supabase-rls.sql')));
+  assert.doesNotMatch(text('shared/sql/postgres-schema.sql'), /member_organizations|managed_organizations/);
+  const overlay = text('shared/sql/supabase-rls.sql');
+  for (const name of ['member_organizations', 'managed_organizations']) {
+    assert.match(overlay, new RegExp(`CREATE FUNCTION benchmark_private\\.${name}\\(\\) RETURNS SETOF text[\\s\\S]*?STABLE SECURITY DEFINER SET search_path = ''`));
+  }
+  assert.doesNotMatch(overlay, /task_organization\(|comment_organization\(|DISABLE ROW LEVEL SECURITY|DROP POLICY/i);
+  assert.match(overlay, /creator_id = \(SELECT benchmark_private\.current_user_id\(\)\)/);
+  assert.match(overlay, /author_id = \(SELECT benchmark_private\.current_user_id\(\)\)/);
+  assert.match(overlay, /role IN \('owner', 'admin'\)/);
+});
+
 test('Supabase .env key lookup parses LF and CRLF files', async () => {
   const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
   const { tmpdir } = await import('node:os');

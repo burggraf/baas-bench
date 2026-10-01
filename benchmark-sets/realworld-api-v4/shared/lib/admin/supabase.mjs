@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { runCommand } from '../command.mjs';
 import { createProgress, lineDecoder } from '../progress.mjs';
@@ -43,7 +43,7 @@ export function createSupabaseAdmin({ run = runCommand, root, runtime, seed = 42
         await teardown();
         phase = 'schema';
         progress.phase(phase);
-        await psql(await loadSchemaText());
+        await psql(`${await loadSchemaText()}\n${await readFile(new URL('../../sql/supabase-rls.sql', import.meta.url), 'utf8')}`);
         progress.phase('copy', { copied_rows: 0, copied_batches: 0, total_rows: 1_000_000 });
         const copyInput = async function* () {
           for await (const batch of encodeCopyBatches({ batches: seedDataset(seed, 1000), maxBatchSize: 1000 })) {
