@@ -5,6 +5,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 const SSH_OPTIONS = ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', '-o', 'StrictHostKeyChecking=accept-new'];
 const validTarget = value => typeof value === 'string' && /^([A-Za-z0-9][A-Za-z0-9_.-]*@)?[A-Za-z0-9][A-Za-z0-9.-]*$/.test(value);
+const isSshConnectTimeout = error => /ssh_dispatch_run_fatal: Connection to \S+ port 22: (?:Operation|Connection) timed out|ssh: connect to host \S+ port 22: (?:Operation|Connection) timed out/i.test(error?.message ?? '');
 
 export async function readBootstrapScript(path) {
   if (!isAbsolute(path) || path.includes('\0')) throw new Error('bootstrap script path must be absolute');
@@ -13,8 +14,8 @@ export async function readBootstrapScript(path) {
   return script;
 }
 
-export async function bootstrapHosts({ backendTarget, runnerTarget, script, command = runCommand, signal, attempts = 24, sleep = ms => delay(ms, undefined, { signal }) }) {
-  if (!validTarget(backendTarget) || !validTarget(runnerTarget) || typeof script !== 'string' || !script.startsWith('#!/bin/sh\n') || script.length > 32_768 || !Number.isSafeInteger(attempts) || attempts < 1 || attempts > 24) throw new Error('invalid host bootstrap configuration');
+export async function bootstrapHosts({ backendTarget, runnerTarget, script, command = runCommand, signal, attempts = 24, bootstrapAttempts = 3, sleep = ms => delay(ms, undefined, { signal }) }) {
+  if (!validTarget(backendTarget) || !validTarget(runnerTarget) || typeof script !== 'string' || !script.startsWith('#!/bin/sh\n') || script.length > 32_768 || !Number.isSafeInteger(attempts) || attempts < 1 || attempts > 24 || !Number.isSafeInteger(bootstrapAttempts) || bootstrapAttempts < 1 || bootstrapAttempts > 3) throw new Error('invalid host bootstrap configuration');
   for (const target of [backendTarget, runnerTarget]) {
     for (let attempt = 1; ; attempt++) {
       signal?.throwIfAborted();
@@ -30,8 +31,17 @@ export async function bootstrapHosts({ backendTarget, runnerTarget, script, comm
     }
   }
   for (const target of [backendTarget, runnerTarget]) {
-    signal?.throwIfAborted();
-    await command('ssh', [...SSH_OPTIONS, target, 'sh -s'], { input: script, timeoutMs: 600_000, signal });
+    for (let attempt = 1; ; attempt++) {
+      signal?.throwIfAborted();
+      try {
+        await command('ssh', [...SSH_OPTIONS, target, 'sh -s'], { input: script, timeoutMs: 600_000, signal });
+        break;
+      } catch (error) {
+        signal?.throwIfAborted();
+        if (!isSshConnectTimeout(error) || attempt >= bootstrapAttempts) throw error;
+        await sleep(5_000);
+      }
+    }
   }
   return { backendTarget, runnerTarget };
 }

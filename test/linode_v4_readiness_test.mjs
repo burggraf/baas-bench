@@ -23,6 +23,36 @@ test('SSH readiness retries probes only and bootstraps each host once', async ()
   assert.deepEqual(calls, ['true', 'true', 'true', 'true', 'sh -s', 'sh -s']);
 });
 
+test('SSH bootstrap retries recognized OpenSSH connection timeouts', async () => {
+  const calls = [];
+  const delays = [];
+  let failFirstBootstrap = true;
+  await bootstrapHosts({ ...hosts, bootstrapAttempts: 2, sleep: async ms => delays.push(ms), command: async (name, args, options) => {
+    const target = args.at(-2);
+    const remote = args.at(-1);
+    calls.push({ target, remote, input: options.input });
+    if (remote === 'sh -s' && target === hosts.backendTarget && failFirstBootstrap) {
+      failFirstBootstrap = false;
+      throw new Error(`ssh command failed [255]: ssh_dispatch_run_fatal: Connection to ${target.slice(5)} port 22: Operation timed out`);
+    }
+  } });
+  assert.deepEqual(calls.map(call => `${call.target}:${call.remote}`), [
+    `${hosts.backendTarget}:true`, `${hosts.runnerTarget}:true`,
+    `${hosts.backendTarget}:sh -s`, `${hosts.backendTarget}:sh -s`, `${hosts.runnerTarget}:sh -s`,
+  ]);
+  assert.ok(calls.filter(call => call.remote === 'sh -s').every(call => call.input === hosts.script));
+  assert.deepEqual(delays, [5_000]);
+});
+
+test('bootstrap does not replay a script after a remote command failure', async () => {
+  const calls = [];
+  await assert.rejects(bootstrapHosts({ ...hosts, bootstrapAttempts: 3, sleep: async () => assert.fail('remote failure must not retry'), command: async (name, args) => {
+    calls.push(args.at(-1));
+    if (args.at(-1) === 'sh -s') throw new Error('ssh command failed [1]: command failed: bootstrap script failed');
+  } }), /bootstrap script failed/);
+  assert.deepEqual(calls, ['true', 'true', 'sh -s']);
+});
+
 test('permanent SSH failure never executes bootstrap', async () => {
   const calls = [];
   await assert.rejects(bootstrapHosts({ ...hosts, attempts: 2, sleep: async () => {}, command: async (name, args) => {
