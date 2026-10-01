@@ -19,8 +19,12 @@ IDs. Missing totals fail. Pinned server 0.34.2 returns zero on empty beyond-end
 pages; those pages obtain an additional native `limit=0,offset=0` exact-count query.
 That fan-out is documented, not hidden or artificially imposed on other cases.
 
-In-memory SQLite regressions execute constraints, ACL SQL and trigger rollback,
-not the live Record API/config parser. Native FK/ACL behavior, search locale,
-server response-before-commit, full fixture restoration/auth mapping on repeat
-setup, process-restart persistence, durability settings and measured request/write
-amplification still need bounded integration proof. No V4 incomplete reset is reused.
+In-memory SQLite regressions execute constraints, ACL SQL and trigger rollback.
+The bounded native smoke probe also exercised pinned Record API ACL/config parsing,
+search, profile/password invariance, exactly-one activity on task update/comment
+create/update, an injected trigger abort returning HTTP 500 with mutation/activity
+rollback, complete logical fixture reset, and reread after a container restart.
+The admin DB connection reported WAL, `synchronous=1` (NORMAL), and
+`foreign_keys=1`. This restart check is not a power-loss guarantee; native measured
+connection settings, search locale/metacharacters, wider adversarial cases and
+full million-row identity restoration still need qualification. No V4 reset is reused.

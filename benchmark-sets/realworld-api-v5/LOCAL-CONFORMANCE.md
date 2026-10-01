@@ -28,20 +28,29 @@ observed:
   created task/activity.
 
 The detailed sanitized assertion report and private logs/inventory are under the
-ignored `.runtime/conformance-v5/local-20261001T154018Z/`. The report records a
-successful check labeled “activity trigger failure rolls back task update”; this
-is **not accepted as sufficient failure-injection proof yet** because the probe
-caught any request rejection, did not assert the injected database error reason,
-and did not verify that its temporary failure trigger had been loaded. Likewise,
-PRAGMA queries returned but their values were not recorded; persistence defaults
-are not yet documented. The probe did not cover every negative relationship,
-page/count edge, mutation type, role revocation on existing sessions, Auth reset,
-search metacharacter corpus, or full fixture identity digest.
+ignored `.runtime/conformance-v5/local-20261001T154018Z/`. A follow-up installed a temporary failure trigger as an owned TrailBase
+migration, confirmed the trigger existed in native `sqlite_schema`, observed the
+Record API return HTTP 500, and verified both task contents and activity count
+were unchanged. A later owned migration removed the trigger. This proves the
+specific tested SQLite mutation rollback path; it does not expose the internal
+SQLite error text through the SDK response. Successful task update, comment
+create and comment update each yielded exactly one actor-attributed activity.
+The native admin connection reported `journal_mode=wal`, `synchronous=1`
+(`NORMAL`), and `foreign_keys=1`. The bounded docker restart reread an acknowledged
+write. These are local observations for pinned TrailBase 0.34.2, not universal
+power-loss guarantees. The probe did not cover every negative relationship,
+page/count edge, role revocation on existing sessions, Auth reset, the full search
+metacharacter corpus, or a million-row fixture identity digest.
 
-Therefore TrailBase remains unqualified. Supabase remains untested against a
-native local stack. The source-level fixes, mock tests and in-memory SQLite tests
-do not substitute for those gates. The next bounded step is to strengthen and
-repeat TrailBase failure-injection/persistence evidence, then attempt a separately
-isolated Supabase native conformance probe within the remaining approved window.
+Therefore TrailBase remains unqualified. For Supabase, the committed
+`test/supabase_v5_rls_test.sql` was run against a fresh disposable local PostgreSQL
+17.9 cluster with `fsync=on`, `synchronous_commit=on`, `full_page_writes=on`; both
+the base PostgreSQL policy and V5 statement-scoped RLS overlay passed the same
+authorization/relationship/activity SQL assertions. This is real PostgreSQL
+policy/trigger evidence, **not** a Supabase Auth/PostgREST stack test, so native
+API integration and acknowledged-write restart qualification remain pending.
+The source-level fixes, mock tests and in-memory SQLite tests do not substitute
+for those remaining gates. The next bounded step is an isolated Supabase native conformance probe within
+the remaining approved window.
 If the deadline is reached, stop and request fresh approval rather than extending
 or silently lowering the test scope.
