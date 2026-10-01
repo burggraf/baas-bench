@@ -51,7 +51,7 @@ export function createTrailBaseAdapter({ initClient, client, endpoint = process.
     return session;
   }
   const adapter = {
-    accessPath: 'javascript-sdk',
+    accessPath: 'javascript-sdk', sessionPreparationConcurrency: 10, sessionPreparationBatchDelayMs: 100,
     deviations: ['TrailBase measured traffic uses the official JavaScript Record API and native auth endpoint; SQLite schema, migrations, and record API ACLs are administrative.', ...(endpoint.startsWith('https://') ? ['V4 private HTTPS terminates at a pinned Envoy gateway; proxy overhead is measured.'] : [])],
     virtualUsers(count = 10_000, seed = 42) { return buildVirtualUserSpecs(count, seed); },
     correctnessFixture() { const specs = buildVirtualUserSpecs(3_201, 42); const owner = specs[0], outsider = specs[1], admin = specs[1_600], member = specs[3_200]; return { organizationId: owner.organizationId, projectId: owner.projectId, taskId: owner.taskId, commentId: owner.commentId, owner: owner.credentials, member: { ...member.credentials, organizationId: owner.organizationId, projectId: owner.projectId, taskId: owner.taskId, commentId: owner.commentId }, admin: { ...admin.credentials, organizationId: owner.organizationId, projectId: owner.projectId, taskId: owner.taskId, commentId: owner.commentId }, outsider: outsider.credentials, memberMembershipId: 'memv3' + (3_200).toString(36).padStart(11, '0'), adminMembershipId: 'memv3' + (1_600).toString(36).padStart(11, '0'), ownerMembershipId: 'memv3' + '00000000000', memberUserId: member.credentials.email.match(/user-(usrv3[0-9a-z]+)/)?.[1] }; },

@@ -1836,6 +1836,8 @@ test('TrailBase adapter uses the official record client with isolated auth sessi
   const client = { auth: { async login(value) { calls.push(['login', value]); return { user: { id: 'usr' }, token: 'token' }; }, async refresh() {}, async logout() { calls.push(['logout']); } }, records(name) { return { async list(options) { calls.push(['list', name, options]); if (name === 'users') return { records: [{ id: 'usr', email: 'u@example.test' }] }; if (name === 'memberships') return { records: [{ id: 42, external_id: 'mem', organization_id: 'org', user_id: 'usr', role: 'member', created_at: '2025-01-01' }] }; return { records: [], totalCount: 0 }; }, async read(id) { calls.push(['read', name, id]); return { id, organization_id: 'org', project_id: 'prj', creator_id: 'usr', title: 't', description: 'd', status: 'todo', priority: 'low', created_at: '2025-01-01', updated_at: '2025-01-01' }; }, async create(data) { calls.push(['create', name, data]); return { id: 'new', ...data }; }, async update(id, data) { calls.push(['update', name, id, data]); return { id, ...data }; } }; } };
   const adapter = createTrailBaseAdapter({ initClient: () => client, client, endpoint: 'http://127.0.0.1:4000' });
   const tlsAdapter = createTrailBaseAdapter({ initClient: () => client, client, endpoint: 'https://10.0.0.10:8443' });
+  assert.equal(adapter.sessionPreparationConcurrency, 10);
+  assert.equal(adapter.sessionPreparationBatchDelayMs, 100);
   assert.equal(adapter.deviations.length, 1);
   assert.match(tlsAdapter.deviations.at(-1), /pinned Envoy gateway/);
   const session = await adapter.createSession({ email: 'u@example.test', password: 'pw' });
