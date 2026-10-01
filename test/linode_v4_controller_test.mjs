@@ -42,6 +42,21 @@ test('Linode API uses controller-only bearer auth and paginates without leaking 
   await assert.rejects(rejected.request('POST', '/v4/linode/instances', {}), error => error.status === 400 && error.message.includes('interfaces.1.vpc.ipv4.addresses.0.address') && error.message.includes('must be within the subnet') && !error.message.includes('controller-secret'));
 });
 
+test('Linode API retries transient GET fetch failures without replaying resource creation', async () => {
+  let getAttempts = 0;
+  const api = new LinodeApi({ token: 'controller-secret', fetchImpl: async () => {
+    getAttempts++;
+    if (getAttempts < 3) throw new TypeError('fetch failed');
+    return new Response(JSON.stringify({ data: [], page: 1, pages: 1 }), { status: 200 });
+  } });
+  assert.deepEqual(await api.list('/v4/regions'), []);
+  assert.equal(getAttempts, 3);
+  let postAttempts = 0;
+  const post = new LinodeApi({ token: 'controller-secret', fetchImpl: async () => { postAttempts++; throw new TypeError('fetch failed'); } });
+  await assert.rejects(post.request('POST', '/v4/linode/instances', {}), /fetch failed/);
+  assert.equal(postAttempts, 1);
+});
+
 test('real Linode API client fails closed without spend and deletion approval', async () => {
   const { LinodeApi, provisionPair, cleanupPair } = await load();
   let requests = 0;

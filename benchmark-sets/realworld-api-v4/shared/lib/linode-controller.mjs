@@ -52,10 +52,17 @@ export class LinodeApi {
   async request(method, path, body, signal) {
     if (!['GET', 'POST', 'DELETE'].includes(method) || typeof path !== 'string' || !path.startsWith('/v4/') || path.includes('..') || /[\r\n\0]/.test(path)) throw new Error('invalid Linode API request');
     const headers = { Authorization: `Bearer ${this.token}`, Accept: 'application/json' };
-    const timeoutSignal = AbortSignal.timeout(this.timeoutMs);
-    const options = { method, headers, signal: signal ? AbortSignal.any([timeoutSignal, signal]) : timeoutSignal };
-    if (body !== undefined) { headers['Content-Type'] = 'application/json'; options.body = JSON.stringify(body); }
-    const response = await this.fetchImpl(`${this.baseUrl}${path}`, options);
+    let response;
+    for (let attempt = 0; ; attempt++) {
+      const timeoutSignal = AbortSignal.timeout(this.timeoutMs);
+      const options = { method, headers, signal: signal ? AbortSignal.any([timeoutSignal, signal]) : timeoutSignal };
+      if (body !== undefined) { headers['Content-Type'] = 'application/json'; options.body = JSON.stringify(body); }
+      try { response = await this.fetchImpl(`${this.baseUrl}${path}`, options); break; }
+      catch (error) {
+        if (method !== 'GET' || !(error instanceof TypeError && error.message === 'fetch failed') || signal?.aborted || attempt >= 2) throw error;
+        await new Promise(resolve => setTimeout(resolve, 1_000 * (attempt + 1)));
+      }
+    }
     if (!response.ok) {
       let text = '';
       try { text = (await response.text()).slice(0, 8_192); } catch { /* keep the API status */ }
