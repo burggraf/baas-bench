@@ -123,9 +123,14 @@ export async function resolveHardwareProfile(api) {
   return selectHardwareProfile(regions, types, availability, { regions: preferred });
 }
 
+function estimateInstanceCost(hourlyUsd, hours) {
+  // Conservative invoice estimate: whole-hour usage and cent-rounded hourly rate.
+  return Math.ceil(hourlyUsd * 100 - 1e-9) * Math.max(1, Math.ceil(hours)) / 100;
+}
+
 export function estimatePairCost(hourlyUsd, maxHours, transferReserveUsd) {
   if (![hourlyUsd, maxHours, transferReserveUsd].every(Number.isFinite) || hourlyUsd <= 0 || maxHours <= 0 || transferReserveUsd < 0) throw new Error('invalid pair cost estimate');
-  return Math.round((2 * hourlyUsd * maxHours + transferReserveUsd) * 100) / 100;
+  return Math.ceil((2 * estimateInstanceCost(hourlyUsd, maxHours) + transferReserveUsd) * 100 - 1e-9) / 100;
 }
 
 function validateLedger(ledger) {
@@ -300,7 +305,7 @@ export async function provisionPair(options) {
 
   const create = async (kind, body) => {
     const endpoint = RESOURCES[kind].path;
-    inventory.pending = { kind, endpoint, label: labels[kind] };
+    inventory.pending = { kind, endpoint, label: labels[kind], billing_started_ms: (options.now ?? Date.now)() };
     await persist(inventory, options);
     let response;
     try { response = await api.request('POST', endpoint, body, options.signal); }
@@ -313,7 +318,7 @@ export async function provisionPair(options) {
     }
     const id = Number(response?.id);
     if (!Number.isSafeInteger(id) || id < 1) throw new Error(`Linode did not return an ID for ${kind}`);
-    const resource = { id, label: labels[kind] };
+    const resource = { id, label: labels[kind], billing_started_ms: inventory.pending.billing_started_ms };
     if (kind === 'vpc') {
       const subnet = response.subnets?.find(item => item.label === vpcBody.subnets[0].label);
       if (!subnet?.id) throw new Error('Linode VPC response omitted the requested subnet');
@@ -364,7 +369,7 @@ async function reconcilePending({ api, inventory, options }) {
   const matches = (await api.list(pending.endpoint)).filter(item => listMatches(pending.kind, item, inventory, pending));
   if (matches.length !== 1) throw new Error(`ambiguous ${pending.kind} creation: found ${matches.length} exact-label matches`);
   const item = matches[0];
-  const resource = { id: item.id, label: item.label };
+  const resource = { id: item.id, label: item.label, billing_started_ms: pending.billing_started_ms };
   if (pending.kind === 'vpc') {
     const subnet = item.subnets?.find(value => value.label === `bv4-${inventory.run_id}-private`);
     if (!subnet?.id) throw new Error('recovered VPC is missing its expected subnet');
@@ -479,7 +484,7 @@ function validateInventory(inventory) {
   }
 }
 
-export async function cleanupPair({ api, inventory, save, inventoryPath, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), maxWaitMs = 300_000, deleteConfirmation }) {
+export async function cleanupPair({ api, inventory, save, inventoryPath, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), maxWaitMs = 300_000, deleteConfirmation, now = Date.now }) {
   if (!api?.request || typeof sleep !== 'function' || !Number.isSafeInteger(maxWaitMs) || maxWaitMs < 1_000 || maxWaitMs > 1_800_000) throw new Error('invalid V4 cleanup configuration');
   validateInventory(inventory);
   if (api instanceof LinodeApi && deleteConfirmation !== inventory.run_id) throw new Error('exact run-ID deletion confirmation is required');
@@ -494,7 +499,11 @@ export async function cleanupPair({ api, inventory, save, inventoryPath, sleep =
   for (const kind of ['runner', 'backend', 'vpcFirewall', 'publicFirewall', 'vpc']) {
     const resource = inventory.resources[kind];
     if (!resource || resource.deleted) continue;
-    try { await deleteOne({ api, inventory, kind, resource, sleep, maxWaitMs, options }); }
+    try {
+      await deleteOne({ api, inventory, kind, resource, sleep, maxWaitMs, options });
+      resource.billing_ended_ms = now();
+      await persist(inventory, options);
+    }
     catch (error) { errors.push(error); }
   }
   inventory.status = errors.length || inventory.pending ? 'needs_recovery' : 'deleted';
@@ -578,11 +587,19 @@ export async function runObservation(options) {
   const cleanupComplete = !inventory || inventory.status === 'deleted';
   try {
     if (cleanupComplete && ledger?.reservations && Object.hasOwn(ledger.reservations, config.runId)) {
-      const elapsedHours = Math.max(0, (now() - startedAt) / 3_600_000);
-      const actualUsd = Math.round((2 * hourlyUsd * elapsedHours + transferReserveUsd) * 100) / 100;
+      const computeUsd = ['backend', 'runner'].reduce((sum, kind) => {
+        const resource = inventory?.resources[kind];
+        if (!resource) return sum;
+        const hours = Math.max(0, ((resource.billing_ended_ms ?? now()) - (resource.billing_started_ms ?? startedAt)) / 3_600_000);
+        return sum + estimateInstanceCost(hourlyUsd, hours);
+      }, 0);
+      const actualUsd = Math.ceil((computeUsd + (computeUsd ? transferReserveUsd : 0)) * 100 - 1e-9) / 100;
       settleCampaignSpend(ledger, config.runId, actualUsd);
       await writePrivateJson(campaignPath, ledger);
-      if (inventory) inventory.actual_usd = actualUsd;
+      if (inventory) {
+        inventory.actual_usd = actualUsd;
+        inventory.budget_settlement = 'whole-hour-estimate-excluding-tax';
+      }
       if (inventory) await save(inventory);
     }
   } catch (error) { if (!primary) primary = error; else attachError(primary, 'budgetError', error); }

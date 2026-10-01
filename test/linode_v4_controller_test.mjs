@@ -92,6 +92,15 @@ test('hardware selection uses the cheapest available VPC-capable dedicated 8 GiB
   assert.throws(() => selectHardwareProfile(regions, types.slice(0, 1), availability), /dedicated 8192 MiB/);
 });
 
+test('cost estimates round each instance up to whole hours and reserve invoice-rate cents', async () => {
+  const { estimatePairCost } = await load();
+  assert.equal(estimatePairCost(.108, 2 / 60, 0), .22);
+  assert.equal(estimatePairCost(.108, 131 / 60, 0), .66);
+  assert.equal(estimatePairCost(.108, 208 / 60, 0), .88);
+  assert.equal(estimatePairCost(.108, 1, 0), .22);
+  assert.equal(estimatePairCost(.108, 1 + 1 / 3600, 0), .44);
+});
+
 test('hardware profile resolver reads current regions, types, and per-region availability', async () => {
   const { resolveHardwareProfile } = await load();
   const calls = [];
@@ -386,7 +395,7 @@ test('pilot workflow runs and verifies the selected TrailBase case with its ephe
     startAgent: async () => ({ env: { SSH_AUTH_SOCK: '/tmp/agent' }, stop: async () => { events.push('agent-stop'); } }),
     deploy: async ({ inventory, runnerKeyFile }) => { events.push('deploy'); assert.equal(runnerKeyFile, key.privateKey); return { environment: { DEPLOYED: inventory.resources.backend.privateIpv4, BAAS_BENCH_V4_SSH_CONFIG: '/stale/ssh_config' }, hostProvenance: { backend: { dockerService: 'active' }, runner: { dockerService: 'active' } } }; },
     executeBench: async ({ environment, platform }) => { assert.equal(platform, 'trailbase'); sshConfigPath = environment.BAAS_BENCH_V4_SSH_CONFIG; assert.equal((await stat(sshConfigPath)).mode & 0o777, 0o600); events.push('run'); assert.equal(environment.DEPLOYED, '10.203.0.10'); return '/tmp/bundle'; }, verifyBench: async (result, platform) => { assert.equal(platform, 'trailbase'); events.push(`verify:${result}`); },
-    observe: async options => { assert.equal(options.transferReserveUsd, 0); assert.deepEqual(options.config.additionalSshPublicKeys, ['ssh-ed25519 AAAATEST mba-m1']); const inventory = { status: 'bootstrapping', resources: { backend: { publicIpv4: '172.233.137.153', privateIpv4: '10.203.0.10' } } }; await options.bootstrap({ inventory }); assert.equal(inventory.hardware_profile.type.id, 'g6-dedicated-4'); assert.equal(inventory.host_provenance.runner.dockerService, 'active'); const bundle = await options.run({ inventory, signal: new AbortController().signal }); await options.verify(bundle, inventory); return { result: bundle }; },
+    observe: async options => { assert.equal(options.transferReserveUsd, 1); assert.deepEqual(options.config.additionalSshPublicKeys, ['ssh-ed25519 AAAATEST mba-m1']); const inventory = { status: 'bootstrapping', resources: { backend: { publicIpv4: '172.233.137.153', privateIpv4: '10.203.0.10' } } }; await options.bootstrap({ inventory }); assert.equal(inventory.hardware_profile.type.id, 'g6-dedicated-4'); assert.equal(inventory.host_provenance.runner.dockerService, 'active'); const bundle = await options.run({ inventory, signal: new AbortController().signal }); await options.verify(bundle, inventory); return { result: bundle }; },
   });
   assert.equal(result.profile.region, 'us-lax');
   assert.deepEqual(events, ['deploy', 'run', 'verify:/tmp/bundle', 'agent-stop', 'key-cleanup']);
@@ -399,7 +408,7 @@ test('pilot reservation cap shortens a run and rejects budgets below one billabl
   let observedMaxHours;
   let keyCreated = false;
   const common = {
-    platform: 'trailbase', maxHours: 8, api: { request() {}, list: async () => [{ label: 'mba-m1', ssh_key: 'ssh-ed25519 AAAATEST mba-m1' }] },
+    platform: 'trailbase', maxHours: 8, transferReserveUsd: 0, api: { request() {}, list: async () => [{ label: 'mba-m1', ssh_key: 'ssh-ed25519 AAAATEST mba-m1' }] },
     config: { runId: 'obs-budget123', image: 'linode/ubuntu24.04' }, repositoryRoot: '/repo', bootstrapScriptPath: '/script', controllerCidr: '203.0.113.4/32',
     preflight: async () => {}, selectProfile: async () => ({ region: 'us-lax', type: { id: 'g6-dedicated-4', transfer: 5000 }, hourlyUsd: 0.108 }),
     createKey: async () => { keyCreated = true; return { privateKey: '/tmp/key', publicKey: 'ssh-ed25519 AAAATEST pilot', cleanup: async () => {} }; },
@@ -407,12 +416,15 @@ test('pilot reservation cap shortens a run and rejects budgets below one billabl
     observe: async options => { observedMaxHours = options.maxHours; return { result: '/tmp/evidence', estimateUsd: estimatePairCost(0.108, options.maxHours + 1, 0), actualUsd: 0, inventory: {} }; },
   };
   await runPilot({ ...common, maxReservationUsd: 0.50 });
-  assert.equal(estimatePairCost(0.108, observedMaxHours + 1, 0), 0.50);
+  assert.equal(observedMaxHours, 1);
+  assert.equal(estimatePairCost(0.108, observedMaxHours + 1, 0), 0.44);
   const floor = observedMaxHours;
   keyCreated = false;
   await assert.rejects(runPilot({ ...common, maxReservationUsd: 0.21 }), /exceeds the remaining approval budget/);
   assert.equal(keyCreated, false);
   assert.equal(observedMaxHours, floor);
+  await assert.rejects(runPilot({ ...common, transferReserveUsd: 1, maxReservationUsd: .50 }), /exceeds the remaining approval budget/);
+  assert.equal(keyCreated, false);
 });
 
 test('pilot fails before creating its run key when the named Linode SSH key is absent', async () => {
@@ -453,6 +465,35 @@ test('observation reserves campaign budget, verifies evidence before cleanup, th
     assert.equal((await readPrivateJson(campaignPath)).spentUsd, 1.2);
     assert.deepEqual(calls.filter(([method]) => method === 'DELETE').length, 5);
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('settlement counts only created instances, their separate lifetimes, and failed attempts', async () => {
+  const { runObservation, readPrivateJson } = await load();
+  for (const scenario of ['no-hosts', 'backend-only', 'staggered']) {
+    const directory = await mkdtemp(join(tmpdir(), 'linode-v4-billing-'));
+    const { api } = fakeApi();
+    const request = api.request;
+    let now = 0;
+    let hosts = 0;
+    api.request = async (method, path, ...args) => {
+      if (method === 'POST' && path === '/v4/linode/instances') {
+        hosts++;
+        if (scenario === 'no-hosts' || (scenario === 'backend-only' && hosts === 2)) throw Object.assign(new Error('rejected host'), { status: 400 });
+        if (hosts === 1) now = 120_000;
+      }
+      return request(method, path, ...args);
+    };
+    const campaignPath = join(directory, 'ledger.json');
+    try {
+      const work = runObservation({
+        api, config: provisionConfig, inventoryPath: join(directory, 'run.json'), campaignPath,
+        hourlyUsd: .108, maxHours: 2, transferReserveUsd: 0, now: () => now, sleep: async () => {},
+        run: async () => { now = 3_660_000; throw new Error('failed benchmark'); }, verify: async () => {},
+      });
+      await assert.rejects(work, /rejected host|failed benchmark/);
+      assert.equal((await readPrivateJson(campaignPath)).spentUsd, { 'no-hosts': 0, 'backend-only': .11, staggered: .33 }[scenario]);
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  }
 });
 
 test('observation waits for cancelled bootstrap to settle before deleting hosts', async () => {

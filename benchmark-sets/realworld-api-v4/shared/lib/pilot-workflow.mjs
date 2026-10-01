@@ -30,11 +30,12 @@ export async function runPilot(options) {
   try {
     await (options.preflight ?? preflightPilot)({ repositoryRoot, platform });
     const profile = await selectProfile(api);
-    const transferReserve = Number(profile.type.transfer) > 0 ? 0 : transferReserveUsd;
+    // Transfer allowances are prorated and pooled; a positive plan quota does not prove free egress.
+    const transferReserve = transferReserveUsd ?? 1;
     let observationMaxHours = maxHours;
     if (maxReservationUsd !== undefined) {
-      const affordableHours = (maxReservationUsd - transferReserve + 0.005) / (2 * profile.hourlyUsd) - 1;
-      observationMaxHours = Math.min(maxHours, Math.floor(affordableHours * 100) / 100);
+      const affordableHours = Math.floor((maxReservationUsd - transferReserve + 1e-9) / estimatePairCost(profile.hourlyUsd, 1, 0)) - 1;
+      observationMaxHours = Math.min(maxHours, affordableHours);
       if (observationMaxHours <= 0 || estimatePairCost(profile.hourlyUsd, observationMaxHours + 1, transferReserve) > maxReservationUsd) throw new Error('estimated V4 reservation exceeds the remaining approval budget');
     }
     if (typeof api.list !== 'function') throw new Error('Linode account SSH key listing is unavailable');
