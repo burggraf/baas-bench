@@ -9,6 +9,8 @@ is made that V4 has a qualified or published historical evidence series.
 
 - [Approved observable contract](benchmarks/project-management-capacity/METHODOLOGY.md)
 - [Eight-case audit and admission matrix](CONFORMANCE.md)
+- [Repeatable native conformance procedures](NATIVE-CONFORMANCE.md)
+- [Local conformance progress and authorization](LOCAL-CONFORMANCE.md)
 - [Implementation plan](../../docs/plans/2026-10-01-baas-benchmark-fairness-plan.md)
 
 The Supabase/TrailBase candidates contain initial native-policy, integrity,
@@ -17,7 +19,8 @@ independent snapshot of the established dataset/adapter machinery, not imports
 from mutable or historical V4 runtime paths. Fixture IDs/password conventions
 retain their existing spelling; that does not make V5 observations V3/V4 evidence.
 
-`node --test test/realworld_api_v5_test.mjs` executes protocol regressions and
+`node --test test/realworld_api_v5_test.mjs test/native_conformance_v5_test.mjs`
+executes protocol/fixture/reset regressions and
 real in-memory SQLite constraints, ACL expressions and activity rollback. It does
 not start a BaaS stack, certify native API execution, or test restart persistence.
 

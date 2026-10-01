@@ -2,8 +2,77 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { runNativeConformance } from '../benchmark-sets/realworld-api-v5/shared/lib/native-conformance.mjs';
+import { readFileSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
+import { SCALE_SNAPSHOT_MIGRATION, RESTORE_APPLICATION_SQL, restoreTrailBaseScaleBaseline } from './native_v5_trailbase_scale.mjs';
+import { runNativeConformance, closeNativeSessions } from '../benchmark-sets/realworld-api-v5/shared/lib/native-conformance.mjs';
 import { assertConformance } from '../benchmark-sets/realworld-api-v5/shared/lib/conformance.mjs';
+import { fixtureBatches, FIXTURE_COLUMNS } from '../benchmark-sets/realworld-api-v5/shared/lib/fixture.mjs';
+import { DATASET_COUNTS, entityId } from '../benchmark-sets/realworld-api-v5/shared/lib/dataset.mjs';
+
+test('TrailBase full restore SQL preserves seeded values and Auth IDs across repeated cycles', () => {
+  const db = new DatabaseSync(':memory:');
+  try {
+    db.exec('PRAGMA foreign_keys=ON; CREATE TABLE _user(id BLOB PRIMARY KEY,email TEXT,password_hash TEXT);');
+    db.exec(readFileSync(new URL('../benchmark-sets/realworld-api-v5/shared/trailbase/migration.sql', import.meta.url), 'utf8'));
+    db.exec(`INSERT INTO _user VALUES(x'aa','owner@example.test','native-hash');
+      INSERT INTO users VALUES(1,'owner','aa','owner@example.test','Owner','2026-01-01','2026-01-01');
+      INSERT INTO organizations VALUES(1,'org','Org','owner','2026-01-01');
+      INSERT INTO memberships VALUES(1,'membership','org','owner','owner','2026-01-01');
+      INSERT INTO projects VALUES(1,'project','org','Project','active','2026-01-01','2026-01-01');
+      INSERT INTO tasks VALUES(1,'task','org','project','owner',NULL,'Original','','todo','low',NULL,'2026-01-01','2026-01-01',NULL);
+      INSERT INTO comments VALUES(1,'comment','org','project','task','owner','Original','2026-01-01','2026-01-01',NULL);`);
+    db.exec(SCALE_SNAPSHOT_MIGRATION);
+    const tables = Object.keys(FIXTURE_COLUMNS);
+    db.exec(tables.map(table => `INSERT INTO v5_baseline_${table} SELECT * FROM ${table};`).join('\n') + '\nINSERT INTO v5_baseline_auth SELECT * FROM _user;');
+    const state = () => JSON.stringify([...tables, '_user'].map(table => db.prepare(`SELECT * FROM ${table} ORDER BY id`).all()));
+    const before = state();
+    for (let cycle = 0; cycle < 2; cycle++) {
+      db.exec("UPDATE tasks SET title='Changed',last_actor_id='owner'; UPDATE comments SET body='Changed',last_actor_id='owner'; UPDATE users SET display_name='Changed'; UPDATE memberships SET role='admin'; UPDATE _user SET email='changed@example.test'; INSERT INTO _user VALUES(x'bb','extra@example.test','extra-hash');");
+      assert.notEqual(state(), before);
+      db.exec('BEGIN;\n' + RESTORE_APPLICATION_SQL + '\nDELETE FROM _user; INSERT INTO _user SELECT * FROM v5_baseline_auth; COMMIT;');
+      assert.equal(state(), before);
+    }
+  } finally { db.close(); }
+});
+
+test('TrailBase restores once then renews the controller session before verification', async () => {
+  const calls = [];
+  await restoreTrailBaseScaleBaseline({ authColumns: ['id', 'email'], query: async sql => { assert.match(sql, /DELETE FROM _user/); calls.push('restore'); }, renewAdmin: async () => calls.push('login') });
+  assert.deepEqual(calls, ['restore', 'login']);
+  const failure = new Error('restore failed');
+  calls.length = 0;
+  await assert.rejects(restoreTrailBaseScaleBaseline({ authColumns: ['id'], query: async () => { calls.push('restore'); throw failure; }, renewAdmin: async () => calls.push('login') }), error => error === failure);
+  assert.deepEqual(calls, ['restore']);
+});
+
+test('V5 fixture mapping streams one million logical rows with valid tenant and parent IDs', async () => {
+  const counts = Object.fromEntries(Object.keys(DATASET_COUNTS).map(table => [table, 0]));
+  for await (const batch of fixtureBatches(42, 997)) {
+    assert.deepEqual(batch.columns, FIXTURE_COLUMNS[batch.table]);
+    for (const row of batch.rows) {
+      assert.equal(row.length, batch.columns.length);
+      const ordinal = Number.parseInt(row[0].slice(5), 36);
+      if (batch.table === 'tasks') {
+        assert.equal(row[1], entityId('organization', ordinal % DATASET_COUNTS.organizations));
+        assert.equal(row[2], entityId('project', ordinal % DATASET_COUNTS.projects));
+        assert.match(row[5], /^Task /); assert.match(row[6], /^Description /);
+        assert.ok(['todo', 'in_progress', 'done', 'cancelled'].includes(row[7]));
+        assert.ok(['low', 'medium', 'high', 'urgent'].includes(row[8]));
+      }
+      if (batch.table === 'comments') {
+        const task = ordinal % DATASET_COUNTS.tasks;
+        assert.equal(row[1], entityId('organization', task % DATASET_COUNTS.organizations));
+        assert.equal(row[2], entityId('project', task % DATASET_COUNTS.projects));
+        assert.equal(row[3], entityId('task', task));
+        assert.match(row[5], /^Comment /);
+      }
+    }
+    counts[batch.table] += batch.rows.length;
+  }
+  assert.deepEqual(counts, DATASET_COUNTS);
+  assert.equal(Object.values(counts).reduce((a, b) => a + b), 1000000);
+});
 
 test('native probe CLIs reject missing or unexpected authorization arguments before setup', () => {
   for (const platform of ['trailbase', 'supabase']) {
@@ -14,6 +83,16 @@ test('native probe CLIs reject missing or unexpected authorization arguments bef
       assert.equal(result.stdout, '');
     }
   }
+});
+
+test('native session cleanup tries every session and preserves the primary error', async () => {
+  const calls = [], primary = new Error('mutation failed');
+  const sessions = [1, 2].map(id => ({ async close() { calls.push(id); throw new Error(`cleanup ${id}`); } }));
+  await assert.rejects(closeNativeSessions(sessions, primary), error => error === primary && error.cleanupErrors.length === 2);
+  assert.deepEqual(calls, [1, 2]);
+  calls.length = 0;
+  await assert.rejects(closeNativeSessions(sessions), error => error.message === 'cleanup 1' && error.cleanupErrors.length === 2);
+  assert.deepEqual(calls, [1, 2]);
 });
 
 function probe({ badSearch = false, badCount = false, staleRole = false, authWrite = false } = {}) {

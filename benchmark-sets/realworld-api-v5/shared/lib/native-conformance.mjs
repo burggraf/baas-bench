@@ -1,6 +1,19 @@
 import assert from 'node:assert/strict';
 import { runConformance } from './conformance.mjs';
 
+export async function closeNativeSessions(sessions, primary) {
+  const cleanupErrors = [];
+  for (const session of sessions) {
+    if (!session) continue;
+    try { await session.close(); } catch (error) { cleanupErrors.push(error); }
+  }
+  if (primary || cleanupErrors.length) {
+    const error = primary ?? cleanupErrors[0];
+    if (cleanupErrors.length) error.cleanupErrors = cleanupErrors;
+    throw error;
+  }
+}
+
 // Native drivers supply raw API/security, fixture, reset and persistence checks.
 // Adapter checks below are shared; they never substitute for the raw API checks.
 export async function runNativeConformance({ sessions, fixture, readAuthState, checks = {} }) {

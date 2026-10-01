@@ -9,10 +9,12 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { createSupabaseAdapter } from '../benchmark-sets/realworld-api-v5/shared/lib/adapters/supabase.mjs';
 import { runNativeConformance } from '../benchmark-sets/realworld-api-v5/shared/lib/native-conformance.mjs';
+import { runSupabaseScaleProbe } from './native_v5_supabase_scale.mjs';
 
-if (process.argv.length !== 3 || process.argv[2] !== '--local-disposable') {
-  console.error('usage: node test/native_v5_supabase_probe.mjs --local-disposable'); process.exit(2);
+if (process.argv.length !== 3 || !['--local-disposable', '--local-declared-scale'].includes(process.argv[2])) {
+  console.error('usage: node test/native_v5_supabase_probe.mjs {--local-disposable|--local-declared-scale}'); process.exit(2);
 }
+const scale = process.argv[2] === '--local-declared-scale';
 const root = fileURLToPath(new URL('../', import.meta.url));
 const runtime = join(root, '.runtime/conformance-v5');
 const shared = join(root, 'benchmark-sets/realworld-api-v5/shared');
@@ -26,7 +28,7 @@ const configPath = join(dir, 'compose.json');
 const compose = ['compose', '-p', project, '--project-directory', source, '-f', configPath];
 const quote = value => `'${String(value).replaceAll("'", "''")}'`;
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
-const report = { scope: 'synthetic-native-probe-not-qualification', platform: 'supabase', started_at: new Date().toISOString(), linode_spend_usd: 0, cleanup: false };
+const report = { scope: scale ? 'declared-scale-conformance-not-measurement' : 'synthetic-native-probe-not-qualification', platform: 'supabase', started_at: new Date().toISOString(), linode_spend_usd: 0, cleanup: false };
 let started = false, base, anon, service, sessions;
 function command(executable, args, options = {}) {
   const result = spawnSync(executable, args, { encoding: 'utf8', timeout: 180_000, maxBuffer: 16 * 1024 * 1024, ...options });
@@ -45,6 +47,7 @@ async function main() {
   const contextHost = docker(['context', 'inspect', '--format', '{{.Endpoints.docker.Host}}']).trim();
   const dockerHost = process.env.DOCKER_CONTEXT ? contextHost : process.env.DOCKER_HOST || contextHost;
   assert.match(dockerHost, /^unix:\/\//, 'a local Docker socket is required');
+  process.env.DOCKER_HOST = dockerHost; delete process.env.DOCKER_CONTEXT;
   report.phase = 'isolated-source-setup';
   command(join(root, 'bin/baas'), ['setup', 'supabase'], { env: { ...process.env, BAAS_RUNTIME_DIR: dir, BAAS_VERSION_PROFILE: 'realworld-api-v5' } });
   report.source_ref = readFileSync(join(dir, 'supabase/.baas-ref'), 'utf8').trim();
@@ -91,6 +94,15 @@ async function main() {
   assert.ok(ready, 'bounded native Auth readiness failed');
   report.phase = 'schema-and-fixture';
   sql(readFileSync(join(shared, 'sql/postgres-schema.sql'), 'utf8') + '\n' + readFileSync(join(shared, 'sql/supabase-rls.sql'), 'utf8'));
+  if (scale) {
+    report.phase = 'declared-scale';
+    report.scale = await runSupabaseScaleProbe({ sql, createClient, base, anon, call, dir, async createUser(email, password) {
+      const result = await call('/auth/v1/admin/users', { method: 'POST', key: service, token: service, body: { email, password, email_confirm: true } });
+      assert.equal(result.ok, true); return result.data;
+    } });
+    report.local_checks_passed = report.scale.passed;
+    return;
+  }
   const users = [];
   for (const role of ['owner', 'admin', 'member', 'outsider']) {
     const email = `${role}@v5-probe.example.test`, password = `V5-probe-${role}-Aa91!`;
@@ -140,13 +152,24 @@ async function main() {
     async 'actor-binding'() {
       const before = state();
       for (const creator_id of ['owner', 'outsider']) await denied('tasks', { id: 'spoof', organization_id: 'orga', project_id: 'projecta', creator_id, title: 'Spoof', description: '', status: 'todo', priority: 'low', created_at: now, updated_at: now });
-      await denied('tasks?id=eq.taska', { creator_id: 'outsider' }); assert.equal(state(), before); return true;
+      await denied('tasks?id=eq.taska', { creator_id: 'outsider' });
+      const identities = () => sql("SELECT jsonb_build_object('users',(SELECT jsonb_agg(to_jsonb(u) ORDER BY id) FROM public.users u),'memberships',(SELECT jsonb_agg(to_jsonb(m) ORDER BY id) FROM public.memberships m),'comments',(SELECT jsonb_agg(to_jsonb(c) ORDER BY id) FROM public.comments c))").trim();
+      const unchanged = identities();
+      for (const body of [{ id: 'newidentity' }, { auth_subject: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' }, { email: 'changed@v5-probe.example.test' }]) await denied('users?id=eq.member', body);
+      for (const body of [{ organization_id: 'orga' }, { user_id: 'member' }]) await denied('memberships?id=eq.mmember', body, sessions.owner);
+      for (const body of [{ organization_id: 'orga' }, { project_id: 'projecta' }, { task_id: 'taska' }, { author_id: 'owner' }]) await denied('comments?id=eq.commenta', body, sessions.owner);
+      assert.equal(identities(), unchanged);
+      assert.equal(state(), before); return true;
     },
     async 'server-integrity'() {
       const before = state();
       const payload = { id: 'invalid', organization_id: 'orga', project_id: 'projecta', creator_id: 'member', title: 'Invalid', description: '', status: 'todo', priority: 'low', created_at: now, updated_at: now };
+      const control = await call('/rest/v1/tasks', { method: 'POST', token: member.accessToken, body: { ...payload, id: 'validcontrol', title: 'Valid native integrity control' } });
+      assert.equal(control.ok, true); assert.equal(control.data[0].id, 'validcontrol');
+      const unchanged = state();
       for (const changes of [{ project_id: 'projectb' }, { assignee_id: 'outsider' }, { status: 'invalid' }, { priority: 'invalid' }, { title: '' }]) await denied('tasks', { ...payload, ...changes });
-      assert.equal(state(), before); return true;
+      assert.notEqual(unchanged, before);
+      assert.equal(state(), unchanged); return true;
     },
     async 'atomic-activity'() {
       task = await member.createTask({ ...scope, title: 'V5 created', description: '' });
@@ -181,8 +204,12 @@ async function main() {
   assert.equal(report.local_checks_passed, true, 'native assertions failed; inspect private report');
 }
 try { await main(); }
-catch (error) { report.failed = true; report.failure_type = error?.name ?? 'Error'; process.exitCode = 1; }
+catch (error) { report.failed = true; report.failure_type = error?.name ?? 'Error'; if (error?.cleanupErrors) report.session_cleanup_failure_types = error.cleanupErrors.map(item => item?.name ?? 'Error'); process.exitCode = 1; }
 finally {
+  if (scale && !report.scale) {
+    try { report.scale = JSON.parse(readFileSync(join(dir, 'scale-evidence.json'), 'utf8')); }
+    catch (error) { if (error.code !== 'ENOENT') { report.evidence_read_failed = true; process.exitCode = 1; } }
+  }
   if (started) {
     try { docker([...compose, 'down', '--volumes', '--remove-orphans']); report.cleanup = true; }
     catch { report.cleanup_failed = true; process.exitCode = 1; }

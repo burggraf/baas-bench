@@ -1,10 +1,10 @@
 # Local conformance progress (2026-10-01)
 
-**Status:** bounded native-stack probes passed for Supabase and TrailBase on synthetic fixtures. Neither candidate is qualified. V5 run and publication guards remain in place. No million-record seed, capacity campaign, comparative result, or publication has been performed or authorized.
+**Status:** bounded native-stack probes passed for Supabase and TrailBase on synthetic fixtures. Neither candidate is qualified. V5 run and publication guards remain in place. Declared-scale local fixture/reset testing is now authorized and in progress. No capacity campaign, comparative result, or publication has been performed or authorized.
 
 ## Authorization and spend
 
-The user authorized further local conformance testing without per-test approval and Linode testing only within a strict **$2.00 additional-usage cap** starting 2026-10-01 16:34 UTC. No Linode resources were used; tracked Linode spend remains **$0.00**. Testing approval does not authorize comparative capacity campaigns or publication.
+The user authorized further local conformance testing without per-test approval and Linode testing only within a strict **$2.00 additional-usage cap** starting 2026-10-01 16:34 UTC. No Linode resources were used; tracked Linode spend remains **$0.00**. The user subsequently authorized declared-scale local conformance: 1,000,000 application records and 16,000 native Auth accounts per backend, one disposable stack at a time. Testing approval does not authorize comparative capacity campaigns or publication.
 
 ## Supabase native stack
 
@@ -44,6 +44,35 @@ The reports are `.runtime/conformance-v5/trailbase-37jHqH/report.json` and
 `.runtime/conformance-v5/supabase-CV5TVX/report.json`. Owned containers, volumes
 and depots/source/config were removed after both passing probes. Linode spend
 remains $0.00. Successful synthetic assertions do not remove either hard guard.
+
+## Declared-scale local work in progress
+
+The first owned TrailBase attempt, `.runtime/conformance-v5/trailbase-7JRCNT/`,
+confirmed 1,000,000 seeded application records and 16,000 native Auth accounts,
+then reached its first reset. Its administrative query hit the harness's
+30-second timeout; the reset result is unconfirmed, not a capacity or backend
+eligibility finding. Its container/depot were removed. A fresh retry uses a
+bounded three-minute administrative query deadline, without changing measured
+API deadlines. Its private `progress.json` records confirmed counts and phases.
+The retry, `.runtime/conformance-v5/trailbase-5aLTY5/`, verified every logical
+fixture digest and all 16,000 native identity mappings. Its first complete reset
+restored application and native Auth digests, rejected the ended refresh session,
+and passed fresh login. Its private `scale-evidence.json` preserves that one
+successful cycle. The attempt failed with `FetchError` during the second reset/
+verification phase; the report lacks an HTTP status, so the precise failure
+remains unconfirmed. Both the owned container and depot were removed.
+
+The SDK attempts token refresh one minute before JWT expiry. The failure occurred
+about 59 minutes after controller login, and restoring `_user` deletes the
+controller's refresh session too. The procedure now explicitly creates a fresh
+privileged controller session after an acknowledged restore, without retrying the
+restore or preserving old workload sessions. This correction still requires a
+fresh native check. It does not change actor authentication or API deadlines.
+
+Supabase declared-scale testing started only after confirmed TrailBase cleanup.
+No full-scale passing result is claimed: two complete mutation/reset cycles are
+required. Identical warm-up and the actual measurement lifecycle remain separate
+qualification gates.
 
 ## Remaining gates
 

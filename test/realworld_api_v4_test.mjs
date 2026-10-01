@@ -469,18 +469,27 @@ test('Supabase timeouts are scored errors, not integrity failures that abort the
   await assert.rejects(adapter.listTasks({ organizationId: 'org', projectId: 'prj' }), error => error.classification === 'timeout' && !isIntegrityError(error));
   const sdkTimeout = createSupabaseAdapter({ sdkCreateClient: () => ({ auth: { signInWithPassword: async () => ({ error: { status: 0, message: 'Supabase request timed out' } }) } }) });
   await assert.rejects(sdkTimeout.createSession({ email: 'u@example.test', password: 'secret' }), error => error.classification === 'timeout' && !isIntegrityError(error));
-  const session = { listTasks: args => adapter.listTasks(args), cancelPending() {}, async close() {} };
+  let elapsed = 0;
+  const stageClock = {
+    now: () => elapsed,
+    sleep: (milliseconds, signal) => milliseconds === 0 ? Promise.resolve() : new Promise((_, reject) => {
+      const abort = () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+      if (signal.aborted) abort(); else signal.addEventListener('abort', abort, { once: true });
+    }),
+  };
+  const session = { async listTasks(args) { try { return await adapter.listTasks(args); } finally { elapsed += 10; } }, cancelPending() {}, async close() {} };
   const result = await runWorkload({ createSession: async () => session }, {
     seed: 42, timeoutMs: 10, thinkTimeMs: { min: 0, max: 0 },
     weights: { dashboard: 0, taskList: 100, taskDetail: 0, createTask: 0, updateTask: 0, addComment: 0, search: 0, profileUpdate: 0, signIn: 0 },
-  }, { users: [{ credentials: { email: 'u@example.test', password: 'secret' }, organizationId: 'org', projectId: 'prj', taskId: 'tsk' }], durationMs: 30 });
+  }, { ...stageClock, users: [{ credentials: { email: 'u@example.test', password: 'secret' }, organizationId: 'org', projectId: 'prj', taskId: 'tsk' }], durationMs: 30 });
   assert.equal(result.stageFailed, false);
-  assert.ok(result.failedWorkflowCount > 1);
+  assert.equal(result.failedWorkflowCount, 3);
+  elapsed = 0;
   assert.equal(isIntegrityError(new Error('Task crossed project boundary')), true);
   const invalid = await runWorkload({ createSession: async () => ({ ...session, listTasks: async () => { throw new Error('Task crossed project boundary'); } }) }, {
     seed: 42, timeoutMs: 10, thinkTimeMs: { min: 0, max: 0 },
     weights: { dashboard: 0, taskList: 100, taskDetail: 0, createTask: 0, updateTask: 0, addComment: 0, search: 0, profileUpdate: 0, signIn: 0 },
-  }, { users: [{ credentials: { email: 'u@example.test', password: 'secret' }, organizationId: 'org', projectId: 'prj', taskId: 'tsk' }], durationMs: 30 });
+  }, { ...stageClock, users: [{ credentials: { email: 'u@example.test', password: 'secret' }, organizationId: 'org', projectId: 'prj', taskId: 'tsk' }], durationMs: 30 });
   assert.equal(invalid.stageFailed, true);
   assert.deepEqual(invalid.failureReasons, ['integrity_error']);
 });

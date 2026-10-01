@@ -82,10 +82,47 @@ assertions. Both intentionally leave declared-scale fixture/reset evidence
 missing; their reports cannot admit a case. The Supabase source fetch and local
 setup are network operations, not paid Linode provisioning.
 
+## Declared-scale fixture/reset probes
+
+The user separately authorized these **local-only** checks on 2026-10-01.
+Run one backend at a time; never run these concurrently or against an existing
+stack. They keep the same resource bounds and ownership/cleanup as above:
+
+```sh
+node test/native_v5_trailbase_probe.mjs --local-declared-scale
+# Only after TrailBase cleanup:
+node test/native_v5_supabase_probe.mjs --local-declared-scale
+```
+
+Each seeds the existing seed-42 million-record fixture and 16,000 native Auth
+accounts using native password defaults. It compares every logical row via
+ordered SHA-256 streams against independently generated expected rows, verifies
+all application/Auth identity mappings, snapshots the complete owned baseline,
+and exercises two mutation/reset cycles. Modified seeded profiles/tasks/comments/
+roles and newly created tasks/comments/activity/Auth accounts must disappear or
+be restored. Native Auth state is restored and compared only in process; refresh
+sessions must end and fresh password sign-in must work. Immediate invalidation
+of already-issued stateless access JWTs is not claimed by the refresh check.
+
+A private `progress.json` records phase and confirmed application/Auth counts;
+`scale-evidence.json` retains verified baseline digests and each completed reset
+cycle even if a later check fails. Reports contain only hashes/counts and outcomes,
+never raw Auth snapshots. Cleanup attempts every opened actor session and preserves
+the original failure alongside cleanup failure types. TrailBase controller Auth is
+renewed after an acknowledged Auth restore, since that restore invalidates its
+refresh session too; ambiguous restore outcomes are never automatically retried. These
+are fixture/reset diagnostics, not a capacity search, a 120-second/50-user warm-up
+qualification, or proof that the full native adversarial suite has passed at
+scale. Both V5 hard guards remain. Do not pool the small- and full-scale reports
+into automatic admission evidence.
+
 ## Pending
 - Expand adversarial coverage, including actual membership removal on a live
-  session (the current role check covers promotion/demotion only), protected
-  identity-column writes, and the remaining value/relationship corpus.
-- Add complete fixture identity and Auth/session reset checks at declared scale.
+  session (the current role check covers promotion/demotion only) and the remaining
+  value/relationship corpus. Protected user/membership/comment identity-column
+  write probes and valid raw-write controls are now implemented but await fresh
+  native runs; older synthetic findings do not cover these additions.
+- Establish passing results for both complete declared-scale fixture identity and
+  Auth/session reset procedures; one successful cycle is insufficient.
 - Qualify reset/verify/identical-warm-up/measure integration and bind native
   evidence to frozen definitions before reconsidering either hard guard.
