@@ -1,5 +1,6 @@
 import { fork } from 'node:child_process';
 import { availableParallelism } from 'node:os';
+import { fileURLToPath } from 'node:url';
 
 // Three workload processes leave one of the pilot's four cores for coordination.
 export const WORKLOAD_PROCESSES = 3;
@@ -28,7 +29,7 @@ export async function runParallelWorkload(platform, config, options) {
       const env = { ...process.env };
       delete env.LINODE_TOKEN;
       delete env.BAAS_BENCH_V4_PROGRESS_FD;
-      const child = fork(new URL('./workload-worker.mjs', import.meta.url), [], { env, execArgv: [], stdio: ['ignore', 'ignore', 'ignore', 'ipc'], serialization: 'advanced' });
+      const child = fork(fileURLToPath(new URL('./workload-worker.mjs', import.meta.url)), [], { env, execArgv: [], stdio: ['ignore', 'ignore', 'ignore', 'ipc'], serialization: 'advanced' });
       const worker = { child, offset, sampleCount: 0, ready: deferred(), ended: deferred(), result: deferred(), exited: deferred() };
       workers.push(worker);
       child.on('error', error => failure.reject(error));
