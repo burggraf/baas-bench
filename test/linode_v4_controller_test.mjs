@@ -142,7 +142,7 @@ test('recovery CLI fails closed without an explicit deletion confirmation', () =
 
 test('pilot CLI fails before API work without approval or deletion confirmation', () => {
   const cli = fileURLToPath(new URL('../bin/bench-v4-linode.mjs', import.meta.url));
-  const noApproval = spawnSync(process.execPath, [cli, 'pilot', '/tmp/pilot-inventory.json', '--platform', 'trailbase', '--run-id', 'obs-20260929-abc123', '--campaign', '/tmp/pilot-ledger.json', '--controller-cidr', '203.0.113.4/32', '--confirm-delete', 'obs-20260929-abc123'], { encoding: 'utf8', env: { ...process.env, LINODE_TOKEN: 'controller-secret', LIVE_APPROVAL_PHRASE: '' } });
+  const noApproval = spawnSync(process.execPath, [cli, 'pilot', '/tmp/pilot-inventory.json', '--platform', 'trailbase', '--max-reserve-usd', '1.94', '--run-id', 'obs-20260929-abc123', '--campaign', '/tmp/pilot-ledger.json', '--controller-cidr', '203.0.113.4/32', '--confirm-delete', 'obs-20260929-abc123'], { encoding: 'utf8', env: { ...process.env, LINODE_TOKEN: 'controller-secret', LIVE_APPROVAL_PHRASE: '' } });
   assert.notEqual(noApproval.status, 0);
   assert.match(noApproval.stderr, /LIVE_APPROVAL_PHRASE/);
   const wrongDelete = spawnSync(process.execPath, [cli, 'pilot', '/tmp/pilot-inventory.json', '--run-id', 'obs-20260929-abc123', '--campaign', '/tmp/pilot-ledger.json', '--controller-cidr', '203.0.113.4/32', '--confirm-delete', 'other-run'], { encoding: 'utf8', env: { ...process.env, LINODE_TOKEN: 'controller-secret', LIVE_APPROVAL_PHRASE: 'I_APPROVE_V4_LINODE_ACTIONS_UP_TO_USD_30' } });
@@ -376,6 +376,28 @@ test('pilot workflow runs and verifies the selected TrailBase case with its ephe
   assert.equal(result.profile.region, 'us-lax');
   assert.deepEqual(events, ['deploy', 'run', 'verify:/tmp/bundle', 'agent-stop', 'key-cleanup']);
   await assert.rejects(stat(sshConfigPath), { code: 'ENOENT' });
+});
+
+test('pilot reservation cap shortens a run and rejects budgets below one billable hour', async () => {
+  const { runPilot } = await import('../benchmark-sets/realworld-api-v4/shared/lib/pilot-workflow.mjs');
+  const { estimatePairCost } = await load();
+  let observedMaxHours;
+  let keyCreated = false;
+  const common = {
+    platform: 'trailbase', maxHours: 8, api: { request() {}, list: async () => [{ label: 'mba-m1', ssh_key: 'ssh-ed25519 AAAATEST mba-m1' }] },
+    config: { runId: 'obs-budget123', image: 'linode/ubuntu24.04' }, repositoryRoot: '/repo', bootstrapScriptPath: '/script', controllerCidr: '203.0.113.4/32',
+    preflight: async () => {}, selectProfile: async () => ({ region: 'us-lax', type: { id: 'g6-dedicated-4', transfer: 5000 }, hourlyUsd: 0.108 }),
+    createKey: async () => { keyCreated = true; return { privateKey: '/tmp/key', publicKey: 'ssh-ed25519 AAAATEST pilot', cleanup: async () => {} }; },
+    createSshConfig: async () => ({ configPath: '/tmp/ssh_config', cleanup: async () => {} }), startAgent: async () => ({ env: { SSH_AUTH_SOCK: '/tmp/agent' }, stop: async () => {} }),
+    observe: async options => { observedMaxHours = options.maxHours; return { result: '/tmp/evidence', estimateUsd: estimatePairCost(0.108, options.maxHours + 1, 0), actualUsd: 0, inventory: {} }; },
+  };
+  await runPilot({ ...common, maxReservationUsd: 0.50 });
+  assert.equal(estimatePairCost(0.108, observedMaxHours + 1, 0), 0.50);
+  const floor = observedMaxHours;
+  keyCreated = false;
+  await assert.rejects(runPilot({ ...common, maxReservationUsd: 0.21 }), /exceeds the remaining approval budget/);
+  assert.equal(keyCreated, false);
+  assert.equal(observedMaxHours, floor);
 });
 
 test('pilot fails before creating its run key when the named Linode SSH key is absent', async () => {

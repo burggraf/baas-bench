@@ -3,14 +3,15 @@ import { createSshConfig, bindBackend } from './ssh-config.mjs';
 import { createEphemeralSshKey, startSshAgent } from './ephemeral-ssh.mjs';
 import { readBootstrapScript } from './remote-bootstrap.mjs';
 import { bootstrapAndDeploy } from './observation-workflow.mjs';
-import { resolveHardwareProfile, runObservation } from './linode-controller.mjs';
+import { estimatePairCost, resolveHardwareProfile, runObservation } from './linode-controller.mjs';
 import { PILOT_PLATFORMS, preflightPilot, runBench, verifyPilotBundle } from './bench-execution.mjs';
 import { createProgress, emitProgress } from './progress.mjs';
 
 export async function runPilot(options) {
   const { api, config, repositoryRoot, bootstrapScriptPath, inventoryPath, campaignPath, controllerCidr, maxHours, transferReserveUsd, liveApproval, deleteConfirmation } = options;
   const platform = options.platform ?? 'supabase';
-  if (!PILOT_PLATFORMS.includes(platform) || !api?.request || !config?.runId || typeof repositoryRoot !== 'string' || typeof bootstrapScriptPath !== 'string' || typeof controllerCidr !== 'string') throw new Error('invalid V4 pilot configuration');
+  const maxReservationUsd = options.maxReservationUsd;
+  if (!PILOT_PLATFORMS.includes(platform) || (maxReservationUsd !== undefined && (!Number.isFinite(maxReservationUsd) || maxReservationUsd <= 0 || maxReservationUsd > 30)) || !api?.request || !config?.runId || typeof repositoryRoot !== 'string' || typeof bootstrapScriptPath !== 'string' || typeof controllerCidr !== 'string') throw new Error('invalid V4 pilot configuration');
   const selectProfile = options.selectProfile ?? resolveHardwareProfile;
   const createKey = options.createKey ?? createEphemeralSshKey;
   const startAgent = options.startAgent ?? startSshAgent;
@@ -29,10 +30,16 @@ export async function runPilot(options) {
   try {
     await (options.preflight ?? preflightPilot)({ repositoryRoot, platform });
     const profile = await selectProfile(api);
+    const transferReserve = Number(profile.type.transfer) > 0 ? 0 : transferReserveUsd;
+    let observationMaxHours = maxHours;
+    if (maxReservationUsd !== undefined) {
+      const affordableHours = (maxReservationUsd - transferReserve + 0.005) / (2 * profile.hourlyUsd) - 1;
+      observationMaxHours = Math.min(maxHours, Math.floor(affordableHours * 100) / 100);
+      if (observationMaxHours <= 0 || estimatePairCost(profile.hourlyUsd, observationMaxHours + 1, transferReserve) > maxReservationUsd) throw new Error('estimated V4 reservation exceeds the remaining approval budget');
+    }
     if (typeof api.list !== 'function') throw new Error('Linode account SSH key listing is unavailable');
     const accountKeys = (await api.list('/v4/profile/sshkeys')).filter(item => item?.label === 'mba-m1');
     if (accountKeys.length !== 1 || typeof accountKeys[0].ssh_key !== 'string') throw new Error('Linode account SSH key "mba-m1" is missing or ambiguous');
-    const transferReserve = Number(profile.type.transfer) > 0 ? 0 : transferReserveUsd;
     key = await createKey();
     sshState = await (options.createSshConfig ?? createSshConfig)();
     agent = await startAgent({ privateKey: key.privateKey });
@@ -42,7 +49,7 @@ export async function runPilot(options) {
       ...options,
       api,
       config: { ...config, region: profile.region, type: profile.type.id, controllerCidr, sshPublicKey: key.publicKey, additionalSshPublicKeys: [accountKeys[0].ssh_key] },
-      inventoryPath, campaignPath, hourlyUsd: profile.hourlyUsd, maxHours, transferReserveUsd: transferReserve, liveApproval, deleteConfirmation,
+      inventoryPath, campaignPath, hourlyUsd: profile.hourlyUsd, maxHours: observationMaxHours, transferReserveUsd: transferReserve, liveApproval, deleteConfirmation,
       onStatus: status => progress.phase(status === 'running' ? 'benchmark' : status === 'starting' ? 'preflight' : status),
       bootstrap: async ({ inventory, signal }) => {
         await bindBackend(sshState.configPath, inventory.resources.backend);
