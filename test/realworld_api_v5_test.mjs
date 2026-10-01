@@ -53,6 +53,28 @@ test('V5 exact pagination totals survive empty beyond-end pages and missing tota
   await assert.rejects(createSupabaseAdapter({ client: { from() { return builder; } } }).listTasks({ organizationId: 'org', projectId: 'project' }), /count|total/i);
 });
 
+test('V5 Supabase pages beyond the final range return an empty page with the real exact count', async () => {
+  const calls = [];
+  const client = { from(table) {
+    const builder = {
+      table, options: {}, select(_fields, options) { this.options = options ?? {}; return this; },
+      eq() { return this; }, is() { return this; }, ilike() { return this; }, order() { return this; }, range() { return this; },
+      then(resolve) { calls.push({ table: this.table, options: this.options }); resolve(this.options.head ? { data: null, count: 1 } : { error: { status: 416, code: 'PGRST103', message: 'Requested range not satisfiable' } }); },
+    };
+    return builder;
+  } };
+  const adapter = createSupabaseAdapter({ client });
+  const [tasks, comments, search] = await Promise.all([
+    adapter.listTasks({ organizationId: 'org', projectId: 'project', page: 1, pageSize: 1 }),
+    adapter.listComments({ organizationId: 'org', projectId: 'project', taskId: 'task', page: 1, pageSize: 1 }),
+    adapter.searchTasks({ organizationId: 'org', projectId: 'project', query: 'needle', page: 1, pageSize: 1 }),
+  ]);
+  for (const page of [tasks, comments, search]) assert.deepEqual({ items: page.items, total: page.total, hasNext: page.hasNext }, { items: [], total: 1, hasNext: false });
+  assert.equal(calls.length, 6);
+  assert.ok(calls.filter(call => call.options.head).every(call => call.options.count === 'exact'));
+  await assert.rejects(adapter.listTasks({ organizationId: 'org', projectId: 'project', page: Number.MAX_SAFE_INTEGER, pageSize: 2 }), /invalid page/);
+});
+
 test('V5 TrailBase schema enforces relationships and provides atomic mutation activity triggers', () => {
   const db = new DatabaseSync(':memory:');
   try {

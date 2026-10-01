@@ -1,56 +1,43 @@
-# Bounded local conformance progress (2026-10-01)
+# Local conformance progress (2026-10-01)
 
-**TrailBase native probe: partial pass, not case qualification. Supabase probe:
-pending. Capacity measurement/publication remain blocked.** The user's approval
-was limited to one disposable local stack at a time, 45 minutes total, 4 CPUs and
-8 GiB. No cloud resources, million-row seed, comparative load, or publication.
+**Status:** bounded native-stack probes passed for Supabase and TrailBase on synthetic fixtures. Neither candidate is qualified. V5 run and publication guards remain in place. No million-record seed, capacity campaign, comparative result, or publication has been performed or authorized.
 
-TrailBase `0.34.2` was run from its pinned arm64 digest in an owned container
-limited to 2 CPUs / 4 GiB, localhost-only port binding, and a private ephemeral
-bind-mounted depot. The container was removed after the probe. No pre-existing
-containers, images, volumes, stack data or credentials were mutated. Two startup
-attempts failed before health (first missing required core config; second loaded
-record APIs before their migration). The third bootstrapped core config, applied
-the owned V5 migration, then reloaded the candidate ACL config. Health and admin
-schema inspection succeeded.
+## Authorization and spend
 
-A bounded native Record API smoke probe with three synthetic auth accounts
-observed:
+The user authorized further local conformance testing without per-test approval and Linode testing only within a strict **$2.00 additional-usage cap** starting 2026-10-01 16:34 UTC. No Linode resources were used; tracked Linode spend remains **$0.00**. Testing approval does not authorize comparative capacity campaigns or publication.
 
-- self/peer read allowed, outsider denied;
-- member project mutation and editing another author's comment denied;
-- forged creator/actor denied;
-- authenticated task creation generated one actor-attributed task activity;
-- case-insensitive regexp search, FK/enum/nonempty rejection and app-profile-only
-  update/password re-login behaved as expected;
-- an acknowledged task write was readable after restarting the same container;
-- a baseline reset restored the seeded profile/task/comment/role and removed the
-  created task/activity.
+## Supabase native stack
 
-The detailed sanitized assertion report and private logs/inventory are under the
-ignored `.runtime/conformance-v5/local-20261001T154018Z/`. A follow-up installed a temporary failure trigger as an owned TrailBase
-migration, confirmed the trigger existed in native `sqlite_schema`, observed the
-Record API return HTTP 500, and verified both task contents and activity count
-were unchanged. A later owned migration removed the trigger. This proves the
-specific tested SQLite mutation rollback path; it does not expose the internal
-SQLite error text through the SDK response. Successful task update, comment
-create and comment update each yielded exactly one actor-attributed activity.
-The native admin connection reported `journal_mode=wal`, `synchronous=1`
-(`NORMAL`), and `foreign_keys=1`. The bounded docker restart reread an acknowledged
-write. These are local observations for pinned TrailBase 0.34.2, not universal
-power-loss guarantees. The probe did not cover every negative relationship,
-page/count edge, role revocation on existing sessions, Auth reset, the full search
-metacharacter corpus, or a million-row fixture identity digest.
+A private, isolated Compose project used the V5-pinned Supabase source revision `e693f206f5050b0004a86e12e533bb75ba2a9c76`, localhost API/DB bindings, regenerated local secrets, a unique Compose project, and a fresh disposable database. The pinned stack included Postgres 17.6.1.136, GoTrue 2.196.0, PostgREST 14.17, Realtime 2.134.10, Storage 1.74.0, and the pinned Envoy digest. An early attempt copied an existing Postgres data directory with credentials from its original stack; it failed authentication. That private copy was removed before the passing fresh-database run; the original runtime was not changed.
 
-Therefore TrailBase remains unqualified. For Supabase, the committed
-`test/supabase_v5_rls_test.sql` was run against a fresh disposable local PostgreSQL
-17.9 cluster with `fsync=on`, `synchronous_commit=on`, `full_page_writes=on`; both
-the base PostgreSQL policy and V5 statement-scoped RLS overlay passed the same
-authorization/relationship/activity SQL assertions. This is real PostgreSQL
-policy/trigger evidence, **not** a Supabase Auth/PostgREST stack test, so native
-API integration and acknowledged-write restart qualification remain pending.
-The source-level fixes, mock tests and in-memory SQLite tests do not substitute
-for those remaining gates. The next bounded step is an isolated Supabase native conformance probe within
-the remaining approved window.
-If the deadline is reached, stop and request fresh approval rather than extending
-or silently lowering the test scope.
+The latest sanitized report is `.runtime/conformance-v5/local-20261001T1634Z/supabase-probe.json`. On four synthetic Auth users and a two-tenant fixture, the probe passed checks for:
+
+- baseline and optimized PostgreSQL RLS/trigger SQL;
+- native Auth sign-in and self/peer versus outsider visibility;
+- literal search (including `%`, `_`, and backslash), exact counts, null filters, and empty beyond-end pages;
+- manager-only project writes, comment authorship, forged actors, and cross-tenant relationships;
+- V5 adapter task creation/activity, live manager promotion and revocation on the same JWT, and application-only profile changes with unchanged Auth metadata and password;
+- an injected activity-trigger failure rolling back both the adapter mutation and activity;
+- acknowledged data surviving a bounded Postgres-container restart; and
+- restoration of the synthetic app/Auth baseline, including row counts, profile values, roles, assignee, comments, and empty activity state.
+
+The observed database settings were `fsync=on`, `synchronous_commit=on`, `full_page_writes=on`, and `wal_level=logical`. This proves visibility after a process restart for this local stack, not power-loss durability. The SQL-policy test ran in a separate temporary database that was dropped afterward. The Compose project and its owned containers/volumes are removed after the probe.
+
+The native run exposed one adapter mismatch: PostgREST returns `PGRST103`/HTTP 416 for a page starting beyond the last row, rather than an empty page. The Supabase adapter now retries that uncommon case with an exact-count HEAD request and returns the contract's empty page/count. A regression test covers task, comment, and search pagination.
+
+## TrailBase native probe
+
+A fresh isolated TrailBase 0.34.2 stack used the pinned image digest, localhost-only binding, a private ephemeral depot, the V5 migration and ACL config, and four synthetic Auth users across two tenants. The private test-only activity-failure trigger was installed through a separate migration before Record APIs loaded; no external SQLite writer or existing runtime was used.
+
+The latest sanitized report, `.runtime/conformance-v5/local-20261001T1740Z/trailbase/trailbase-probe.json`, records **10 passing assertions**: native self/peer reads and outsider row filtering; literal search with `%`, `_`, backslash, brackets, and regex punctuation; exact-count/null-filter/empty beyond-end pagination; denied member project and another-author comment edits; actor binding, cross-tenant rejection, and actor-attributed activity; live role promotion/revocation on the same session; application-only profile change with preserved Auth email/password and successful re-login; failure-trigger rollback of both task and activity; acknowledged write visibility after a bounded process restart; and exact restoration of the small app/Auth fixture, including role, profile, task, assignee, comment, and activity state. Settings were `journal_mode=wal`, `synchronous=1` (`NORMAL`), and `foreign_keys=1`. This is process-restart evidence only, not power-loss durability.
+
+The earlier partial probe and its inventory remain under `.runtime/conformance-v5/local-20261001T154018Z/`; the latest private probe artifacts are under `.runtime/conformance-v5/local-20261001T1740Z/trailbase/`. These small synthetic fixtures do not establish full Auth-account teardown, million-record identity/reset conformance, or the repeated runner reset/warm-up lifecycle. TrailBase remains unqualified.
+
+## Remaining gates
+
+- Promote the private native probes into maintainable committed conformance procedures and bind their verified evidence to V5 run admission/publication. Current private reports and mocked/in-memory tests are not admission evidence.
+- Complete TrailBase and Supabase adversarial, reset/session, and fixture-integrity coverage at the declared dataset scale.
+- Decide eligibility for the other audited cases; exclude any that cannot meet the shared contract.
+- Qualify the corrected runner, repeated baseline/reset/warm-up lifecycle, and measurement profile before enabling any V5 benchmark execution.
+
+No comparative capacity campaign or publication is allowed by the current testing authorization. Keep both V5 hard guards until all required gates are independently satisfied.
