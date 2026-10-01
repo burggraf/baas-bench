@@ -4,7 +4,19 @@
 
 **Priority:** Highest next implementation priority after the multi-core runner work in the other terminal is complete.
 
-**Status:** Queued by the user; planning only. Detailed contract decisions and any new paid runs require approval.
+**Status:** Implementation authorized; phases 0–2 recorded and initial phase 3/4 repairs in progress. No native case or measurement profile is qualified. New paid runs remain separately gated.
+
+## Approved handoff and contract record — 2026-10-01
+
+The user confirmed completed multi-core handoff and authorized the clean `0e75c15` baseline. The completed two-group, read-only audit is synthesized in [the V5 eight-case matrix](../../benchmark-sets/realworld-api-v5/CONFORMANCE.md). Historical V3/V4 definitions and evidence are unchanged.
+
+Approved decisions: create V5; retain self/organization-peer reads, native actor binding, server-enforced relationships/values and one atomic activity per task/comment insert/update; application-only profile mutation without Auth changes; complete baseline restoration plus identical warm-up before every measured adaptive stage; audit but exclude Neon SQL/application-owned auth from native API comparison; require commit before acknowledgment, documented durable settings and a bounded process-restart persistence check, without power-loss claims. Cases unable to satisfy these guarantees are excluded, not assigned zero capacity.
+
+The [V5 methodology](../../benchmark-sets/realworld-api-v5/benchmarks/project-management-capacity/METHODOLOGY.md) records these decisions. Initial regressions were observed failing before profile, search/null/count, SQLite relationship/activity and CLI-admission repairs. V5 contains candidate native policies/schema, a mandatory-finding validator/producer and a baseline-stage sequencing helper. In-memory SQLite executes constraints, ACL expressions and activity failure rollback. These checks are not a native API qualification.
+
+Still pending: concrete native integration probes, complete restore/auth/session lifecycle, acknowledged-write restart checks, native persistence/config audits, candidate deployment and multicore measurement wiring/qualification. V5 execution is blocked before orchestration; publication and direct hooks also reject it. No cloud campaign is authorized by this progress record.
+
+The user subsequently authorized one bounded local native-integration attempt: disposable Docker projects for Supabase/TrailBase, one platform at a time, at most 45 minutes total, 4 CPUs and 8 GiB for the owned stack. Small synthetic fixtures, activity-write failure injection, owned process restarts and cleanup of only attempt-owned resources are allowed. Existing stacks/data remain untouched. Stop/report on the deadline or insufficient budget; no automatic extension, paid resources, million-record capacity run or publication. The private `.runtime/conformance-v5/` inventory records the actual deadline and ownership.
 
 **Dependency:** The multi-core owner records the completed revision, regression results, runner profile, remaining issues, and the ownership/cleanup state of any live resources before handing off. Do not interrupt that work or infer completion from an idle terminal or stale heartbeat.
 
@@ -154,7 +166,7 @@ sh -n bin/baas bin/bench test/baas_test.sh test/bench_test.sh
 sh test/baas_test.sh
 sh test/bench_test.sh
 bin/bench validate all
-node --test test/realworld_api_v4_test.mjs test/linode_v4_progress_test.mjs test/linode_v4_readiness_test.mjs test/linode_v4_controller_test.mjs test/linode_v4_multicore_test.mjs
+node --test test/realworld_api_v4_test.mjs test/realworld_api_v5_test.mjs test/linode_v4_progress_test.mjs test/linode_v4_readiness_test.mjs test/linode_v4_controller_test.mjs test/linode_v4_multicore_test.mjs
 git diff --check
 ```
 
@@ -162,10 +174,10 @@ Add new conformance regressions to the relevant existing suite or a small dedica
 
 ## Completion checklist
 
-- [ ] Multi-core owner handoff complete; this is the next highest-priority implementation task.
-- [ ] Historical evidence preserved and documented as non-equivalent diagnostic series.
-- [ ] All eight cases audited; requirement matrix has no unexplained unknowns for admitted cases.
-- [ ] Shared observable contract and material decisions approved.
+- [x] Multi-core owner handoff complete; this is the next highest-priority implementation task.
+- [x] Historical evidence preserved and documented as non-equivalent diagnostic series.
+- [x] All eight cases audited; unknowns documented and no case admitted.
+- [x] Shared observable contract and material decisions approved.
 - [ ] Regressions catch the known semantic gaps and fail comparative admission/publication.
 - [ ] Supabase and TrailBase pass identical real-backend conformance checks.
 - [ ] Every additional campaign case passes the same checks or is explicitly excluded.

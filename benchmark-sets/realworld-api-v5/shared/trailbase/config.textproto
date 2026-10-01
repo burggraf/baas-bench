@@ -1,0 +1,57 @@
+# baas-bench realworld-api-v5; candidate configuration, not integration-qualified.
+# Auth UUID blobs map to users.auth_subject normalized UUID hex.
+# _REQ_FIELDS_ is the pinned v0.34.2 update template's supplied-column CTE.
+email: {}
+server: { application_name: "BaaS Bench V5" }
+auth: {}
+jobs: {}
+record_apis: [{
+  name: "users"
+  table_name: "users"
+  acl_authenticated: [READ, UPDATE]
+  read_access_rule: "lower(_ROW_.auth_subject) = lower(hex(_USER_.id)) OR EXISTS (SELECT 1 FROM memberships mine JOIN users actor ON actor.external_id = mine.user_id JOIN memberships peer ON peer.organization_id = mine.organization_id WHERE lower(actor.auth_subject) = lower(hex(_USER_.id)) AND peer.user_id = _ROW_.external_id)"
+  update_access_rule: "lower(_ROW_.auth_subject) = lower(hex(_USER_.id)) AND NOT EXISTS (SELECT 1 FROM _REQ_FIELDS_ WHERE _ NOT IN ('display_name','updated_at'))"
+}]
+record_apis: [{
+  name: "organizations"
+  table_name: "organizations"
+  acl_authenticated: [READ]
+  read_access_rule: "EXISTS (SELECT 1 FROM memberships m JOIN users u ON u.external_id = m.user_id WHERE m.organization_id = _ROW_.external_id AND lower(u.auth_subject) = lower(hex(_USER_.id)))"
+}]
+record_apis: [{
+  name: "memberships"
+  table_name: "memberships"
+  acl_authenticated: [READ, UPDATE]
+  read_access_rule: "EXISTS (SELECT 1 FROM memberships m JOIN users u ON u.external_id = m.user_id WHERE m.organization_id = _ROW_.organization_id AND lower(u.auth_subject) = lower(hex(_USER_.id)))"
+  update_access_rule: "EXISTS (SELECT 1 FROM memberships m JOIN users u ON u.external_id = m.user_id WHERE m.organization_id = _ROW_.organization_id AND lower(u.auth_subject) = lower(hex(_USER_.id)) AND m.role IN ('owner','admin')) AND NOT EXISTS (SELECT 1 FROM _REQ_FIELDS_ WHERE _ <> 'role')"
+}]
+record_apis: [{
+  name: "projects"
+  table_name: "projects"
+  acl_authenticated: [READ, CREATE, UPDATE]
+  read_access_rule: "EXISTS (SELECT 1 FROM memberships m JOIN users u ON u.external_id = m.user_id WHERE m.organization_id = _ROW_.organization_id AND lower(u.auth_subject) = lower(hex(_USER_.id)))"
+  create_access_rule: "EXISTS (SELECT 1 FROM memberships m JOIN users u ON u.external_id = m.user_id WHERE m.organization_id = _REQ_.organization_id AND lower(u.auth_subject) = lower(hex(_USER_.id)) AND m.role IN ('owner','admin'))"
+  update_access_rule: "EXISTS (SELECT 1 FROM memberships m JOIN users u ON u.external_id = m.user_id WHERE m.organization_id = _ROW_.organization_id AND lower(u.auth_subject) = lower(hex(_USER_.id)) AND m.role IN ('owner','admin')) AND NOT EXISTS (SELECT 1 FROM _REQ_FIELDS_ WHERE _ NOT IN ('name','status','updated_at'))"
+}]
+record_apis: [{
+  name: "tasks"
+  table_name: "tasks"
+  acl_authenticated: [READ, CREATE, UPDATE]
+  read_access_rule: "EXISTS (SELECT 1 FROM memberships m JOIN users u ON u.external_id = m.user_id WHERE m.organization_id = _ROW_.organization_id AND lower(u.auth_subject) = lower(hex(_USER_.id)))"
+  create_access_rule: "EXISTS (SELECT 1 FROM memberships m JOIN users u ON u.external_id = m.user_id WHERE m.organization_id = _REQ_.organization_id AND lower(u.auth_subject) = lower(hex(_USER_.id)) AND u.external_id = _REQ_.creator_id AND u.external_id = _REQ_.last_actor_id)"
+  update_access_rule: "EXISTS (SELECT 1 FROM memberships m JOIN users u ON u.external_id = m.user_id WHERE m.organization_id = _ROW_.organization_id AND lower(u.auth_subject) = lower(hex(_USER_.id)) AND u.external_id = _REQ_.last_actor_id) AND NOT EXISTS (SELECT 1 FROM _REQ_FIELDS_ WHERE _ NOT IN ('title','description','status','priority','due_date','updated_at','last_actor_id'))"
+}]
+record_apis: [{
+  name: "comments"
+  table_name: "comments"
+  acl_authenticated: [READ, CREATE, UPDATE]
+  read_access_rule: "EXISTS (SELECT 1 FROM memberships m JOIN users u ON u.external_id = m.user_id WHERE m.organization_id = _ROW_.organization_id AND lower(u.auth_subject) = lower(hex(_USER_.id)))"
+  create_access_rule: "EXISTS (SELECT 1 FROM memberships m JOIN users u ON u.external_id = m.user_id WHERE m.organization_id = _REQ_.organization_id AND lower(u.auth_subject) = lower(hex(_USER_.id)) AND u.external_id = _REQ_.author_id AND u.external_id = _REQ_.last_actor_id)"
+  update_access_rule: "EXISTS (SELECT 1 FROM memberships m JOIN users u ON u.external_id = m.user_id WHERE m.organization_id = _ROW_.organization_id AND lower(u.auth_subject) = lower(hex(_USER_.id)) AND u.external_id = _REQ_.last_actor_id AND (u.external_id = _ROW_.author_id OR m.role IN ('owner','admin'))) AND NOT EXISTS (SELECT 1 FROM _REQ_FIELDS_ WHERE _ NOT IN ('body','updated_at','last_actor_id'))"
+}]
+record_apis: [{
+  name: "activities"
+  table_name: "activities"
+  acl_authenticated: [READ]
+  read_access_rule: "EXISTS (SELECT 1 FROM memberships m JOIN users u ON u.external_id = m.user_id WHERE m.organization_id = _ROW_.organization_id AND lower(u.auth_subject) = lower(hex(_USER_.id)))"
+}]

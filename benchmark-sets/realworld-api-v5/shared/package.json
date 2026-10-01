@@ -1,0 +1,10 @@
+{
+  "name": "baas-bench-realworld-api-v5",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "dependencies": {
+    "@supabase/supabase-js": "2.117.2",
+    "trailbase": "0.14.1"
+  }
+}

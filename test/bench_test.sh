@@ -221,6 +221,27 @@ jq -e '.os == "Linux" and .architecture == "x86_64" and .docker_server_version =
 [ ! -s "$BENCH_TEST_DOCKER_LOG" ] || fail "remote backend run queried controller Docker"
 [ "$(wc -l < "$BENCH_TEST_SSH_LOG" | tr -d ' ')" -eq 6 ] || fail "remote backend provenance queries were incomplete"
 
+# V5 definitions can be inspected, but unqualified execution/publication is
+# blocked before orchestration, even with dirty/debug overrides or forged flags.
+V5_SET=$BENCH_SETS_DIR/realworld-api-v5
+cp -R "$SET" "$V5_SET"
+sed -i.bench_test 's/^id=core-v1$/id=realworld-api-v5/' "$V5_SET/set.conf"
+rm -f "$V5_SET/set.conf.bench_test"
+cp "$TMP/log" "$TMP/before-v5.log"
+cp "$BENCH_TEST_DOCKER_LOG" "$TMP/before-v5-docker.log"
+if BENCH_LOCAL_RESULTS_DIR="$TMP/v5-results" "$BENCH" run realworld-api-v5 read-throughput supabase rest-api --allow-dirty --keep >"$TMP/v5-run-output" 2>&1; then fail "unqualified V5 execution was accepted"; fi
+grep -q 'V5.*not admitted' "$TMP/v5-run-output" || fail "V5 admission guard did not reject execution"
+cmp -s "$TMP/log" "$TMP/before-v5.log" || fail "unqualified V5 touched lifecycle hooks"
+cmp -s "$BENCH_TEST_DOCKER_LOG" "$TMP/before-v5-docker.log" || fail "unqualified V5 queried Docker"
+[ ! -e "$TMP/v5-results" ] || fail "unqualified V5 created a run bundle"
+mkdir -p "$TMP/v5-forged"
+forged_v5=$TMP/v5-forged/$(basename "$run_dir")
+cp -R "$run_dir" "$forged_v5"
+jq '.set="realworld-api-v5"' "$forged_v5/run.json" > "$TMP/v5-manifest"
+mv "$TMP/v5-manifest" "$forged_v5/run.json"
+if BENCH_LOCAL_RESULTS_DIR="$TMP/v5-forged" "$BENCH" publish "$forged_v5" >"$TMP/v5-publish-output" 2>&1; then fail "unqualified V5 publication was accepted"; fi
+grep -q 'V5.*not admitted' "$TMP/v5-publish-output" || fail "V5 admission guard did not reject publication"
+
 # Every path component is validated before any case path is resolved.
 if "$BENCH" validate 'core-v1/read-throughput/supabase/../rest-api' >/dev/null 2>&1; then
   fail "traversal validation target was accepted"

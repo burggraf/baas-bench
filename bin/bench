@@ -505,6 +505,9 @@ run_case() {
   done
   valid_id "$SET_ID" && valid_id "$BENCHMARK_ID" && valid_id "$PLATFORM" && valid_id "$VARIANT" ||
     error "invalid case path"
+  # V5 is a conformance implementation candidate, not an admitted campaign.
+  # Remove only with native conformance/reset/restart and measurement evidence.
+  [ "$SET_ID" != realworld-api-v5 ] || error "V5 is not admitted: native conformance and measurement qualification are incomplete"
   validate_case "$SET_ID" "$BENCHMARK_ID" "$PLATFORM" "$VARIANT"
   unset BAAS_VERSION_PROFILE
   if [ -f "$ROOT/benchmark-sets/$SET_ID/versions.env" ]; then BAAS_VERSION_PROFILE=$SET_ID; export BAAS_VERSION_PROFILE; fi
@@ -657,6 +660,7 @@ publish_run() {
   run_id=$(jq -r .run_id "$source/run.json")
   valid_id "$set_id" && valid_id "$benchmark_id" && valid_id "$platform" && valid_id "$variant" ||
     error "invalid publication identity"
+  [ "$set_id" != realworld-api-v5 ] || error "V5 is not admitted: comparative publication is blocked"
   printf '%s\n' "$run_id" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$' || error "invalid run id"
   [ "$(basename "$source")" = "$run_id" ] || error "run id does not match source directory"
 
