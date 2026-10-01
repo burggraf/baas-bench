@@ -33,6 +33,18 @@ The latest sanitized report, `.runtime/conformance-v5/local-20261001T1740Z/trail
 
 The earlier partial probe and its inventory remain under `.runtime/conformance-v5/local-20261001T154018Z/`; the latest private probe artifacts are under `.runtime/conformance-v5/local-20261001T1740Z/trailbase/`. These small synthetic fixtures do not establish full Auth-account teardown, million-record identity/reset conformance, or the repeated runner reset/warm-up lifecycle. TrailBase remains unqualified.
 
+## Repeatable procedure work
+
+The shared known-result native assertions and both disposable procedures are
+documented in [NATIVE-CONFORMANCE.md](NATIVE-CONFORMANCE.md). Both procedures
+were run locally: each passed the same **13 implemented mandatory findings** on
+the same four-user/two-tenant fixture; `fixture-integrity` and `reset-baseline`
+remain explicitly failed/missing, so each overall conformance report is false.
+The reports are `.runtime/conformance-v5/trailbase-37jHqH/report.json` and
+`.runtime/conformance-v5/supabase-CV5TVX/report.json`. Owned containers, volumes
+and depots/source/config were removed after both passing probes. Linode spend
+remains $0.00. Successful synthetic assertions do not remove either hard guard.
+
 ## Remaining gates
 
 - Promote the private native probes into maintainable committed conformance procedures and bind their verified evidence to V5 run admission/publication. Current private reports and mocked/in-memory tests are not admission evidence.
