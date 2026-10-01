@@ -120,9 +120,64 @@ sync_runner() {
   v4_ssh -o BatchMode=yes -o ConnectTimeout=5 "$runner_target" "node -e 'if (Number(process.versions.node.split(\".\")[0]) < 22) process.exit(1)' && npm ci --ignore-scripts --prefix '$remote_runtime'"
 }
 
+stop_trailbase_admin_tunnel() {
+  [ -n "${trailbase_tunnel_pid:-}" ] || return 0
+  kill "$trailbase_tunnel_pid" 2>/dev/null || true
+  wait "$trailbase_tunnel_pid" 2>/dev/null || true
+  trailbase_tunnel_pid=
+}
+
+cleanup_trailbase_admin() {
+  stop_trailbase_admin_tunnel
+  if [ "$action" = teardown ]; then rm -f "$runtime_root/trailbase-v4/bootstrap-admin.json"; fi
+}
+
+start_trailbase_admin_tunnel() {
+  validate_backend
+  local_port=$(node -e 'const s=require("node:net").createServer(); s.listen(0,"127.0.0.1",()=>{console.log(s.address().port); s.close()})')
+  case "$local_port" in ''|*[!0-9]*) echo 'could not allocate a local TrailBase admin port' >&2; return 1 ;; esac
+  node "$runtime/lib/ssh-config.mjs" validate "$ssh_config"
+  ssh -F "$ssh_config" -o BatchMode=yes -o ConnectTimeout=5 -o ExitOnForwardFailure=yes -N -L "127.0.0.1:$local_port:127.0.0.1:4000" "$backend_target" >/dev/null 2>&1 &
+  trailbase_tunnel_pid=$!
+  attempt=0
+  while [ "$attempt" -lt 30 ]; do
+    if ! kill -0 "$trailbase_tunnel_pid" 2>/dev/null; then echo 'TrailBase admin SSH tunnel exited before becoming ready' >&2; return 1; fi
+    if node -e 'const s=require("node:net").createConnection({host:"127.0.0.1",port:Number(process.argv[1])}); s.setTimeout(1000); s.once("connect",()=>{s.destroy();process.exit(0)}); s.once("error",()=>process.exit(1)); s.once("timeout",()=>{s.destroy();process.exit(1)});' "$local_port" >/dev/null 2>&1; then break; fi
+    attempt=$((attempt + 1))
+    sleep 1
+  done
+  [ "$attempt" -lt 30 ] || { echo 'TrailBase admin SSH tunnel did not become ready' >&2; return 1; }
+  TRAILBASE_URL="http://127.0.0.1:$local_port"
+  export TRAILBASE_URL
+}
+
+prepare_trailbase_bootstrap_credentials() {
+  bootstrap_dir=$runtime_root/trailbase-v4
+  bootstrap_file=$bootstrap_dir/bootstrap-admin.json
+  mkdir -p "$bootstrap_dir"
+  chmod 700 "$bootstrap_dir"
+  rm -f "$bootstrap_file"
+  bootstrap_log=$("$repo_root/bin/baas" compose trailbase logs --no-color --tail 200 trailbase)
+  printf '%s\n' "$bootstrap_log" | node "$runtime/lib/admin/trailbase-bootstrap.mjs" "$bootstrap_file"
+  unset bootstrap_log
+  chmod 600 "$bootstrap_file"
+  TRAILBASE_BOOTSTRAP_FILE=$bootstrap_file
+  export TRAILBASE_BOOTSTRAP_FILE
+}
+
 if [ "$action" = run ]; then
   validate_runner
   exec node "$runtime/lib/remote-execution.mjs" "$platform" "$phase" "$trial" "$output_dir" "$runner_target" "$runner_root"
+fi
+if [ "$platform" = trailbase ] && [ -n "$backend_target" ]; then
+  trap 'cleanup_trailbase_admin' 0
+  trap 'exit 129' 1
+  trap 'exit 130' 2
+  trap 'exit 143' 15
+  start_trailbase_admin_tunnel
+  TRAILBASE_BOOTSTRAP_FILE=$runtime_root/trailbase-v4/bootstrap-admin.json
+  export TRAILBASE_BOOTSTRAP_FILE
+  if [ "$action" = setup ]; then prepare_trailbase_bootstrap_credentials; fi
 fi
 if node "$runtime/lib/admin.mjs" "$action" "$platform" "$phase" "$trial" "$output_dir"; then
   :
@@ -132,6 +187,10 @@ else
     node "$runtime/lib/host-telemetry.mjs" diagnose "$backend_target" || echo 'V4 backend failure diagnostics failed' >&2
   fi
   exit "$admin_status"
+fi
+if [ "$platform" = trailbase ] && [ -n "$backend_target" ]; then
+  cleanup_trailbase_admin
+  trap - 0 1 2 15
 fi
 if [ "$action" = setup ]; then
   node "$runtime/lib/progress.mjs" lifecycle sync-runner || :

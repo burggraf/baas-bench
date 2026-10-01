@@ -4,7 +4,7 @@ import { runCommand } from '../command.mjs';
 import { seedDataset, DATASET_COUNTS } from '../dataset.mjs';
 
 export const TRAILBASE_TABLES = Object.freeze(['users', 'organizations', 'memberships', 'projects', 'tasks', 'comments', 'activities']);
-const endpoint = 'http://127.0.0.1:4000';
+const endpoint = process.env.TRAILBASE_URL || 'http://127.0.0.1:4000';
 const depot = '/app/traildepot';
 const migrationFile = 'U1785764902__integer_realworld_api_v3.sql';
 const adminFile = 'trailbase-admin.json';
@@ -25,7 +25,7 @@ export function createTrailBaseAdmin({ initClient, run = runCommand, root, runti
   let activeCredentials = credentials;
   async function save(path, value) { await writeFile(path, `${JSON.stringify(value)}\n`, { mode: 0o600 }); await chmod(path, 0o600); }
   async function saveText(path, value) { await writeFile(path, value, { mode: 0o600 }); await chmod(path, 0o600); }
-  async function getCredentials() { if (activeCredentials) return activeCredentials; const bootstrap = join(environmentRuntime, 'trailbase', 'bootstrap-admin.json'); activeCredentials = JSON.parse(await readFile(bootstrap, 'utf8')); return activeCredentials; }
+  async function getCredentials() { if (activeCredentials) return activeCredentials; const bootstrap = process.env.TRAILBASE_BOOTSTRAP_FILE || join(environmentRuntime, 'trailbase', 'bootstrap-admin.json'); activeCredentials = JSON.parse(await readFile(bootstrap, 'utf8')); return activeCredentials; }
   async function compose(args, options = {}) { return run(command, ['compose', 'trailbase', ...args], { timeoutMs: 60_000, ...options }); }
   async function connect() { if (client) return client; const value = await getCredentials(); client = initClient(endpoint); await client.login(value.email, value.password); return client; }
   async function adminRequest(path, method, body) { const active = await connect(); const tokens = active.tokens(); const response = await active.fetch(`/api/_admin${path}`, { method, headers: { 'CSRF-Token': tokens.csrf_token, 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) }); if (!response?.ok) throw new Error(`TrailBase admin request failed: ${method} ${path} (${response?.status})`); return response.status === 204 ? undefined : response.json(); }

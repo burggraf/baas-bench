@@ -120,16 +120,19 @@ test('V4 setup validates the runner before seeding and syncs after admin setup',
     await writeFile(runnerKey, 'runner-private-key', { mode: 0o600 });
     await writeFile(join(fakeBin, 'node'), `#!/bin/sh
 [ "$1" = -p ] && { echo 22; exit 0; }
+if [ "$1" = -e ]; then case "$2" in *createServer*) echo 43123 ;; *createConnection*) exit 0 ;; esac; fi
 echo "node: $*" >> "$FAKE_LOG"
 case "$1" in
-  *ssh-config.mjs) exec "$REAL_NODE" "$@" ;;
-  *admin.mjs) if [ "\${FAKE_ADMIN_STATUS:-0}" -ne 0 ]; then echo 'synthetic admin failure' >&2; exit "$FAKE_ADMIN_STATUS"; fi ;;
+  *ssh-config.mjs|*trailbase-bootstrap.mjs) exec "$REAL_NODE" "$@" ;;
+  *admin.mjs) [ "$3" != trailbase ] || echo "admin-env:$TRAILBASE_URL:$TRAILBASE_BOOTSTRAP_FILE" >> "$FAKE_LOG"; if [ "\${FAKE_ADMIN_STATUS:-0}" -ne 0 ]; then echo 'synthetic admin failure' >&2; exit "$FAKE_ADMIN_STATUS"; fi ;;
   *host-telemetry.mjs) exit "\${FAKE_DIAGNOSTICS_STATUS:-0}" ;;
 esac
 `);
     await writeFile(join(fakeBin, 'ssh'), `#!/bin/sh
 echo "ssh: $*" >> "$FAKE_LOG"
 case "$*" in
+  *'-N -L '*) echo "tunnel_pid: $$" >> "$FAKE_LOG"; trap 'exit 0' TERM; while :; do :; done ;;
+  *"logs' '--no-color"*) printf '%s\\n' 'trailbase-1 | Created new admin user:' 'trailbase-1 |     email: '\''admin@localhost'\''' 'trailbase-1 |     password: '\''synthetic-admin-password'\''' ;;
   *'ca.pem'*) printf '%s\\n' private-ca ;;
   *'SUPABASE_PUBLISHABLE_KEY='*) printf '%s\\n' sb_test_public_key ;;
   *"cat > '/srv/runner/.runtime/benchmarks/realworld-api-v4/id_ed25519'"*) cat > "$FAKE_RUNNER_SSH/id_ed25519" ;;
@@ -169,11 +172,20 @@ echo "rsync: $*" >> "$FAKE_LOG"
     await writeFile(log, '');
     const trailbaseSetup = spawnSync('sh', [new URL('../benchmark-sets/realworld-api-v4/shared/case.sh', import.meta.url).pathname, 'setup', 'trailbase'], {
       encoding: 'utf8',
-      env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, FAKE_LOG: log, FAKE_RUNNER_SSH: runnerSsh, REAL_NODE: process.execPath, BAAS_BENCH_V4_SSH_CONFIG: sshState.configPath, BAAS_RUNTIME_DIR: directory, BAAS_BENCH_V4_RUNNER_TARGET: 'runner.internal', BAAS_BENCH_V4_RUNNER_ROOT: '/srv/runner', BAAS_BENCH_V4_BACKEND_TARGET: 'controller@172.233.137.153', BAAS_BENCH_V4_BACKEND_ROOT: '/srv/backend', BAAS_BENCH_V4_BACKEND_PRIVATE_IP: '10.0.0.10', BAAS_BENCH_V4_BACKEND_DOCKER_SSH_TARGET: 'bench@10.0.0.10', BAAS_BENCH_V4_RUNNER_SSH_KEY_FILE: runnerKey },
+      env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, FAKE_LOG: log, FAKE_RUNNER_SSH: runnerSsh, REAL_NODE: process.execPath, BAAS_BENCH_V4_SSH_CONFIG: sshState.configPath, BAAS_RUNTIME_DIR: directory, BAAS_VERSION_PROFILE: 'realworld-api-v4', BAAS_BENCH_V4_RUNNER_TARGET: 'runner.internal', BAAS_BENCH_V4_RUNNER_ROOT: '/srv/runner', BAAS_BENCH_V4_BACKEND_TARGET: 'controller@172.233.137.153', BAAS_BENCH_V4_BACKEND_ROOT: '/srv/backend', BAAS_BENCH_V4_BACKEND_PRIVATE_IP: '10.0.0.10', BAAS_BENCH_V4_BACKEND_DOCKER_SSH_TARGET: 'bench@10.0.0.10', BAAS_BENCH_V4_RUNNER_SSH_KEY_FILE: runnerKey },
     });
-    assert.equal(trailbaseSetup.status, 0, trailbaseSetup.stderr);
+    assert.equal(trailbaseSetup.status, 0, `${trailbaseSetup.stderr}\n${await readFile(log, 'utf8')}`);
     const trailbaseCalls = await readFile(log, 'utf8');
     assert.match(trailbaseCalls, /remote-config\.mjs create trailbase .* 10\.0\.0\.10 bench@10\.0\.0\.10/);
+    assert.match(trailbaseCalls, /-N -L 127\.0\.0\.1:43123:127\.0\.0\.1:4000/);
+    assert.match(trailbaseCalls, /admin-env:http:\/\/127\.0\.0\.1:43123:.*trailbase-v4\/bootstrap-admin\.json/);
+    assert.equal(trailbaseCalls.includes('synthetic-admin-password'), false);
+    const bootstrapFile = join(directory, 'trailbase-v4/bootstrap-admin.json');
+    assert.deepEqual(JSON.parse(await readFile(bootstrapFile, 'utf8')), { email: 'admin@localhost', password: 'synthetic-admin-password' });
+    assert.equal((await stat(bootstrapFile)).mode & 0o777, 0o600);
+    const tunnelPid = Number(trailbaseCalls.match(/tunnel_pid: (\d+)/)?.[1]);
+    assert.ok(tunnelPid);
+    assert.throws(() => process.kill(tunnelPid, 0), { code: 'ESRCH' }, 'admin tunnel must be closed after setup');
     assert.match(trailbaseCalls, /runner\.internal .*ssh_config/);
     assert.ok(trailbaseCalls.indexOf('admin.mjs') < trailbaseCalls.indexOf('remote-config.mjs create'));
     assert.ok(trailbaseCalls.indexOf('remote-config.mjs create') < trailbaseCalls.lastIndexOf('rsync:'));
@@ -1864,6 +1876,27 @@ test('TrailBase migration, config, and admin expose tenant-scoped record APIs', 
   assert.match(config, /name: "users"[\s\S]*read_access_rule: "_USER_\.id IS NOT NULL"/);
   assert.match(config, /update_access_rule/);
   assert.match(adminSource, /result\[0\]\?\.\[0\] < count/);
+  assert.match(adminSource, /endpoint = process\.env\.TRAILBASE_URL \|\| 'http:\/\/127\.0\.0\.1:4000'/);
+  assert.match(adminSource, /process\.env\.TRAILBASE_BOOTSTRAP_FILE \|\| join\(environmentRuntime, 'trailbase', 'bootstrap-admin\.json'\)/);
+});
+
+test('TrailBase bootstrap credentials are parsed into a private file without logging them', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'trailbase-bootstrap-'));
+  const output = join(root, 'bootstrap-admin.json');
+  const invalidOutput = join(root, 'invalid.json');
+  const helper = new URL('../benchmark-sets/realworld-api-v4/shared/lib/admin/trailbase-bootstrap.mjs', import.meta.url);
+  const logs = "trailbase-1 | Created new admin user:\ntrailbase-1 |     email: 'admin@localhost'\ntrailbase-1 |     password: 'synthetic-only-credential'\n";
+  try {
+    const result = spawnSync(process.execPath, [fileURLToPath(helper), output], { input: logs, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, '');
+    assert.deepEqual(JSON.parse(await readFile(output, 'utf8')), { email: 'admin@localhost', password: 'synthetic-only-credential' });
+    assert.equal((await stat(output)).mode & 0o777, 0o600);
+    const invalid = spawnSync(process.execPath, [fileURLToPath(helper), invalidOutput], { input: 'no generated administrator', encoding: 'utf8' });
+    assert.equal(invalid.status, 1);
+    assert.doesNotMatch(invalid.stderr, /synthetic-only-credential/);
+    await assert.rejects(readFile(invalidOutput), { code: 'ENOENT' });
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test('all real-world adapters and administrative modules expose the shared lifecycle contract', async () => {
@@ -1908,6 +1941,12 @@ test('shared hook validates dispatch and installs an isolated Node 22 runtime', 
   }
   assert.match(hook, /remote-execution\.mjs/);
   assert.match(hook, /lib\/admin\.mjs/);
+  assert.match(hook, /start_trailbase_admin_tunnel/);
+  assert.match(hook, /-L "127\.0\.0\.1:\$local_port:127\.0\.0\.1:4000"/);
+  assert.match(hook, /prepare_trailbase_bootstrap_credentials/);
+  assert.match(hook, /TRAILBASE_BOOTSTRAP_FILE=.*trailbase-v4\/bootstrap-admin\.json/);
+  assert.match(hook, /logs --no-color --tail 200 trailbase/);
+  assert.match(hook, /node "\$runtime\/lib\/admin\/trailbase-bootstrap\.mjs" "\$bootstrap_file"/);
   const pkg = JSON.parse(text('shared/package.json'));
   assert.equal(pkg.engines.node, '>=22');
   assert.equal(pkg.dependencies['@neondatabase/serverless'], '1.1.0');
