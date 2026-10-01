@@ -33,7 +33,7 @@ export async function bootstrapAndDeploy({ inventory, repositoryRoot, backendRoo
     signal?.throwIfAborted();
     await command('ssh', [...SSH_OPTIONS, target, `umask 077 && mkdir -p '${root}' && chmod 700 '${root}'`], { timeoutMs: 30_000, signal });
     await command('rsync', ['-a', '--delete', '--exclude', '.linode.env', '--exclude', '.git', '--exclude', '.runtime', '--exclude', '.results', '--exclude', 'results', '--exclude', 'node_modules', '--', `${repositoryRoot}/`, `${target}:${root}/`], { timeoutMs: 600_000, signal });
-    await command('ssh', [...SSH_OPTIONS, target, `cd '${root}' && test -x ./bin/baas && test -f ./benchmark-sets/realworld-api-v4/shared/package-lock.json`], { timeoutMs: 30_000, signal });
+    await command('ssh', [...SSH_OPTIONS, target, `cd '${root}' && test -x ./bin/baas && test -f ./benchmark-sets/realworld-api-v4/shared/package-lock.json && test -f ./benchmark-sets/realworld-api-v4/shared/lib/resources.mjs`], { timeoutMs: 30_000, signal });
   }
   const environment = {
     BAAS_BENCH_V4_BACKEND_TARGET: hosts.backend,

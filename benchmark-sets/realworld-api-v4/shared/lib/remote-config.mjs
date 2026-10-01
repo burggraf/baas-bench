@@ -49,9 +49,11 @@ export function applyRemoteConfig(config, platform, env = process.env) {
   env.BAAS_BENCH_V4_SSH_CONFIG = config.ssh_config_file;
   env.NODE_EXTRA_CA_CERTS = config.ca_file;
   env.BAAS_BENCH_DOCKER_SSH_TARGET = config.docker_ssh_target;
-  if (config.backend_telemetry_script !== undefined) {
-    if (!safeRemotePath(config.backend_telemetry_script)) throw new Error('invalid backend telemetry script');
-    env.BAAS_BENCH_V4_TELEMETRY_SCRIPT = config.backend_telemetry_script;
+  if (['supabase', 'trailbase'].includes(platform)) {
+    const expected = typeof config.backend_root === 'string' && safeRemotePath(config.backend_root)
+      ? join(config.backend_root, 'benchmark-sets/realworld-api-v4/shared/lib/resources.mjs') : '';
+    if (!expected || config.backend_telemetry_script !== expected) throw new Error('invalid backend telemetry script path');
+    env.BAAS_BENCH_V4_TELEMETRY_SCRIPT = expected;
   }
   return env;
 }
@@ -76,7 +78,7 @@ async function readSupabasePublicKey(path) {
   return value;
 }
 
-export async function createRemoteConfig({ platform, runtime, runnerRoot, backendRoot = runnerRoot, backendAddress, dockerSshTarget, publishableKey }) {
+export async function createRemoteConfig({ platform, runtime, runnerRoot, backendRoot, backendAddress, dockerSshTarget, publishableKey }) {
   if (!['supabase', 'trailbase'].includes(platform) || !safeLocalPath(runtime) || !safeRemotePath(backendRoot) || !safeRemotePath(runnerRoot) || !isPrivateIpv4(backendAddress) || !validTarget(dockerSshTarget)) throw new Error('invalid private IPv4 remote configuration');
   let env;
   if (platform === 'supabase') {
@@ -89,7 +91,8 @@ export async function createRemoteConfig({ platform, runtime, runnerRoot, backen
     schema_version: 1,
     platform,
     docker_ssh_target: dockerSshTarget,
-    backend_telemetry_script: join(backendRoot, '.runtime/benchmarks/realworld-api-v4/lib/resources.mjs'),
+    backend_root: backendRoot,
+    backend_telemetry_script: join(backendRoot, 'benchmark-sets/realworld-api-v4/shared/lib/resources.mjs'),
     ca_file: join(runnerRoot, '.runtime/benchmarks/realworld-api-v4/ca.pem'),
     ssh_config_file: join(runnerRoot, '.runtime/benchmarks/realworld-api-v4/ssh_config'),
     env,
@@ -108,6 +111,11 @@ export async function prepareRemoteConfig({ platform, runtime, repoRoot, runnerR
   if (!info.isFile() || (info.mode & 0o077) !== 0) throw new Error('remote config permissions must be 0600');
   const config = JSON.parse(await readFile(configPath, 'utf8'));
   if (config?.platform !== platform || config.ca_file !== join(remoteRuntime, 'ca.pem') || config.ssh_config_file !== join(remoteRuntime, 'ssh_config')) throw new Error('remote config does not match this runner');
+  if (['supabase', 'trailbase'].includes(platform)) {
+    const expectedTelemetry = typeof config.backend_root === 'string' && safeRemotePath(config.backend_root)
+      ? join(config.backend_root, 'benchmark-sets/realworld-api-v4/shared/lib/resources.mjs') : '';
+    if (!expectedTelemetry || config.backend_telemetry_script !== expectedTelemetry) throw new Error('remote config backend telemetry path is invalid');
+  }
   const caInfo = await stat(join(runtime, 'ca.pem'));
   if (!caInfo.isFile() || caInfo.size === 0) throw new Error('private CA certificate is missing');
   config.env ??= {};
@@ -125,11 +133,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   if (action === 'prepare' && args.length === 4) {
     const [platform, runtime, repoRoot, runnerRoot] = args;
     task = prepareRemoteConfig({ platform, runtime, repoRoot, runnerRoot });
-  } else if (action === 'create' && (args.length === 5 || args.length === 6)) {
+  } else if (action === 'create' && args.length === 6) {
     const [platform, runtime, runnerRoot, backendAddress, dockerSshTarget, backendRoot] = args;
     task = readStandardInput().then(publishableKey => createRemoteConfig({ platform, runtime, runnerRoot, backendRoot, backendAddress, dockerSshTarget, publishableKey: publishableKey.trim() }));
   } else {
-    console.error('usage: remote-config.mjs {prepare <platform> <runtime> <repository-root> <runner-root>|create <supabase|trailbase> <runtime> <runner-root> <backend-private-ip> <backend-docker-ssh-target> [backend-root] < optional-supabase-key}');
+    console.error('usage: remote-config.mjs {prepare <platform> <runtime> <repository-root> <runner-root>|create <supabase|trailbase> <runtime> <runner-root> <backend-private-ip> <backend-docker-ssh-target> <backend-root> < optional-supabase-key}');
     process.exitCode = 2;
   }
   if (task) void task.catch(error => { console.error(String(error?.message ?? error).slice(0, 300)); process.exitCode = 1; });

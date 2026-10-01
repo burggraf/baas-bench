@@ -634,6 +634,9 @@ test('observation deployment bootstraps both hosts and transfers no local runtim
   assert.equal(calls[0][0], 'bootstrap');
   const rsync = calls.filter(([name]) => name === 'rsync');
   assert.equal(rsync.length, 2);
+  const verificationCommands = calls.filter(([name, args]) => name === 'ssh' && args.at(-1).includes('test -x ./bin/baas'));
+  assert.equal(verificationCommands.length, 2);
+  assert.ok(verificationCommands.every(([, args]) => args.at(-1).includes('test -f ./benchmark-sets/realworld-api-v4/shared/lib/resources.mjs')));
   assert.ok(rsync.every(([, args]) => ['.git', '.runtime', '.results', 'results', 'node_modules', '.linode.env'].every(exclusion => args.includes(exclusion))));
   assert.equal(env.environment.BAAS_BENCH_V4_BACKEND_DOCKER_SSH_TARGET, 'root@10.203.0.10');
   assert.equal(env.environment.BAAS_BENCH_V4_RUNNER_SSH_KEY_FILE, '/opt/controller/key');
@@ -700,14 +703,14 @@ test('remote runner config is platform-scoped and requires HTTPS endpoints', asy
   const { applyRemoteConfig } = await import('../benchmark-sets/realworld-api-v4/shared/lib/remote-config.mjs');
   const env = {};
   applyRemoteConfig({
-    schema_version: 1, platform: 'supabase', docker_ssh_target: 'backend-telemetry', ca_file: '/tmp/private-ca.crt', ssh_config_file: '/tmp/ssh_config',
+    schema_version: 1, platform: 'supabase', docker_ssh_target: 'backend-telemetry', backend_root: '/opt/backend', backend_telemetry_script: '/opt/backend/benchmark-sets/realworld-api-v4/shared/lib/resources.mjs', ca_file: '/tmp/private-ca.crt', ssh_config_file: '/tmp/ssh_config',
     env: { SUPABASE_URL: 'https://supabase.baas.internal:8443', SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_test' },
   }, 'supabase', env);
   assert.equal(env.SUPABASE_URL, 'https://supabase.baas.internal:8443');
   assert.equal(env.NODE_EXTRA_CA_CERTS, '/tmp/private-ca.crt');
   assert.equal(env.BAAS_BENCH_DOCKER_SSH_TARGET, 'backend-telemetry');
   assert.equal(env.BAAS_BENCH_V4_SSH_CONFIG, '/tmp/ssh_config');
-  assert.throws(() => applyRemoteConfig({ schema_version: 1, platform: 'supabase', docker_ssh_target: 'backend-telemetry', ca_file: '/tmp/private-ca.crt', ssh_config_file: '/tmp/ssh_config', env: { SUPABASE_URL: 'http://backend:8000' } }, 'supabase', {}), /HTTPS/);
+  assert.throws(() => applyRemoteConfig({ schema_version: 1, platform: 'supabase', docker_ssh_target: 'backend-telemetry', backend_root: '/opt/backend', backend_telemetry_script: '/opt/backend/benchmark-sets/realworld-api-v4/shared/lib/resources.mjs', ca_file: '/tmp/private-ca.crt', ssh_config_file: '/tmp/ssh_config', env: { SUPABASE_URL: 'http://backend:8000' } }, 'supabase', {}), /HTTPS/);
   assert.throws(() => applyRemoteConfig({ schema_version: 1, platform: 'directus', docker_ssh_target: 'backend-telemetry', ca_file: '/tmp/private-ca.crt', ssh_config_file: '/tmp/ssh_config', env: { SUPABASE_URL: 'https://backend' } }, 'directus', {}), /not allowed/);
   assert.throws(() => applyRemoteConfig({ schema_version: 1, platform: 'supabase', docker_ssh_target: 'backend;id', env: {} }, 'supabase', {}), /invalid SSH target/);
 });
@@ -744,22 +747,25 @@ test('remote runner loads only restrictive config and confirms its CA exists', a
 });
 
 test('remote setup creates private Supabase and TrailBase runner configs from backend-only inputs', async () => {
-  const { createRemoteConfig, prepareRemoteConfig } = await import('../benchmark-sets/realworld-api-v4/shared/lib/remote-config.mjs');
+  const { applyRemoteConfig, createRemoteConfig, prepareRemoteConfig } = await import('../benchmark-sets/realworld-api-v4/shared/lib/remote-config.mjs');
   const createdDirectory = await mkdtemp(join(tmpdir(), 'rw-created-remote-config-'));
   try {
     await mkdir(createdDirectory, { recursive: true });
     await writeFile(join(createdDirectory, 'ca.pem'), 'private-ca');
-    const created = await createRemoteConfig({ platform: 'supabase', runtime: createdDirectory, runnerRoot: '/opt/runner', backendAddress: '10.0.0.10', dockerSshTarget: 'bench@10.0.0.10', publishableKey: 'sb_test_public_key' });
+    const created = await createRemoteConfig({ platform: 'supabase', runtime: createdDirectory, runnerRoot: '/opt/runner', backendRoot: '/opt/backend', backendAddress: '10.0.0.10', dockerSshTarget: 'bench@10.0.0.10', publishableKey: 'sb_test_public_key' });
     assert.deepEqual(created.env, { SUPABASE_URL: 'https://10.0.0.10:8443', SUPABASE_PUBLISHABLE_KEY: 'sb_test_public_key' });
     assert.equal(created.ca_file, '/opt/runner/.runtime/benchmarks/realworld-api-v4/ca.pem');
     assert.equal(created.ssh_config_file, '/opt/runner/.runtime/benchmarks/realworld-api-v4/ssh_config');
+    assert.equal(created.backend_telemetry_script, '/opt/backend/benchmark-sets/realworld-api-v4/shared/lib/resources.mjs');
+    assert.throws(() => applyRemoteConfig({ ...created, backend_telemetry_script: '/opt/backend/.runtime/resources.mjs' }, 'supabase', {}), /invalid backend telemetry script path/);
     assert.equal((await stat(join(createdDirectory, 'remote-config.json'))).mode & 0o077, 0);
-    await assert.rejects(createRemoteConfig({ platform: 'supabase', runtime: createdDirectory, runnerRoot: '/opt/runner', backendAddress: 'backend.example.test', dockerSshTarget: 'bench@10.0.0.10', publishableKey: 'key' }), /private IPv4/);
-    await assert.rejects(createRemoteConfig({ platform: 'supabase', runtime: createdDirectory, runnerRoot: '/opt/runner', backendAddress: '203.0.113.10', dockerSshTarget: 'bench@10.0.0.10', publishableKey: 'key' }), /private IPv4/);
-    const trailbase = await createRemoteConfig({ platform: 'trailbase', runtime: createdDirectory, runnerRoot: '/opt/runner', backendAddress: '10.0.0.10', dockerSshTarget: 'bench@10.0.0.10' });
+    await assert.rejects(createRemoteConfig({ platform: 'supabase', runtime: createdDirectory, runnerRoot: '/opt/runner', backendRoot: '/opt/backend', backendAddress: 'backend.example.test', dockerSshTarget: 'bench@10.0.0.10', publishableKey: 'key' }), /private IPv4/);
+    await assert.rejects(createRemoteConfig({ platform: 'supabase', runtime: createdDirectory, runnerRoot: '/opt/runner', backendRoot: '/opt/backend', backendAddress: '203.0.113.10', dockerSshTarget: 'bench@10.0.0.10', publishableKey: 'key' }), /private IPv4/);
+    const trailbase = await createRemoteConfig({ platform: 'trailbase', runtime: createdDirectory, runnerRoot: '/opt/runner', backendRoot: '/opt/backend', backendAddress: '10.0.0.10', dockerSshTarget: 'bench@10.0.0.10' });
     assert.deepEqual(trailbase.env, { TRAILBASE_URL: 'https://10.0.0.10:8443' });
+    assert.equal(trailbase.backend_telemetry_script, '/opt/backend/benchmark-sets/realworld-api-v4/shared/lib/resources.mjs');
     assert.equal((await stat(join(createdDirectory, 'remote-config.json'))).mode & 0o077, 0);
-    await assert.rejects(createRemoteConfig({ platform: 'trailbase', runtime: createdDirectory, runnerRoot: '/opt/runner', backendAddress: '203.0.113.10', dockerSshTarget: 'bench@10.0.0.10' }), /private IPv4/);
+    await assert.rejects(createRemoteConfig({ platform: 'trailbase', runtime: createdDirectory, runnerRoot: '/opt/runner', backendRoot: '/opt/backend', backendAddress: '203.0.113.10', dockerSshTarget: 'bench@10.0.0.10' }), /private IPv4/);
   } finally { await rm(createdDirectory, { recursive: true, force: true }); }
 });
 
@@ -768,9 +774,10 @@ test('remote-config CLI reads the Supabase publishable key from stdin', async ()
   const cli = fileURLToPath(new URL('../benchmark-sets/realworld-api-v4/shared/lib/remote-config.mjs', import.meta.url));
   try {
     const { runCommand } = await import('../benchmark-sets/realworld-api-v4/shared/lib/command.mjs');
-    await runCommand(process.execPath, [cli, 'create', 'supabase', root, '/opt/runner', '10.0.0.10', 'bench@10.0.0.10'], { input: 'sb_test_public_key\n', timeoutMs: 5_000 });
+    await runCommand(process.execPath, [cli, 'create', 'supabase', root, '/opt/runner', '10.0.0.10', 'bench@10.0.0.10', '/opt/backend'], { input: 'sb_test_public_key\n', timeoutMs: 5_000 });
     const config = JSON.parse(await readFile(join(root, 'remote-config.json'), 'utf8'));
     assert.equal(config.env.SUPABASE_PUBLISHABLE_KEY, 'sb_test_public_key');
+    assert.equal(config.backend_telemetry_script, '/opt/backend/benchmark-sets/realworld-api-v4/shared/lib/resources.mjs');
     assert.equal((await stat(join(root, 'remote-config.json'))).mode & 0o077, 0);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
@@ -785,7 +792,7 @@ test('remote setup prepares a private runner config with only the Supabase publi
     await mkdir(join(repo, '.runtime/supabase/docker'), { recursive: true });
     await writeFile(join(runtime, 'ca.pem'), 'private-ca');
     await writeFile(join(repo, '.runtime/supabase/docker/.env'), 'SUPABASE_PUBLISHABLE_KEY=sb_test_public_key\nJWT_SECRET=not-forwarded\n');
-    await writeFile(join(runtime, 'remote-config.json'), `${JSON.stringify({ schema_version: 1, platform: 'supabase', docker_ssh_target: 'backend-telemetry', ca_file: '/opt/bench/.runtime/benchmarks/realworld-api-v4/ca.pem', ssh_config_file: '/opt/bench/.runtime/benchmarks/realworld-api-v4/ssh_config', env: { SUPABASE_URL: 'https://supabase.baas.internal:8443' } })}\n`, { mode: 0o600 });
+    await writeFile(join(runtime, 'remote-config.json'), `${JSON.stringify({ schema_version: 1, platform: 'supabase', docker_ssh_target: 'backend-telemetry', backend_root: '/opt/bench', backend_telemetry_script: '/opt/bench/benchmark-sets/realworld-api-v4/shared/lib/resources.mjs', ca_file: '/opt/bench/.runtime/benchmarks/realworld-api-v4/ca.pem', ssh_config_file: '/opt/bench/.runtime/benchmarks/realworld-api-v4/ssh_config', env: { SUPABASE_URL: 'https://supabase.baas.internal:8443' } })}\n`, { mode: 0o600 });
     const config = await prepareRemoteConfig({ platform: 'supabase', runtime, repoRoot: repo, runnerRoot: '/opt/bench' });
     assert.equal(config.env.SUPABASE_PUBLISHABLE_KEY, 'sb_test_public_key');
     assert.equal('JWT_SECRET' in config.env, false);
