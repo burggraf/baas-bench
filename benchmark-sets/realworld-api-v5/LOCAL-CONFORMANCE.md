@@ -1,6 +1,6 @@
 # Local conformance progress (2026-10-01)
 
-**Status:** bounded native-stack probes passed for Supabase and TrailBase on synthetic fixtures. Neither candidate is qualified. V5 run and publication guards remain in place. Declared-scale local fixture/reset testing is now authorized and in progress. No capacity campaign, comparative result, or publication has been performed or authorized.
+**Status:** bounded native-stack probes passed for Supabase and TrailBase on synthetic fixtures. Neither candidate is qualified. V5 run and publication guards remain in place. Declared-scale local fixture/reset checks completed on the pinned source/runtime. No capacity campaign, comparative result, or publication has been performed or authorized.
 
 ## Authorization and spend
 
@@ -45,7 +45,7 @@ The reports are `.runtime/conformance-v5/trailbase-37jHqH/report.json` and
 and depots/source/config were removed after both passing probes. Linode spend
 remains $0.00. Successful synthetic assertions do not remove either hard guard.
 
-## Declared-scale local work in progress
+## Declared-scale local conformance (not measurement)
 
 The first owned TrailBase attempt, `.runtime/conformance-v5/trailbase-7JRCNT/`,
 confirmed 1,000,000 seeded application records and 16,000 native Auth accounts,
@@ -54,40 +54,36 @@ then reached its first reset. Its administrative query hit the harness's
 eligibility finding. Its container/depot were removed. A fresh retry uses a
 bounded three-minute administrative query deadline, without changing measured
 API deadlines. Its private `progress.json` records confirmed counts and phases.
-The retry, `.runtime/conformance-v5/trailbase-5aLTY5/`, verified every logical
-fixture digest and all 16,000 native identity mappings. Its first complete reset
-restored application and native Auth digests, rejected the ended refresh session,
-and passed fresh login. Its private `scale-evidence.json` preserves that one
-successful cycle. The attempt failed with `FetchError` during the second reset/
-verification phase; the report lacks an HTTP status, so the precise failure
-remains unconfirmed. Both the owned container and depot were removed.
-
-The SDK attempts token refresh one minute before JWT expiry. The failure occurred
-about 59 minutes after controller login, and restoring `_user` deletes the
-controller's refresh session too. The procedure now explicitly creates a fresh
-privileged controller session after an acknowledged restore, without retrying the
-restore or preserving old workload sessions. This correction still requires a
-fresh native check. It does not change actor authentication or API deadlines.
+The pinned-Node retry, `.runtime/conformance-v5/trailbase-mjn3KM/`, passed
+fixture digests and native identity mapping for all 1,000,000 application records
+and 16,000 native Auth accounts, then passed both complete mutation/reset cycles.
+Each cycle restored application and native Auth digests, rejected the ended refresh
+session, and passed fresh login. Provenance records clean source commit
+`abf60168f4aa91dd3e0b4adddeeca6c86c6e3225`, Node 22.23.1, the pinned TrailBase
+image, and no mid-run source changes. Owned container/depot cleanup succeeded.
+This supersedes earlier timeout and controller-session attempts; reports are not
+pooled. It proves declared-scale fixture/reset behavior only. Native membership
+revocation, remaining adversarial cases, restart and measurement lifecycle remain
+gates.
 
 Supabase declared-scale testing started only after confirmed TrailBase cleanup.
-The attempt `.runtime/conformance-v5/supabase-Iikchy/` confirmed and digest-
-verified the million application records and 16,000 native Auth users. It failed
-in reset cycle 1 before any cycle completed, then removed its owned stack and
-config. It ran under Node 26.7.0, not pinned Node 22.23.1, and predates source
-provenance; treat all outcomes as diagnostic-only. Its progress phase and timing
-suggest the row-by-row application-table reset hit the bounded Docker/psql
-command deadline; the old report did not retain a timeout indicator, so that
-cause is not proven. The reset now uses one transactional TRUNCATE of the owned
-application tables followed by ordered snapshot restoration, with a separate ten-
-minute administrative timeout. A private, checksum-verified Node 22.23.1 is
-installed; fresh attempts reject other runtimes before setup. No full-scale pass
-is claimed: two complete mutation/reset cycles are required. Identical warm-up
-and the measurement lifecycle remain separate qualification gates.
+The pinned-Node run `.runtime/conformance-v5/supabase-7MLB99/` passed fixture
+digests and Auth identity mapping for 1,000,000 application records and 16,000
+native Auth accounts, followed by both full mutation/reset cycles. Each cycle
+restored app/Auth digests, invalidated refresh sessions and passed fresh login.
+Provenance records clean source commit `abf60168f4aa91dd3e0b4adddeeca6c86c6e3225`,
+Node 22.23.1, and no mid-run source changes. The transactional TRUNCATE reset
+completed within its bounded administrative deadline. Owned Compose resources and
+private configuration were removed. The previous Node 26 attempt's failure is
+superseded; reports are not pooled. This establishes declared-scale fixture/reset
+behavior only, not benchmark measurement, capacity, durability after power loss,
+or qualification. Identical warm-up and the measurement lifecycle remain
+separate gates.
 
 ## Remaining gates
 
 - Promote the private native probes into maintainable committed conformance procedures and bind their verified evidence to V5 run admission/publication. Current private reports and mocked/in-memory tests are not admission evidence.
-- Complete TrailBase and Supabase adversarial, reset/session, and fixture-integrity coverage at the declared dataset scale.
+- Run fresh native probes for membership removal on a live session and protected-identity writes; those checks were added after the earlier synthetic runs.
 - Decide eligibility for the other audited cases; exclude any that cannot meet the shared contract.
 - Qualify the corrected runner, repeated baseline/reset/warm-up lifecycle, and measurement profile before enabling any V5 benchmark execution.
 

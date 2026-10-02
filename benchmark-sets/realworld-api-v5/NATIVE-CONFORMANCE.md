@@ -30,15 +30,16 @@ node --test test/native_conformance_v5_test.mjs test/realworld_api_v5_test.mjs
 
 ## Disposable TrailBase probe
 
-Only run with explicit local-integration authorization. Requires Docker, Node
-22+, the V5-pinned TrailBase image already present, and the pinned SDK install:
+Only run with explicit local-integration authorization. Requires Docker, the exact
+V5-pinned Node 22.23.1 runtime, the V5-pinned TrailBase image already present, and
+the pinned SDK install:
 
 ```sh
 mkdir -p .runtime/conformance-v5/sdk
 chmod 700 .runtime/conformance-v5 .runtime/conformance-v5/sdk
 cp benchmark-sets/realworld-api-v5/shared/package*.json .runtime/conformance-v5/sdk/
 npm ci --ignore-scripts --prefix .runtime/conformance-v5/sdk
-node test/native_v5_trailbase_probe.mjs --local-disposable
+.runtime/conformance-v5/node-v22.23.1-darwin-arm64/bin/node test/native_v5_trailbase_probe.mjs --local-disposable
 ```
 
 The procedure creates a unique private run directory and uniquely named container,
@@ -60,10 +61,11 @@ benchmark admission is implied. The probe is not part of automatic shell tests.
 
 ## Disposable Supabase probe
 
-With the same SDK installation and explicit local-integration authorization:
+With the same SDK installation and explicit local-integration authorization; use
+the exact Node 22.23.1 runtime pinned by V5:
 
 ```sh
-node test/native_v5_supabase_probe.mjs --local-disposable
+.runtime/conformance-v5/node-v22.23.1-darwin-arm64/bin/node test/native_v5_supabase_probe.mjs --local-disposable
 ```
 
 This uses `bin/baas setup` with a fresh private `BAAS_RUNTIME_DIR` and the V5
@@ -89,9 +91,9 @@ Run one backend at a time; never run these concurrently or against an existing
 stack. They keep the same resource bounds and ownership/cleanup as above:
 
 ```sh
-node test/native_v5_trailbase_probe.mjs --local-declared-scale
+.runtime/conformance-v5/node-v22.23.1-darwin-arm64/bin/node test/native_v5_trailbase_probe.mjs --local-declared-scale
 # Only after TrailBase cleanup:
-node test/native_v5_supabase_probe.mjs --local-declared-scale
+.runtime/conformance-v5/node-v22.23.1-darwin-arm64/bin/node test/native_v5_supabase_probe.mjs --local-declared-scale
 ```
 
 Each seeds the existing seed-42 million-record fixture and 16,000 native Auth
@@ -134,8 +136,8 @@ The finishing source digest flags changes during the attempt. A changed or dirty
 source remains diagnostic and requires frozen-revision revalidation. A lockfile
 hash does not attest installed dependency bytes, and provenance alone does not
 qualify a backend. `admission_evidence` remains false; neither guard is relaxed.
-The already-running Supabase attempt predates this addition and will not acquire
-provenance retroactively.
+The completed pinned-runtime Supabase attempt recorded clean commit, source
+hashes, and no source changes during the run.
 
 ## Pending
 - Expand the remaining value/relationship corpus. Live membership removal now
@@ -145,7 +147,8 @@ provenance retroactively.
   protected user/membership/comment identity-column writes, and valid raw-write
   controls are implemented but await fresh native runs. Older synthetic findings
   do not cover these additions.
-- Establish passing results for both complete declared-scale fixture identity and
-  Auth/session reset procedures; one successful cycle is insufficient.
+- Declared-scale fixture identity and two complete Auth/session reset cycles
+  passed for both TrailBase and Supabase at the pinned source/runtime. This does
+  not qualify performance or replace fresh adversarial native probes.
 - Qualify reset/verify/identical-warm-up/measure integration and bind native
   evidence to frozen definitions before reconsidering either hard guard.
