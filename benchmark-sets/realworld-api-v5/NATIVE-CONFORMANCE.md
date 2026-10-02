@@ -110,7 +110,11 @@ cycle even if a later check fails. Reports contain only hashes/counts and outcom
 never raw Auth snapshots. Cleanup attempts every opened actor session and preserves
 the original failure alongside cleanup failure types. TrailBase controller Auth is
 renewed after an acknowledged Auth restore, since that restore invalidates its
-refresh session too; ambiguous restore outcomes are never automatically retried. These
+refresh session too; ambiguous restore outcomes are never automatically retried.
+Supabase reset uses one transactional `TRUNCATE ... CASCADE` for its complete
+owned application-table set, then restores rows in FK order. Its ten-minute
+reset deadline applies only to this administrative operation; measured API
+limits remain unchanged. These
 are fixture/reset diagnostics, not a capacity search, a 120-second/50-user warm-up
 qualification, or proof that the full native adversarial suite has passed at
 scale. Both V5 hard guards remain. Do not pool the small- and full-scale reports

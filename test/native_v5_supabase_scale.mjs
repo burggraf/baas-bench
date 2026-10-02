@@ -9,6 +9,12 @@ import { closeNativeSessions } from '../benchmark-sets/realworld-api-v5/shared/l
 
 const tables = Object.keys(FIXTURE_COLUMNS);
 const quote = value => value == null ? 'NULL' : `'${String(value).replaceAll("'", "''")}'`;
+export function restoreSupabaseScaleSQL(tables, userColumns, identityColumns) {
+  return 'BEGIN;\nTRUNCATE TABLE ' + [...tables].reverse().map(table => `public.${table}`).join(',') + ' CASCADE;\n' +
+    tables.map(table => `INSERT INTO public.${table} SELECT * FROM v5_scale_baseline.${table};`).join('\n') +
+    `\nDELETE FROM auth.users; INSERT INTO auth.users(${userColumns}) SELECT ${userColumns} FROM v5_scale_baseline.auth_users; INSERT INTO auth.identities(${identityColumns}) SELECT ${identityColumns} FROM v5_scale_baseline.auth_identities; COMMIT;`;
+}
+
 export async function runSupabaseScaleProbe({ sql, createUser, createClient, base, anon, call, dir }) {
   const progress = { scope: 'declared-scale-conformance-not-measurement', phase: 'seed', application_records: 0, auth_accounts: 0 };
   const save = () => { progress.updated_at = new Date().toISOString(); writeFileSync(join(dir, 'progress.json'), JSON.stringify(progress, null, 2), { mode: 0o600 }); };
@@ -82,7 +88,7 @@ export async function runSupabaseScaleProbe({ sql, createUser, createClient, bas
     } catch (error) { mutationError = error; }
     finally { await closeNativeSessions([member, owner], mutationError); }
     progress.phase = `reset-cycle-${cycle + 1}`; save();
-    sql('BEGIN;\n' + [...tables].reverse().map(table => `DELETE FROM public.${table};`).join('\n') + '\n' + tables.map(table => `INSERT INTO public.${table} SELECT * FROM v5_scale_baseline.${table};`).join('\n') + `\nDELETE FROM auth.users; INSERT INTO auth.users(${userColumns}) SELECT ${userColumns} FROM v5_scale_baseline.auth_users; INSERT INTO auth.identities(${identityColumns}) SELECT ${identityColumns} FROM v5_scale_baseline.auth_identities; COMMIT;`);
+    sql(restoreSupabaseScaleSQL(tables, userColumns, identityColumns), { timeout: 600000 });
     progress.phase = `verify-reset-cycle-${cycle + 1}`; save();
     const restored = await verify(); assert.equal(authState(), authBaseline, 'native Auth baseline mismatch');
     assert.equal(Number(sql('SELECT count(*) FROM auth.sessions').trim()), 0);

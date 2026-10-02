@@ -70,13 +70,19 @@ restore or preserving old workload sessions. This correction still requires a
 fresh native check. It does not change actor authentication or API deadlines.
 
 Supabase declared-scale testing started only after confirmed TrailBase cleanup.
-The active attempt began under Node 26.7.0, not the pinned Node 22.23.1, and
-before source provenance was recorded. Its observations are diagnostic-only; do
-not treat them as conformance evidence even if its reset cycles pass. A private,
-checksum-verified Node 22.23.1 is now installed, and future attempts fail before
-setup if the runtime differs from the V5 pin. No full-scale passing result is
-claimed: two complete mutation/reset cycles are required. Identical warm-up and
-the actual measurement lifecycle remain separate qualification gates.
+The attempt `.runtime/conformance-v5/supabase-Iikchy/` confirmed and digest-
+verified the million application records and 16,000 native Auth users. It failed
+in reset cycle 1 before any cycle completed, then removed its owned stack and
+config. It ran under Node 26.7.0, not pinned Node 22.23.1, and predates source
+provenance; treat all outcomes as diagnostic-only. Its progress phase and timing
+suggest the row-by-row application-table reset hit the bounded Docker/psql
+command deadline; the old report did not retain a timeout indicator, so that
+cause is not proven. The reset now uses one transactional TRUNCATE of the owned
+application tables followed by ordered snapshot restoration, with a separate ten-
+minute administrative timeout. A private, checksum-verified Node 22.23.1 is
+installed; fresh attempts reject other runtimes before setup. No full-scale pass
+is claimed: two complete mutation/reset cycles are required. Identical warm-up
+and the measurement lifecycle remain separate qualification gates.
 
 ## Remaining gates
 

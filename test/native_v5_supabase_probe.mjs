@@ -33,11 +33,18 @@ const report = { scope: scale ? 'declared-scale-conformance-not-measurement' : '
 let started = false, base, anon, service, sessions;
 function command(executable, args, options = {}) {
   const result = spawnSync(executable, args, { encoding: 'utf8', timeout: 180_000, maxBuffer: 16 * 1024 * 1024, ...options });
-  if (result.status !== 0) throw new Error(`owned ${executable} command failed`);
+  if (result.status !== 0) {
+    const error = new Error(`owned ${executable} command failed`);
+    error.command_status = Number.isInteger(result.status) ? result.status : null;
+    error.command_signal = ['SIGTERM', 'SIGKILL', 'SIGINT'].includes(result.signal) ? result.signal : null;
+    error.command_timeout = result.error?.code === 'ETIMEDOUT';
+    error.command_error_type = ['ETIMEDOUT', 'ENOENT', 'EACCES'].includes(result.error?.code) ? result.error.code : undefined;
+    throw error;
+  }
   return result.stdout;
 }
 function docker(args, options) { return command('docker', args, options); }
-function sql(query) { return docker([...compose, 'exec', '-T', 'db', 'psql', '-X', '-A', '-t', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', 'postgres'], { input: query }); }
+function sql(query, { timeout = 180_000 } = {}) { return docker([...compose, 'exec', '-T', 'db', 'psql', '-X', '-A', '-t', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', 'postgres'], { input: query, timeout }); }
 async function call(path, { method = 'GET', key = anon, token = key, body } = {}) {
   const response = await fetch(`${base}${path}`, { method, signal: AbortSignal.timeout(5000), headers: { apikey: key, Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Prefer: 'return=representation' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   const text = await response.text();
@@ -211,7 +218,7 @@ async function main() {
   assert.equal(report.local_checks_passed, true, 'native assertions failed; inspect private report');
 }
 try { await main(); }
-catch (error) { report.failed = true; report.failure_type = error?.name ?? 'Error'; if (error?.cleanupErrors) report.session_cleanup_failure_types = error.cleanupErrors.map(item => item?.name ?? 'Error'); process.exitCode = 1; }
+catch (error) { report.failed = true; report.failure_type = error?.name ?? 'Error'; if (Number.isInteger(error?.command_status)) report.failure_command_status = error.command_status; if (error?.command_timeout) report.failure_command_timeout = true; if (error?.command_signal) report.failure_command_signal = error.command_signal; if (error?.command_error_type) report.failure_command_error_type = error.command_error_type; if (error?.cleanupErrors) report.session_cleanup_failure_types = error.cleanupErrors.map(item => item?.name ?? 'Error'); process.exitCode = 1; }
 finally {
   if (report.provenance) {
     try { report.provenance.source_changed_during_probe = nativeSourceManifest(root).sha256 !== report.provenance.sources.sha256; }

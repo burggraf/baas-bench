@@ -8,6 +8,8 @@ import { join } from 'node:path';
 import { nativeSourceManifest, pinnedNodeVersion } from './native_v5_provenance.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { SCALE_SNAPSHOT_MIGRATION, RESTORE_APPLICATION_SQL, restoreTrailBaseScaleBaseline } from './native_v5_trailbase_scale.mjs';
+import { restoreSupabaseScaleSQL } from './native_v5_supabase_scale.mjs';
+import { runTrailBaseScaleProbe } from './native_v5_trailbase_scale.mjs';
 import { runNativeConformance, closeNativeSessions } from '../benchmark-sets/realworld-api-v5/shared/lib/native-conformance.mjs';
 import { assertConformance, runConformance } from '../benchmark-sets/realworld-api-v5/shared/lib/conformance.mjs';
 import { fixtureBatches, FIXTURE_COLUMNS } from '../benchmark-sets/realworld-api-v5/shared/lib/fixture.mjs';
@@ -37,6 +39,15 @@ test('TrailBase full restore SQL preserves seeded values and Auth IDs across rep
       assert.equal(state(), before);
     }
   } finally { db.close(); }
+});
+
+test('Supabase scale reset truncates all application tables atomically and restores auth rows', () => {
+  const sql = restoreSupabaseScaleSQL(['users', 'organizations', 'memberships', 'projects', 'tasks', 'comments', 'activities'], '"id","email"', '"id","user_id"');
+  assert.match(sql, /^BEGIN;\nTRUNCATE TABLE public\.activities,public\.comments,public\.tasks,public\.projects,public\.memberships,public\.organizations,public\.users CASCADE;/);
+  assert.match(sql, /INSERT INTO public\.users SELECT \* FROM v5_scale_baseline\.users/);
+  assert.match(sql, /DELETE FROM auth\.users; INSERT INTO auth\.users/);
+  assert.match(sql, /INSERT INTO auth\.identities.*COMMIT;$/);
+  assert.equal((sql.match(/TRUNCATE TABLE/g) ?? []).length, 1);
 });
 
 test('TrailBase restores once then renews the controller session before verification', async () => {
