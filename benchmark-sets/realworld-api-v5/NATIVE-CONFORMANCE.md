@@ -136,17 +136,18 @@ The finishing source digest flags changes during the attempt. A changed or dirty
 source remains diagnostic and requires frozen-revision revalidation. A lockfile
 hash does not attest installed dependency bytes, and provenance alone does not
 qualify a backend. `admission_evidence` remains false; neither guard is relaxed.
-The completed pinned-runtime Supabase attempt recorded clean commit, source
-hashes, and no source changes during the run.
+The completed pinned-runtime Supabase scale and synthetic adversarial attempts
+recorded clean commit, source hashes, and no source changes during each run.
 
 ## Pending
-- Expand the remaining value/relationship corpus. Live membership removal now
-  uses a separate tenant without member-owned/assigned rows: the same session must
-  lose task visibility and receive HTTP 403 on creation while its self profile
-  remains readable; membership restoration must recover visibility. This check,
-  protected user/membership/comment identity-column writes, and valid raw-write
-  controls are implemented but await fresh native runs. Older synthetic findings
-  do not cover these additions.
+- Expand the remaining value/relationship corpus. Fresh pinned-runtime native
+  probes at commit `8d9cc4013706a046a15a7a6a036bc48677f16202` passed live
+  membership removal on a separate tenant, protected user/membership/comment
+  identity-column writes, and valid raw-write controls on both backends. The
+  membership check proved the same session loses task visibility and receives
+  HTTP 403 on create while self-profile remains readable; restoration recovered
+  visibility. These remain synthetic-fixture findings, not declared-scale
+  adversarial coverage.
 - Declared-scale fixture identity and two complete Auth/session reset cycles
   passed for both TrailBase and Supabase at the pinned source/runtime. This does
   not qualify performance or replace fresh adversarial native probes.

@@ -33,6 +33,8 @@ The latest sanitized report, `.runtime/conformance-v5/local-20261001T1740Z/trail
 
 The earlier partial probe and its inventory remain under `.runtime/conformance-v5/local-20261001T154018Z/`; the latest private probe artifacts are under `.runtime/conformance-v5/local-20261001T1740Z/trailbase/`. These small synthetic fixtures do not establish full Auth-account teardown, million-record identity/reset conformance, or the repeated runner reset/warm-up lifecycle. TrailBase remains unqualified.
 
+Fresh synthetic native probes at pinned-source commit `8d9cc4013706a046a15a7a6a036bc48677f16202` passed implemented checks on both backends, including the newly added live membership-removal, protected identity-field, and valid-write-control assertions. Both probes recorded Node 22.23.1, clean source, no mid-run changes, and successful cleanup. Their overall conformance reports correctly remain false because declared-scale-only `fixture-integrity` and `reset-baseline` checks are intentionally absent from synthetic mode. Reports: `.runtime/conformance-v5/trailbase-VhR8W1/report.json` and `.runtime/conformance-v5/supabase-2odFao/report.json`.
+
 ## Repeatable procedure work
 
 The shared known-result native assertions and both disposable procedures are
@@ -83,7 +85,7 @@ separate gates.
 ## Remaining gates
 
 - Promote the private native probes into maintainable committed conformance procedures and bind their verified evidence to V5 run admission/publication. Current private reports and mocked/in-memory tests are not admission evidence.
-- Run fresh native probes for membership removal on a live session and protected-identity writes; those checks were added after the earlier synthetic runs.
+- Expand native conformance to remaining value/relationship corpus and determine which findings must also be repeated at declared scale.
 - Decide eligibility for the other audited cases; exclude any that cannot meet the shared contract.
 - Qualify the corrected runner, repeated baseline/reset/warm-up lifecycle, and measurement profile before enabling any V5 benchmark execution.
 
