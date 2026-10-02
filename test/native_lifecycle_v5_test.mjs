@@ -60,6 +60,15 @@ test('V5 rejects sparse cohorts and does not swallow non-Error workflow failures
   await closeNativeSessions(contexts.map(context => context.session));
 });
 
+test('V5 lifecycle can prepare sessions serially even when adapter default is concurrent', async () => {
+  const backend = fakeBackend(), contexts = [];
+  let interBatchDelays = 0;
+  await prepareWarmupContexts(backend, specs, contexts, { concurrency: 1, wait: async () => { interBatchDelays++; } });
+  assert.equal(interBatchDelays, 49);
+  assert.equal(contexts.length, 50);
+  await closeNativeSessions(contexts.map(context => context.session));
+});
+
 test('V5 preparation failure leaves all successful concurrent sessions available for cleanup', async () => {
   const backend = fakeBackend({ rejectIndex: 3 }), contexts = [];
   await assert.rejects(prepareWarmupContexts(backend, specs, contexts), /login failed/);

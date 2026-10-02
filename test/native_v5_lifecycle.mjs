@@ -7,6 +7,7 @@ import { buildVirtualUserSpecs, entityId } from '../benchmark-sets/realworld-api
 import { runBaselinePhases } from '../benchmark-sets/realworld-api-v5/shared/lib/conformance.mjs';
 import { prepareWarmupContexts, runWarmup, WARMUP } from '../benchmark-sets/realworld-api-v5/shared/lib/warmup.mjs';
 import { closeNativeSessions } from '../benchmark-sets/realworld-api-v5/shared/lib/native-conformance.mjs';
+import { classifyOperationError } from '../benchmark-sets/realworld-api-v5/shared/lib/correctness.mjs';
 import { restoreSupabaseScaleSQL } from './native_v5_supabase_scale.mjs';
 import { restoreTrailBaseScaleBaseline } from './native_v5_trailbase_scale.mjs';
 
@@ -47,7 +48,7 @@ export async function runNativeLifecycleProbe({ platform, execute, rows: queryRo
   const postgres = platform === 'supabase', prefix = postgres ? 'public.' : '', id = postgres ? 'id' : 'external_id';
   const fixture = await lifecycleFixture();
   const evidence = { passed: false, scope: 'reduced-fixture-lifecycle-diagnostic', admission_evidence: false, measurement_qualified: false,
-    warmup: WARMUP, fixture: Object.fromEntries(tables.map(table => [table, { count: fixture.rows[table].length, sha256: digest(fixture.rows[table]) }])), cycles: [] };
+    warmup: WARMUP, session_preparation_concurrency: 1, fixture: Object.fromEntries(tables.map(table => [table, { count: fixture.rows[table].length, sha256: digest(fixture.rows[table]) }])), cycles: [] };
   const save = phase => {
     evidence.phase = phase;
     evidence.updated_at = new Date().toISOString();
@@ -98,7 +99,7 @@ export async function runNativeLifecycleProbe({ platform, execute, rows: queryRo
           assert.equal(await authState(), authBaseline);
           return true;
         },
-        async prepareSessions() { save(`prepare-${cycle}`); return prepareWarmupContexts(backend, fixture.specs, contexts); },
+        async prepareSessions() { save(`prepare-${cycle}`); return prepareWarmupContexts(backend, fixture.specs, contexts, { concurrency: 1 }); },
         async warmUp() {
           save(`warm-up-${cycle}`);
           evidence.current_warmup = await runWarmup(contexts);
@@ -120,8 +121,11 @@ export async function runNativeLifecycleProbe({ platform, execute, rows: queryRo
           delete evidence.current_warmup;
         },
       });
-    } catch (error) { failure = error; }
-    finally { await closeNativeSessions(contexts.map(context => context?.session), failure); }
+    } catch (error) {
+      failure = error;
+      evidence.failure = { type: error?.name === 'BenchmarkOperationError' ? 'BenchmarkOperationError' : 'Error', classification: classifyOperationError(error), ...(Number.isInteger(error?.status) && error.status >= 100 && error.status <= 599 ? { status: error.status } : {}) };
+      save(`failed-${cycle}`);
+    } finally { await closeNativeSessions(contexts.map(context => context?.session), failure); }
     save(`cycle-${cycle}-complete`);
   }
   evidence.passed = true;

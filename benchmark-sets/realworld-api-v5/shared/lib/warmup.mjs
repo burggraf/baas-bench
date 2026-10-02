@@ -7,9 +7,9 @@ export const WARMUP = Object.freeze({ users: 50, durationMs: 120000, seed: 42, t
 export const WORKFLOW_WEIGHTS = Object.freeze({ dashboard: 20, taskList: 25, taskDetail: 15, createTask: 10, updateTask: 12, addComment: 10, search: 5, profileUpdate: 1, signIn: 2 });
 
 // Callers own contexts, including partially prepared cohorts on failure.
-export async function prepareWarmupContexts(backend, specs, contexts, { now = () => performance.now(), wait = sleep } = {}) {
+export async function prepareWarmupContexts(backend, specs, contexts, { now = () => performance.now(), wait = sleep, concurrency: requestedConcurrency } = {}) {
   if (contexts.length || specs.length !== WARMUP.users) throw new Error('warm-up requires a fresh 50-user cohort');
-  const concurrency = Math.min(10, backend.sessionPreparationConcurrency ?? 10);
+  const concurrency = requestedConcurrency ?? Math.min(10, backend.sessionPreparationConcurrency ?? 10);
   if (!Number.isSafeInteger(concurrency) || concurrency < 1) throw new Error('invalid preparation concurrency');
   for (let start = 0; start < specs.length; start += concurrency) {
     const results = await Promise.allSettled(specs.slice(start, start + concurrency).map(async (spec, offset) => {

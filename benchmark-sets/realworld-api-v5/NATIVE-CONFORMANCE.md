@@ -145,8 +145,9 @@ claim the million-record fixture again. Source subset hashes/counts and private
 native baseline digests are retained in `lifecycle-evidence.json`.
 
 Two cycles exercise acknowledged complete subset application/Auth restoration,
-baseline digest verification, bounded fresh-session preparation, and the same
-120-second/50-user warm-up. The V5-owned copy of the logical workflows retains the
+baseline digest verification, serial fresh-session preparation (the diagnostic
+avoids an unrepresentative 10-login burst), and the same 120-second/50-user
+warm-up. Each request retains the five-second deadline. The V5-owned copy of the logical workflows retains the
 approved weights, global-user seed derivation, think times, page sizes and
 five-second API deadlines; it does not import the V4 workload runner/controller.
 A failed phase prevents stage entry without a retry. Peers drain before cleanup;
