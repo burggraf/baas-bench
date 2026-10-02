@@ -5,6 +5,7 @@ import { WORKFLOW_WEIGHTS, WARMUP, prepareUserContexts, runWarmup } from './warm
 import { assertConformance, runStageFromBaseline } from './conformance.mjs';
 import { closeNativeSessions } from './native-conformance.mjs';
 import { StageMetricsAccumulator } from './metrics.mjs';
+import { startProcessTelemetry } from './telemetry.mjs';
 import { withRemoteMeasurement } from './measurement.mjs';
 import { isIntegrityError, isSessionLossError } from './errors.mjs';
 
@@ -53,7 +54,7 @@ export async function runTimedWindow(contexts, { durationMs, onSample, onBoundar
     if (startAt !== undefined && startAt > wallNow()) await wait(startAt - wallNow(), signal);
     if (signal?.aborted) throw new Error('stage cancelled');
     if (startAt !== undefined && wallNow() - startAt > 100) throw new Error('stage start alignment exceeded');
-    await onBoundary('start', { startAt, durationMs });
+    await onBoundary('start', { startAt: startAt ?? wallNow(), durationMs });
     if (startAt !== undefined && wallNow() - startAt > 100) throw new Error('stage start alignment exceeded');
     started = now(); measuring = true;
     const deadline = started + durationMs;
@@ -119,23 +120,27 @@ export async function runTimedStageFromBaseline({ conformance, backend, users, r
   if (!Number.isSafeInteger(requestedUsers) || requestedUsers < 1 || requestedUsers > 10000 || !Array.isArray(users) || users.length !== Math.max(requestedUsers, WARMUP.users) || typeof warmUp !== 'function' || !Number.isFinite(durationMs) || durationMs <= 0) throw new Error('invalid measured-stage profile');
   const contexts = [];
   const accumulator = new StageMetricsAccumulator({ maxLatencySamples: 5000000 });
-  let failure;
+  let failure, telemetry, processTelemetry;
   try {
     return await runStageFromBaseline({ conformance, reset, verifyBaseline, stage: requestedUsers,
       prepareSessions: () => prepareUserContexts(backend, users, contexts, { concurrency: 1, signal }),
       warmUp: async () => (await warmUp(contexts.slice(0, WARMUP.users))).passed === true,
       async measure() {
         const workload = await runTimedWindow(contexts.slice(0, requestedUsers), { durationMs, signal,
-          onSample(sample) { accumulator.record(sample); onSample(sample); } });
+          onSample(sample) { accumulator.record(sample); onSample(sample); },
+          async onBoundary(phase, info) {
+            if (phase === 'start') telemetry = await startProcessTelemetry({ startAt: info.startAt, signal });
+            else processTelemetry = telemetry.stop();
+          } });
         if (!(workload.elapsedMs > 0)) throw new Error('timing boundary unavailable');
         const metrics = accumulator.finalize(workload.elapsedMs / 1000, { requestedUsers, achievedUsers: workload.startedUsers - workload.lostUsers });
         // Accumulator validity is not whole-stage validity: missing telemetry is unknown, not pass.
         metrics.valid = false;
         metrics.validityReasons.push(...workload.failureReasons, 'multicore/telemetry qualification pending');
-        return { workload, metrics, admission_evidence: false, measurement_qualified: false,
+        return { workload, metrics, process_telemetry: processTelemetry, admission_evidence: false, measurement_qualified: false,
           profile_duration_matches: durationMs === stageDurationMs(requestedUsers) };
       },
     });
   } catch (error) { failure = error; throw error; }
-  finally { await closeNativeSessions(contexts.map(context => context?.session), failure); }
+  finally { telemetry?.stop(); await closeNativeSessions(contexts.map(context => context?.session), failure); }
 }

@@ -195,6 +195,27 @@ remain blocked. Runnable framework check, without services:
 node --test test/timed_stage_v5_test.mjs test/native_lifecycle_v5_test.mjs
 ```
 
+## Process telemetry candidate
+
+`shared/lib/telemetry.mjs` samples a process at absolute five-second ticks using
+standard Node CPU/RSS and event-loop histogram counters. The timed-stage wrapper
+starts/stops this sampler at its measured boundaries, outside session cleanup.
+The validator rejects missing/malformed/non-monotonic or misaligned samples,
+start lateness over 100 ms, and telemetry ending before the shared stage end.
+Each coordinator/worker source must pass separately; duplicate PIDs or a missing
+member of the three-worker cohort fail. Three consecutive breaches of CPU >90%,
+event-loop p99 >100 ms, or event-loop maximum >250 ms invalidate attribution.
+
+Short sampler intervals exist only for the service-free regression check and
+cannot qualify the profile. This is process telemetry, **not** backend host,
+container, restart, routing or storage evidence. It does not yet supply the
+three-worker coordinator. Stage validity and admission remain blocked pending
+those integrations and native qualification. Check:
+
+```sh
+node --test test/telemetry_v5_test.mjs test/timed_stage_v5_test.mjs
+```
+
 ## Diagnostic source provenance
 
 New attempts record the starting Git commit, dirty-worktree flag, actual Node
