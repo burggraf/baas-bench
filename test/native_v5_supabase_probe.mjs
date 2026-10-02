@@ -136,11 +136,12 @@ async function main() {
   }
   const now = '2026-01-01T00:00:00.000Z';
   const title = String.raw`A literal 100%_work\load [special].*`;
+  const unicodeTitle = 'Ångström 東京 Café';
   sql(users.map(user => `INSERT INTO public.users VALUES(${quote(user.role)},${quote(user.subject)},${quote(user.email)},${quote(user.role)},'${now}','${now}');`).join('\n') + `
     INSERT INTO public.organizations VALUES('orga','A','owner','${now}'),('orgb','B','outsider','${now}');
     INSERT INTO public.memberships VALUES('mowner','orga','owner','owner','${now}'),('madmin','orga','admin','admin','${now}'),('mmember','orga','member','member','${now}'),('moutsider','orgb','outsider','owner','${now}');
     INSERT INTO public.projects VALUES('projecta','orga','A','active','${now}','${now}'),('projectb','orgb','B','active','${now}','${now}');
-    INSERT INTO public.tasks(id,organization_id,project_id,creator_id,assignee_id,title,description,status,priority,due_date,created_at,updated_at) VALUES('taska','orga','projecta','owner','member',${quote(title)},'','todo','low',NULL,'${now}','${now}'),('tasknull','orga','projecta','owner',NULL,'Null assignee','','todo','low',NULL,'${now}','${now}'),('taskb','orgb','projectb','outsider',NULL,'Outside','','todo','low',NULL,'${now}','${now}');
+    INSERT INTO public.tasks(id,organization_id,project_id,creator_id,assignee_id,title,description,status,priority,due_date,created_at,updated_at) VALUES('taska','orga','projecta','owner','member',${quote(title)},'','todo','low',NULL,'${now}','${now}'),('tasknull','orga','projecta','owner',NULL,'Null assignee','','todo','low',NULL,'${now}','${now}'),('taskb','orgb','projectb','outsider',NULL,'Outside','','todo','low',NULL,'${now}','${now}'),('taskunicode','orga','projecta','owner',NULL,${quote(unicodeTitle)},'','todo','low',NULL,'${now}','${now}');
     INSERT INTO public.organizations VALUES('revorg','Revocation','owner','${now}');
     INSERT INTO public.memberships VALUES('revowner','revorg','owner','owner','${now}'),('revmember','revorg','member','member','${now}');
     INSERT INTO public.projects VALUES('revproject','revorg','Revocation','active','${now}','${now}');
@@ -158,7 +159,7 @@ async function main() {
   const { member, outsider } = sessions;
   const scope = { organizationId: 'orga', projectId: 'projecta' };
   const raw = (session, table, id) => call(`/rest/v1/${table}?id=eq.${id}`, { token: session.accessToken });
-  const state = () => sql("SELECT jsonb_build_object('tasks',(SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM public.tasks t),'activities',(SELECT jsonb_agg(to_jsonb(a) ORDER BY id) FROM public.activities a))").trim();
+  const state = () => sql("SELECT jsonb_build_object('tasks',(SELECT jsonb_agg(to_jsonb(t) ORDER BY id) FROM public.tasks t),'comments',(SELECT jsonb_agg(to_jsonb(c) ORDER BY id) FROM public.comments c),'activities',(SELECT jsonb_agg(to_jsonb(a) ORDER BY id) FROM public.activities a))").trim();
   const denied = async (path, body, session = member) => {
     const response = await call(`/rest/v1/${path}`, { method: path.includes('?') ? 'PATCH' : 'POST', token: session.accessToken, body });
     assert.ok(!response.ok || (Array.isArray(response.data) && response.data.length === 0), 'native forbidden write succeeded');
@@ -195,9 +196,22 @@ async function main() {
       const control = await call('/rest/v1/tasks', { method: 'POST', token: member.accessToken, body: { ...payload, id: 'validcontrol', title: 'Valid native integrity control' } });
       assert.equal(control.ok, true); assert.equal(control.data[0].id, 'validcontrol');
       const unchanged = state();
-      for (const changes of [{ project_id: 'projectb' }, { assignee_id: 'outsider' }, { status: 'invalid' }, { priority: 'invalid' }, { title: '' }]) await denied('tasks', { ...payload, ...changes });
+      const rejected4xx = async (table, body) => {
+        const response = await call(`/rest/v1/${table}`, { method: 'POST', token: member.accessToken, body });
+        assert.ok(response.status >= 400 && response.status < 500, `malformed ${table} write must be rejected as client input`);
+      };
+      for (const changes of [{ organization_id: 'orgb' }, { project_id: 'projectb' }, { creator_id: 'missing' }, { assignee_id: 'outsider' }, { assignee_id: 'missing' },
+        { status: 'invalid' }, { priority: 'invalid' }, { title: '' }, { title: null }, { description: null }]) await rejected4xx('tasks', { ...payload, ...changes });
+      const commentPayload = { id: 'commentcontrol', organization_id: 'orga', project_id: 'projecta', task_id: 'validcontrol', author_id: 'member', body: 'Valid native relationship control', created_at: now, updated_at: now };
+      const commentControl = await call('/rest/v1/comments', { method: 'POST', token: member.accessToken, body: commentPayload });
+      assert.equal(commentControl.ok, true); assert.equal(commentControl.data[0].id, 'commentcontrol');
+      const afterCommentControl = state();
+      for (const changes of [{ organization_id: 'orgb' }, { project_id: 'projectb' }, { task_id: 'taskb' }, { author_id: 'outsider' }, { author_id: 'missing' }, { body: '' }, { body: null }]) {
+        await rejected4xx('comments', { ...commentPayload, id: 'commentinvalid', ...changes });
+      }
       assert.notEqual(unchanged, before);
-      assert.equal(state(), unchanged); return true;
+      assert.equal(state(), afterCommentControl);
+      return true;
     },
     async 'atomic-activity'() {
       task = await member.createTask({ ...scope, title: 'V5 created', description: '' });
@@ -226,7 +240,7 @@ async function main() {
     },
   };
   report.phase = 'native-checks';
-  report.conformance = await runNativeConformance({ sessions, fixture: { ...scope, taskId: 'taska', otherAuthorCommentId: 'commenta', memberMembershipId: 'mmember', taskIds: ['taska', 'tasknull'], unassignedTaskIds: ['tasknull'], searches: [{ query: String.raw`100%_work\load [special].*`, ids: ['taska'] }, { query: 'LITERAL', ids: ['taska'] }, { query: 'nonmatching sentinel', ids: [] }] }, membershipRemoval: { scope: { organizationId: 'revorg', projectId: 'revproject' }, taskIds: ['revtask'], remove: async () => sql("DELETE FROM public.memberships WHERE id='revmember'"), restore: async () => sql(`INSERT INTO public.memberships VALUES('revmember','revorg','member','member','${now}') ON CONFLICT DO NOTHING`) }, readAuthState: async () => JSON.parse(sql("SELECT row_to_json(u) FROM auth.users u WHERE email='member@v5-probe.example.test'")), checks });
+  report.conformance = await runNativeConformance({ sessions, fixture: { ...scope, taskId: 'taska', otherAuthorCommentId: 'commenta', memberMembershipId: 'mmember', taskIds: ['taska', 'tasknull', 'taskunicode'], unassignedTaskIds: ['tasknull', 'taskunicode'], searches: [{ query: String.raw`100%_work\load [special].*`, ids: ['taska'] }, { query: 'LITERAL', ids: ['taska'] }, { query: 'nonmatching sentinel', ids: [] }, { query: 'ÅNGSTRÖM', ids: ['taskunicode'], unicode: true }, { query: '東京', ids: ['taskunicode'], unicode: true }, { query: 'CAFÉ', ids: ['taskunicode'], unicode: true }, { query: 'Café', ids: [], unicode: true }] }, membershipRemoval: { scope: { organizationId: 'revorg', projectId: 'revproject' }, taskIds: ['revtask'], remove: async () => sql("DELETE FROM public.memberships WHERE id='revmember'"), restore: async () => sql(`INSERT INTO public.memberships VALUES('revmember','revorg','member','member','${now}') ON CONFLICT DO NOTHING`) }, readAuthState: async () => JSON.parse(sql("SELECT row_to_json(u) FROM auth.users u WHERE email='member@v5-probe.example.test'")), checks });
   const expectedMissing = ['fixture-integrity', 'reset-baseline'];
   report.local_checks_passed = report.conformance.findings.every(row => row.passed === !expectedMissing.includes(row.name));
   assert.equal(report.local_checks_passed, true, 'native assertions failed; inspect private report');

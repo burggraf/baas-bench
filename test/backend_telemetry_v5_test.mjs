@@ -47,7 +47,8 @@ test('Backend validation requires complete aligned coverage and invalidates host
   const startAt = 100000, endedAt = 115000, host = parseLinuxHost(hostInput());
   const report = () => ({ platform: 'linux', project, containerIds: [id], startAt, startedAt: startAt, endedAt, intervalMs: 5000, baseline: { host, states: [state()] }, final: { host, states: [state()] }, failureReasons: [],
     samples: [1, 2, 3].map(index => ({ timestampMs: startAt + index * 5000, host: structuredClone(host), states: [state()], containers: { cpuPercent: 1, memoryBytes: 100, count: 1 } })) });
-  assert.equal(validateBackendTelemetry(report(), { startAt, endedAt, project, containerIds: [id] }).valid, true);
+  assert.equal(validateBackendTelemetry(report(), { startAt, endedAt, durationMs: 15000, project, containerIds: [id] }).valid, true);
+  assert.equal(validateBackendTelemetry(report(), { startAt, endedAt, durationMs: 15001, project, containerIds: [id] }).valid, false);
   for (const change of [r => { r.platform = 'darwin'; }, r => { r.samples.pop(); }, r => { r.samples[1].timestampMs += 5000; }, r => { r.final.states[0].restarts++; }, r => { r.final.host = { ...host, bootId: '87654321-1234-1234-1234-123456789012' }; }, r => { r.samples[1].host.cpu.total = 0; }, r => { r.samples[1].host.oomKillCount++; }, r => { r.samples[1].containers.count = 0; }]) {
     const r = report(); change(r); assert.equal(validateBackendTelemetry(r, { startAt, endedAt, project, containerIds: [id] }).valid, false);
   }

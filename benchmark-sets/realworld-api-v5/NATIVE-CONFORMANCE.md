@@ -201,7 +201,9 @@ node --test test/timed_stage_v5_test.mjs test/native_lifecycle_v5_test.mjs
 standard Node CPU/RSS and event-loop histogram counters. The timed-stage wrapper
 starts/stops this sampler at its measured boundaries, outside session cleanup.
 The validator rejects missing/malformed/non-monotonic or misaligned samples,
-start lateness over 100 ms, and telemetry ending before the shared stage end.
+start lateness over 100 ms, telemetry ending before the shared stage end, and
+fewer than `ceil(requested duration / 5s)` ticks even if wall-clock drift makes
+the observed interval appear slightly shorter.
 Each coordinator/worker source must pass separately; duplicate PIDs or a missing
 member of the three-worker cohort fail. Three consecutive breaches of CPU >90%,
 event-loop p99 >100 ms, or event-loop maximum >250 ms invalidate attribution.
@@ -305,6 +307,25 @@ node test/native_v5_supabase_probe.mjs --local-timed-stage
 These commands are opt-in native probes, not repository regression tests. No
 successful timed native report is claimed until a frozen-revision probe finishes
 and its owned cleanup/provenance are inspected.
+
+## Malformed values, relationships, and Unicode search
+
+The raw native `server-integrity` assertion now pairs valid task/comment control
+writes with 4xx rejection of malformed title/description/enum/identity values
+and broken project/organization, creator/assignee, and comment/task/project/
+organization/author links. Application and activity tables are compared before
+and after the rejection set; no invalid partial write may survive. This extends
+server-side evidence beyond adapter validation.
+
+Known-result search includes composed `Ångström 東京 Café`, matched by `ÅNGSTRÖM`,
+`東京`, and `CAFÉ`, as well as a decomposed `Cafe\u0301` nonmatch. These are literal
+Unicode/code-point probes, not a general guarantee of locale-aware full case
+folding or canonical normalization. The probe reports actual pinned native
+behavior; qualification must disclose the backend locale and all results. A new
+fixture row also participates in pagination and the explicit-unassigned filter.
+
+The expanded probes have not yet been executed on native stacks. Existing results
+must not be interpreted as covering these new inputs.
 
 ## Diagnostic source provenance
 

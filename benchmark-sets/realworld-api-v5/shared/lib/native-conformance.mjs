@@ -44,6 +44,8 @@ export async function runNativeConformance({ sessions, fixture, readAuthState, m
     async 'search-semantics'() {
       assert.ok(Array.isArray(fixture.searches) && fixture.searches.length >= 2, 'matching and nonmatching searches are required');
       assert.ok(fixture.searches.some(row => row.ids.length > 0) && fixture.searches.some(row => row.ids.length === 0));
+      assert.ok(fixture.searches.some(row => row.unicode === true && row.ids.length > 0), 'Unicode known-result search required');
+      assert.ok(fixture.searches.some(row => row.unicode === true && row.ids.length === 0), 'Unicode normalization boundary required');
       for (const { query, ids } of fixture.searches) {
         const page = await member.searchTasks({ ...scope, query, page: 0, pageSize: 100 });
         assert.deepEqual(page.items.map(row => row.id), ids);

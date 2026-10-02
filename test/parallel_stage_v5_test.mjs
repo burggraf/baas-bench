@@ -29,6 +29,8 @@ test('V5 forks three real workers, preserves the global cohort, pools delivered 
   assert.ok(samples.some(sample => sample.type === 'workflow'));
   assert.equal(result.metrics.requestedUsers, 3);
   assert.equal(result.metrics.achievedUsers, 3);
+  assert.equal(result.coordinatorTelemetry.pid, process.pid);
+  assert.equal(result.coordinatorTelemetry.intervalMs, 5000);
   assert.equal(result.metrics.valid, false);
   assert.equal(result.measurement_qualified, false);
   assert.equal(result.admission_evidence, false);

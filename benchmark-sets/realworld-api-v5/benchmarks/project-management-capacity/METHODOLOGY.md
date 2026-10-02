@@ -15,6 +15,10 @@ native-backend conformance evidence.
   regexp punctuation require known-result fixtures; do not silently reinterpret
   user text as a wildcard expression or filter one fetched page in the client.
   Native locale/Unicode behavior must be tested/disclosed before qualification.
+  The native probe includes composed `Ångström 東京 Café` results queried as
+  `ÅNGSTRÖM`, `東京`, and `CAFÉ`, plus a decomposed `Cafe\u0301` nonmatch; do not
+  silently normalize input or titles. Record the pinned backend locale and actual
+  results rather than inferring cross-platform Unicode equivalence.
 - Tasks/comments/search return exact filtered totals on first, intermediate,
   empty and beyond-end pages. Ascending `(created_at, logical application ID)`
   breaks ties; dashboard activities use the descending pair. An absent total is

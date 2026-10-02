@@ -115,7 +115,8 @@ export async function runNativeLifecycleProbe({ platform, execute, rows: queryRo
         assert.equal(counts.reduce((sum, row) => sum + row.attempted, 0), delivered, 'every delivered native/workflow sample must be accounted for');
         evidence.cycles.push({ cycle, baseline_restored: true, native_auth_restored: true, warm_state_retained: true, timed_window_completed: true,
           users: result.metrics.requestedUsers, achieved_users: result.metrics.achievedUsers, start_at_ms: result.startAt, end_at_ms: result.endedAt,
-          operation_counts: counts, delivered_samples: delivered, process_telemetry: result.telemetry, worker_telemetry: result.workers,
+          operation_counts: counts, delivered_samples: delivered, process_telemetry: result.telemetry, coordinator_telemetry: result.coordinatorTelemetry,
+          worker_telemetry: result.workers,
           backend_telemetry: result.backendTelemetry, measurement_qualified: false, admission_evidence: false });
         save(`timed-window-${cycle}`);
         assert.equal(result.metrics.achievedUsers, WARMUP.users);

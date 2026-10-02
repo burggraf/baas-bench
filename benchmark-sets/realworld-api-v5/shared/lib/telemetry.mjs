@@ -39,14 +39,16 @@ export async function startProcessTelemetry({ startAt, intervalMs = TELEMETRY_IN
   return { stop };
 }
 
-export function validateProcessTelemetry(report, { startAt, endedAt } = {}) {
+export function validateProcessTelemetry(report, { startAt, endedAt, durationMs } = {}) {
   const reasons = [];
   if (!Number.isSafeInteger(startAt) || !Number.isSafeInteger(endedAt) || endedAt <= startAt) return { valid: false, validityReasons: ['invalid telemetry boundary'] };
   if (!report || !Number.isSafeInteger(report.pid) || report.pid < 1 || !Number.isSafeInteger(report.startedAt) || !Number.isSafeInteger(report.endedAt) || report.intervalMs !== TELEMETRY_INTERVAL_MS || !Array.isArray(report.samples)) return { valid: false, validityReasons: ['missing or malformed process telemetry'] };
   if (Math.abs(report.startedAt - startAt) > 100) reasons.push('process start alignment exceeded');
   if (report.endedAt < endedAt) reasons.push('process telemetry ended before stage');
-  const count = Math.floor((report.endedAt - startAt) / TELEMETRY_INTERVAL_MS);
-  if (count < 1 || report.samples.length !== count) reasons.push('process telemetry samples incomplete');
+  const expectedSamples = Number.isSafeInteger(durationMs) && durationMs > 0
+    ? Math.ceil(durationMs / TELEMETRY_INTERVAL_MS)
+    : Math.floor((report.endedAt - startAt) / TELEMETRY_INTERVAL_MS);
+  if (expectedSamples < 1 || report.samples.length !== expectedSamples) reasons.push('process telemetry samples incomplete for requested stage duration');
   let previous = startAt;
   for (let index = 0; index < report.samples.length; index++) {
     const row = report.samples[index];

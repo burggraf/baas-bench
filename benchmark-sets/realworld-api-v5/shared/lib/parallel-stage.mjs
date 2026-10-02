@@ -105,11 +105,11 @@ async function runParallelPhases({ conformance, reset, verifyBaseline, users, re
         const sum = key => outcomes.reduce((total, row) => total + row.result[key], 0);
         if (sum('requestedUsers') !== requestedUsers || sum('startedUsers') !== requestedUsers) throw new Error('measured cohort mismatch');
         const metrics = accumulator.finalize((endedAt - startAt) / 1000, { requestedUsers, achievedUsers: sum('startedUsers') - sum('lostUsers') });
-        const telemetry = validateRunnerTelemetry({ coordinator: processReport, workers: reports.map(row => row.resources) }, { startAt, endedAt });
-        const backendTelemetry = validateBackendTelemetry(backendReport, { startAt, endedAt, containerIds: backendOwnership?.containerIds, project: backendOwnership?.project });
+        const telemetry = validateRunnerTelemetry({ coordinator: processReport, workers: reports.map(row => row.resources) }, { startAt, endedAt, durationMs });
+        const backendTelemetry = validateBackendTelemetry(backendReport, { startAt, endedAt, durationMs, containerIds: backendOwnership?.containerIds, project: backendOwnership?.project });
         metrics.valid = false;
         metrics.validityReasons.push(...telemetry.validityReasons, ...backendTelemetry.validityReasons, 'native measurement qualification pending');
-        return { metrics, telemetry, backendTelemetry, backendReport, workers: reports.map((row, index) => ({ pid: workers[index].pid, samples: row.sampleCount, resources: row.resources })),
+        return { metrics, telemetry, coordinatorTelemetry: processReport, backendTelemetry, backendReport, workers: reports.map((row, index) => ({ pid: workers[index].pid, samples: row.sampleCount, resources: row.resources })),
           startAt, endedAt, admission_evidence: false, measurement_qualified: false, diagnostic };
       },
     });

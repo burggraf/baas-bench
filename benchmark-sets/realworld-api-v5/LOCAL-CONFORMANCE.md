@@ -82,6 +82,34 @@ behavior only, not benchmark measurement, capacity, durability after power loss,
 or qualification. Identical warm-up and the measurement lifecycle remain
 separate gates.
 
+## Three-worker native timed diagnostics (not qualification)
+
+Both disposable backends completed the new `--local-timed-stage` mode on the
+same frozen, clean source revision `3f0702496a4f92ef80739238f88fb9e2d84827c9`
+with exact Node 22.23.1, matching source-manifest SHA-256
+`e896e964c97357e3b9450d5eb8f30e4bfe6d3fdf1b7e9693ca24c0d63400fa61`, no
+source edits during the run, and owned-stack cleanup confirmed. TrailBase ran
+first, then Supabase. Private reports:
+
+- TrailBase: `.runtime/conformance-v5/trailbase-w1H0Mm/report.json`
+- Supabase: `.runtime/conformance-v5/supabase-D9ltIU/report.json`
+
+Each backend completed two 300-second windows with all 50 actors achieved,
+restored application/Auth baseline before each cycle, retained warm-up writes,
+and recorded zero failed workflow/native-operation samples. The pooled delivered
+sample totals were 32,854 for TrailBase and 28,285 for Supabase. A stricter
+post-run review now requires all 60 scheduled five-second samples for each
+300-second stage: TrailBase cycle 2 had only 59 samples on each worker and must
+be invalidated. Supabase workers had 60 in both cycles. The initial diagnostic
+reports did not retain the coordinator's raw sample series, so that series cannot
+be independently rechecked; the current runner now preserves it. These are private
+reduced-fixture diagnostic counts, **not** throughput/latency results, a ranking,
+or admission evidence. No Linux backend-host/container telemetry was available
+from this macOS Docker Desktop run: backend telemetry is explicitly invalid/missing.
+The reports retain `admission_evidence: false` and `measurement_qualified: false`;
+both CLI guards remain unchanged. No Linode
+resources were provisioned and no comparative/publication authorization was used.
+
 ## Remaining gates
 
 - Promote the private native probes into maintainable committed conformance procedures and bind their verified evidence to V5 run admission/publication. Current private reports and mocked/in-memory tests are not admission evidence.

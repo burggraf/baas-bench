@@ -87,13 +87,15 @@ function validateHost(host, previous) {
   }
 }
 
-export function validateBackendTelemetry(report, { startAt, endedAt, containerIds, project } = {}) {
+export function validateBackendTelemetry(report, { startAt, endedAt, durationMs, containerIds, project } = {}) {
   const reasons = [];
   try {
     validateBackendOwnership(containerIds, project);
     if (!Number.isSafeInteger(startAt) || !Number.isSafeInteger(endedAt) || endedAt <= startAt || !report || report.platform !== 'linux' || report.startAt !== startAt || report.endedAt < endedAt || !Number.isSafeInteger(report.endedAt) || !Number.isSafeInteger(report.startedAt) || Math.abs(report.startedAt - startAt) > 100 || report.intervalMs !== TELEMETRY_INTERVAL_MS || report.project !== project || JSON.stringify([...report.containerIds].sort()) !== JSON.stringify([...containerIds].sort())) throw new Error('backend telemetry boundary/source mismatch');
-    const expected = Math.floor((endedAt - startAt) / TELEMETRY_INTERVAL_MS);
-    if (expected < 1 || !Array.isArray(report.samples) || report.samples.length !== expected || report.failureReasons?.length) throw new Error('backend telemetry incomplete');
+    const expected = Number.isSafeInteger(durationMs) && durationMs > 0
+      ? Math.ceil(durationMs / TELEMETRY_INTERVAL_MS)
+      : Math.floor((endedAt - startAt) / TELEMETRY_INTERVAL_MS);
+    if (expected < 1 || !Array.isArray(report.samples) || report.samples.length !== expected || report.failureReasons?.length) throw new Error('backend telemetry incomplete for requested stage duration');
     validateOwnedState(report.baseline?.states, { containerIds, project });
     validateHost(report.baseline?.host);
     let previous = report.baseline.host, timestamp = startAt;

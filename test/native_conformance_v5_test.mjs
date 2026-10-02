@@ -150,9 +150,9 @@ test('native session cleanup tries every session and preserves the primary error
 function probe({ badSearch = false, badCount = false, staleRole = false, authWrite = false, staleMembership = false } = {}) {
   let active = true;
   let role = 'member', body = 'Original', displayName = 'Member', authName = 'Native';
-  const fixture = { organizationId: 'org', projectId: 'project', taskId: 'a', otherAuthorCommentId: 'comment', memberMembershipId: 'membership', taskIds: ['a', 'b'], unassignedTaskIds: ['b'], searches: [{ query: 'literal_%\\.*', ids: ['a'] }, { query: 'missing', ids: [] }] };
+  const fixture = { organizationId: 'org', projectId: 'project', taskId: 'a', otherAuthorCommentId: 'comment', memberMembershipId: 'membership', taskIds: ['a', 'b'], unassignedTaskIds: ['b'], searches: [{ query: 'literal_%\\.*', ids: ['a'] }, { query: 'missing', ids: [] }, { query: 'ÅNGSTRÖM', ids: ['a'], unicode: true }, { query: 'Café', ids: [], unicode: true }] };
   const member = {
-    async searchTasks({ query }) { const ids = query === 'missing' ? [] : ['a']; return { items: (badSearch ? ['wrong'] : ids).map(id => ({ id })), total: ids.length, hasNext: false }; },
+    async searchTasks({ query }) { const ids = fixture.searches.find(row => row.query === query)?.ids ?? []; return { items: (badSearch ? ['wrong'] : ids).map(id => ({ id })), total: ids.length, hasNext: false }; },
     async createTask() { if (!active && !staleMembership) throw Object.assign(new Error('denied'), { status: 403 }); return { id: 'unexpected' }; },
     async listTasks({ organizationId, assigneeId, page }) { if (organizationId === 'revorg') { const ids = active || staleMembership ? ['revtask'] : []; return { items: ids.map(id => ({ id })), total: ids.length }; } const ids = assigneeId === null ? ['b'] : ['a', 'b']; return { items: ids.slice(page, page + 1).map(id => ({ id })), total: badCount && page >= ids.length ? 0 : ids.length, hasNext: page + 1 < ids.length, page, pageSize: 1 }; },
     async getTask() { return { comments: { items: [{ id: 'comment', body }] } }; },
@@ -194,6 +194,12 @@ test('empty search or pagination fixtures cannot pass vacuously', async () => {
   const input = probe(); input.fixture.searches = []; input.fixture.taskIds = [];
   const report = await runNativeConformance(input);
   for (const name of ['search-semantics', 'pagination-and-null-filters']) assert.equal(report.findings.find(row => row.name === name).passed, false);
+});
+
+test('native search cannot pass without Unicode match and canonical-normalization boundary fixtures', async () => {
+  const input = probe(); input.fixture.searches = input.fixture.searches.filter(row => !row.unicode);
+  const report = await runNativeConformance(input);
+  assert.equal(report.findings.find(row => row.name === 'search-semantics').passed, false);
 });
 
 test('shared profile check cannot pass without a native Auth-state reader', async () => {
