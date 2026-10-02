@@ -18,8 +18,8 @@ export function stageDurationMs(users) {
 // Prepared sessions/cursors belong to the caller. No setup, reset or cleanup is timed here.
 // This kernel alone is not admission evidence or a qualified measurement profile.
 export async function runTimedWindow(contexts, { durationMs, onSample, onBoundary = async () => {}, signal, startAt,
-  now = () => performance.now(), wallNow = Date.now, graceMs = WARMUP.timeoutMs } = {}) {
-  if (!Array.isArray(contexts) || !contexts.length || Array.from(contexts).some(context => !context?.session || typeof context.random !== 'function')) throw new Error('incomplete measured cohort');
+  now = () => performance.now(), wallNow = Date.now, graceMs = WARMUP.timeoutMs, allowIdle = false } = {}) {
+  if (!Array.isArray(contexts) || (!contexts.length && !allowIdle) || Array.from(contexts).some(context => !context?.session || typeof context.random !== 'function')) throw new Error('incomplete measured cohort');
   if (!Number.isFinite(durationMs) || durationMs <= 0 || !Number.isFinite(graceMs) || graceMs < 0 || graceMs > WARMUP.timeoutMs || typeof onSample !== 'function' || typeof onBoundary !== 'function') throw new Error('invalid timed-window configuration');
   if (startAt !== undefined && (!Number.isSafeInteger(startAt) || wallNow() - startAt > 100)) throw new Error('stage start alignment exceeded');
   if (signal?.aborted) throw new Error('stage cancelled');
@@ -122,7 +122,7 @@ export async function runTimedStageFromBaseline({ conformance, backend, users, r
   const accumulator = new StageMetricsAccumulator({ maxLatencySamples: 5000000 });
   let failure, telemetry, processTelemetry;
   try {
-    return await runStageFromBaseline({ conformance, reset, verifyBaseline, stage: requestedUsers,
+    return await runStageFromBaseline({ conformance, reset, verifyBaseline, stage: requestedUsers, signal,
       prepareSessions: () => prepareUserContexts(backend, users, contexts, { concurrency: 1, signal }),
       warmUp: async () => (await warmUp(contexts.slice(0, WARMUP.users))).passed === true,
       async measure() {

@@ -186,8 +186,8 @@ not measurements or native qualification.
 
 The V5-owned pure metrics accumulator pools individual latency samples, limits
 retention to 5,000,000 samples in the stage wrapper, and does not average worker
-percentiles. **Whole-stage validity stays false** while multicore/telemetry
-integration is pending. Neither this framework result nor an injected passing
+percentiles. **Whole-stage validity stays false** while native multicore/telemetry
+qualification is pending. Neither this framework result nor an injected passing
 conformance report is admission evidence. Both CLI guards and the case hooks
 remain blocked. Runnable framework check, without services:
 
@@ -208,12 +208,41 @@ event-loop p99 >100 ms, or event-loop maximum >250 ms invalidate attribution.
 
 Short sampler intervals exist only for the service-free regression check and
 cannot qualify the profile. This is process telemetry, **not** backend host,
-container, restart, routing or storage evidence. It does not yet supply the
-three-worker coordinator. Stage validity and admission remain blocked pending
-those integrations and native qualification. Check:
+container, restart, routing or storage evidence. The three-worker coordinator below consumes these reports, but backend telemetry
+and native measurement qualification remain outstanding. Stage validity and
+admission remain blocked. Check:
 
 ```sh
 node --test test/telemetry_v5_test.mjs test/timed_stage_v5_test.mjs
+```
+
+## Three-process coordinator candidate
+
+`shared/lib/parallel-stage.mjs` owns three child processes and the parent
+reset/verify gate. It serializes shard session preparation with global user
+indices, then distributes exactly the first 50 warm-up actors across the shards.
+Each worker retains its live sessions/cursors for the measured cohort. Warm-up
+and measurement each use one shared future epoch; an idle shard still participates
+and supplies telemetry when the global stage has fewer than three users.
+
+Raw sample batches are pooled in the parent's bounded accumulator. Bounded IPC
+queues, producer/consumer sample counts, source PIDs, legal phase transitions,
+child exits, and coordinator/worker telemetry are checked. Missing evidence or
+sample-consumer failure aborts the stage, never creates a low-capacity bound.
+Cleanup waits for every owned child; SIGTERM followed by a bounded SIGKILL fallback
+prevents orphaned workload processes. Cloud/service-admin environment tokens are
+not forwarded. Backend modules are explicitly supplied factory dependencies;
+there is no V4 controller import or usable production CLI yet.
+
+Service-free regression checks fork real Node processes against an explicit fake
+backend module. Short windows require `diagnostic: true`, cannot qualify the
+profile, and report invalid whole-stage metrics because backend host/container
+and native measurement qualification remain missing. The normal path still
+requires mandatory conformance findings and the declared durations. Both V5
+execution/publication guards remain unchanged:
+
+```sh
+node --test test/parallel_stage_v5_test.mjs test/timed_stage_v5_test.mjs test/telemetry_v5_test.mjs
 ```
 
 ## Diagnostic source provenance

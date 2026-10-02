@@ -40,12 +40,18 @@ export async function runConformance(checks) {
 // Every adaptive stage owns a fresh baseline and identical warm-up. A failed
 // restore/verification/warm-up prevents measurement; no implicit retries.
 // The diagnostic path exercises ordering only; it is never run admission.
-export async function runBaselinePhases({ reset, verifyBaseline, prepareSessions, warmUp, enterStage, stage }) {
+export async function runBaselinePhases({ reset, verifyBaseline, prepareSessions, warmUp, enterStage, stage, signal }) {
   for (const hook of [reset, verifyBaseline, prepareSessions, warmUp, enterStage]) if (typeof hook !== 'function') throw new Error('missing stage lifecycle hook');
+  const checkCancelled = () => { if (signal?.aborted) throw new Error('stage cancelled'); };
+  checkCancelled();
   await reset();
+  checkCancelled();
   if (await verifyBaseline() !== true) throw new Error('baseline verification failed');
+  checkCancelled();
   if (await prepareSessions() !== true) throw new Error('session preparation failed');
+  checkCancelled();
   if (await warmUp() !== true) throw new Error('warm-up failed');
+  checkCancelled();
   return enterStage(stage);
 }
 
