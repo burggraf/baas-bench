@@ -5,16 +5,20 @@ export const TELEMETRY_INTERVAL_MS = 5000;
 const nonnegative = value => Number.isFinite(value) && value >= 0;
 
 // Only process telemetry. Backend host/container evidence is a separate required source.
-export async function startProcessTelemetry({ startAt, intervalMs = TELEMETRY_INTERVAL_MS, signal, onSample = () => {} } = {}) {
+export async function startProcessTelemetry({ startAt, intervalMs = TELEMETRY_INTERVAL_MS, signal, onSample = () => {}, now = () => performance.now() } = {}) {
   if (!Number.isSafeInteger(startAt) || startAt < 0 || !Number.isSafeInteger(intervalMs) || intervalMs < 1 || intervalMs > TELEMETRY_INTERVAL_MS || typeof onSample !== 'function') throw new Error('invalid process telemetry options');
   if (signal?.aborted) throw new Error('telemetry cancelled');
-  if (startAt > Date.now()) await sleep(startAt - Date.now(), undefined, { signal });
+  while (startAt > Date.now()) await sleep(startAt - Date.now(), undefined, { signal });
   const histogram = monitorEventLoopDelay({ resolution: 10 });
   histogram.enable();
   const report = { pid: process.pid, startedAt: Date.now(), intervalMs, samples: [], failureReasons: [] };
-  let previousCpu = process.cpuUsage(), previousTime = performance.now(), timer, stopped = false;
+  let previousCpu = process.cpuUsage(), previousTime = now(), timer, stopped = false;
+  const origin = previousTime - (report.startedAt - startAt);
+  const nextTick = () => origin + (report.samples.length + 1) * intervalMs;
   const stop = () => {
     if (!stopped) {
+      // Capture a due observation even if the duration timer ran first. No backfill.
+      if (!report.failureReasons.length && now() >= nextTick()) record();
       stopped = true; clearTimeout(timer); histogram.disable();
       signal?.removeEventListener('abort', abort);
       report.endedAt = Date.now();
@@ -22,18 +26,22 @@ export async function startProcessTelemetry({ startAt, intervalMs = TELEMETRY_IN
     return report;
   };
   const abort = () => { report.failureReasons.push('cancelled'); stop(); };
-  const sample = () => {
-    if (stopped) return;
-    const cpu = process.cpuUsage(), time = performance.now();
+  const record = () => {
+    const cpu = process.cpuUsage(), time = now();
+    if (time - nextTick() >= intervalMs) report.failureReasons.push('sampling_gap');
     const elapsed = time - previousTime;
     const row = { timestampMs: Date.now(), cpuPercent: elapsed > 0 ? (cpu.user + cpu.system - previousCpu.user - previousCpu.system) / (elapsed * 10) : NaN,
       rssBytes: process.memoryUsage().rss, eventLoop: { p99Ms: histogram.percentile(99) / 1e6, maxMs: histogram.max / 1e6 } };
     report.samples.push(row);
     previousCpu = cpu; previousTime = time; histogram.reset();
-    try { onSample(row); } catch { report.failureReasons.push('sample_delivery'); stop(); return; }
-    schedule();
+    try { onSample(row); } catch { report.failureReasons.push('sample_delivery'); }
   };
-  const schedule = () => { timer = setTimeout(sample, Math.max(0, startAt + (report.samples.length + 1) * intervalMs - Date.now())); };
+  const sample = () => {
+    if (stopped) return;
+    if (now() >= nextTick()) record();
+    if (report.failureReasons.length) stop(); else schedule();
+  };
+  const schedule = () => { timer = setTimeout(sample, Math.max(0, nextTick() - now())); };
   signal?.addEventListener('abort', abort, { once: true });
   if (signal?.aborted) abort(); else schedule();
   return { stop };

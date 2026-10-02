@@ -330,6 +330,22 @@ clean source commit `d691343de5730e00d8eb0c12ea6f721c94cb6ae0`; see
 This validates only the implemented synthetic assertions. `fixture-integrity`
 and `reset-baseline` are still false/missing, and no admission follows.
 
+## Monotonic deadline correction
+
+An early duration-timer wake-up is now rechecked against the monotonic deadline;
+it cannot end a timed window early. Process and backend sampling also use an
+absolute monotonic schedule anchored to the shared UTC epoch, keeping observed
+UTC timestamps rather than manufacturing them. Stopping a sampler captures one
+actually due observation if its timer has not yet run. Missing intervals are not
+backfilled: a full-interval scheduling gap fails closed. Duration-timer failures
+invalidate the stage instead of silently shortening its scoring denominator.
+
+Deterministic service-free regressions reproduce early wake-ups and the final-tick
+ordering, including a missed-multiple-interval rejection. The previous TrailBase
+window remains invalid; these changes do not retroactively qualify stored runs.
+A native rerun is still needed after source freeze, alongside the remaining Linux
+host/transport and reviewed admission gates.
+
 ## Diagnostic source provenance
 
 New attempts record the starting Git commit, dirty-worktree flag, actual Node

@@ -33,6 +33,19 @@ test('V5 requested duration requires every scheduled telemetry tick, not a short
   assert.equal(validateProcessTelemetry(report(), { startAt, endedAt: startAt + 15000, durationMs: 15001 }).valid, false);
 });
 
+test('V5 stop captures one genuinely due monotonic tick, never synthesizes missed intervals', async () => {
+  let clock = 0;
+  const sampler = await startProcessTelemetry({ startAt: Date.now(), now: () => clock });
+  clock = 5000;
+  assert.equal(sampler.stop().samples.length, 1);
+  clock = 0;
+  const stalled = await startProcessTelemetry({ startAt: Date.now(), now: () => clock });
+  clock = 15000;
+  const report = stalled.stop();
+  assert.equal(report.samples.length, 1);
+  assert.ok(report.failureReasons.includes('sampling_gap'));
+});
+
 test('V5 real process sampler stops cleanly and short diagnostic intervals cannot qualify', async () => {
   const epoch = Date.now();
   const sampler = await startProcessTelemetry({ startAt: epoch, intervalMs: 10 });

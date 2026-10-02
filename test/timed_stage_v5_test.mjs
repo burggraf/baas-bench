@@ -28,6 +28,21 @@ test('V5 timed window emits workflow and native-operation samples, excludes clea
   assert.equal(samples.length, count, 'no samples outside measurement');
 });
 
+test('V5 early timer wake-ups cannot shorten the monotonic stage duration', async () => {
+  let clock = 0, wakes = 0;
+  const result = await runTimedWindow([], { allowIdle: true, durationMs: 20, graceMs: 0, onSample() {}, now: () => clock,
+    wait: async ms => { wakes++; clock += Math.max(1, Math.floor(ms / 2)); } });
+  assert.equal(result.stageFailed, false);
+  assert.ok(result.elapsedMs >= 20);
+  assert.ok(wakes > 1);
+});
+
+test('V5 duration-timer failure invalidates the stage instead of scoring a shortened window', async () => {
+  const result = await runTimedWindow([], { allowIdle: true, durationMs: 20, onSample() {}, wait: async () => { throw new Error('timer unavailable'); } });
+  assert.equal(result.stageFailed, true);
+  assert.ok(result.failureReasons.includes('duration_timer'));
+});
+
 test('V5 login replacement is included in the native-operation stream', async () => {
   const actor = context(), samples = [];
   actor.random = () => .99;

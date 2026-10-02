@@ -114,7 +114,7 @@ const STATE_TEMPLATE = '{"id":{{json .Id}},"project":{{json (index .Config.Label
 
 // Run on the Linux backend itself, against an explicit local Unix socket and owned IDs.
 // No discovery, remote Docker context, SSH transport, credentials, or mutating command.
-export async function startBackendTelemetry({ startAt, containerIds, project, socket = 'unix:///var/run/docker.sock', signal } = {}) {
+export async function startBackendTelemetry({ startAt, containerIds, project, socket = 'unix:///var/run/docker.sock', signal, now = () => performance.now() } = {}) {
   validateBackendOwnership(containerIds, project);
   if (process.platform !== 'linux') throw new Error('backend host telemetry requires Linux');
   if (!Number.isSafeInteger(startAt) || startAt < 0 || !/^unix:\/\/\/[A-Za-z0-9._/-]+$/.test(socket) || socket.slice(7).split('/').some(part => part === '.' || part === '..')) throw new Error('invalid backend telemetry options');
@@ -130,24 +130,32 @@ export async function startBackendTelemetry({ startAt, containerIds, project, so
   const snapshot = async () => { const [h, s] = await Promise.all([host(), states()]); return { host: h, states: s }; };
   const baseline = await snapshot();
   if (signal?.aborted) throw new Error('backend telemetry cancelled');
-  if (startAt > Date.now()) await sleep(startAt - Date.now(), undefined, { signal });
+  while (startAt > Date.now()) await sleep(startAt - Date.now(), undefined, { signal });
   const report = { platform: process.platform, project, containerIds: [...containerIds], startAt, startedAt: Date.now(), intervalMs: TELEMETRY_INTERVAL_MS, baseline, samples: [], failureReasons: [] };
-  let timer, stopped = false, pending = Promise.resolve(), stopPromise;
+  const origin = now() - (report.startedAt - startAt);
+  const nextTick = () => origin + (report.samples.length + 1) * TELEMETRY_INTERVAL_MS;
+  let timer, stopped = false, sampling = false, pending = Promise.resolve(), stopPromise;
   const tick = async () => {
+    if (now() < nextTick()) { if (!stopped) schedule(); return; }
+    sampling = true;
+    if (now() - nextTick() >= TELEMETRY_INTERVAL_MS) { report.failureReasons.push('sampling_gap'); stopped = true; }
     const timestampMs = Date.now();
     try {
       const [data, text] = await Promise.all([snapshot(), docker(['stats', '--no-trunc', '--no-stream', '--format', '{{json .}}', ...containerIds])]);
       report.samples.push({ timestampMs, ...data, containers: parseOwnedStats(text, containerIds) });
     } catch { report.failureReasons.push('backend_probe_failed'); stopped = true; }
+    sampling = false;
     if (!stopped) schedule();
   };
-  const schedule = () => { timer = setTimeout(() => { pending = tick(); }, Math.max(0, startAt + (report.samples.length + 1) * TELEMETRY_INTERVAL_MS - Date.now())); };
+  const schedule = () => { timer = setTimeout(() => { pending = tick(); }, Math.max(0, nextTick() - now())); };
   const abort = () => { stopped = true; clearTimeout(timer); report.failureReasons.push('cancelled'); };
   signal?.addEventListener('abort', abort, { once: true });
   if (signal?.aborted) abort(); else schedule();
   return { stop(endedAt = Date.now()) {
     if (!stopPromise) stopPromise = (async () => {
+      const captureDue = !stopped && !sampling && now() >= nextTick();
       stopped = true; clearTimeout(timer); signal?.removeEventListener('abort', abort); report.endedAt = endedAt;
+      if (captureDue) pending = tick();
       await pending;
       try { report.final = await snapshot(); } catch { report.failureReasons.push('backend_final_probe_failed'); }
       return report;

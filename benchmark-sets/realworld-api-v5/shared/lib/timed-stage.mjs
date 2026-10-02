@@ -18,7 +18,7 @@ export function stageDurationMs(users) {
 // Prepared sessions/cursors belong to the caller. No setup, reset or cleanup is timed here.
 // This kernel alone is not admission evidence or a qualified measurement profile.
 export async function runTimedWindow(contexts, { durationMs, onSample, onBoundary = async () => {}, signal, startAt,
-  now = () => performance.now(), wallNow = Date.now, graceMs = WARMUP.timeoutMs, allowIdle = false } = {}) {
+  now = () => performance.now(), wallNow = Date.now, graceMs = WARMUP.timeoutMs, allowIdle = false, wait: waitFor = wait } = {}) {
   if (!Array.isArray(contexts) || (!contexts.length && !allowIdle) || Array.from(contexts).some(context => !context?.session || typeof context.random !== 'function')) throw new Error('incomplete measured cohort');
   if (!Number.isFinite(durationMs) || durationMs <= 0 || !Number.isFinite(graceMs) || graceMs < 0 || graceMs > WARMUP.timeoutMs || typeof onSample !== 'function' || typeof onBoundary !== 'function') throw new Error('invalid timed-window configuration');
   if (startAt !== undefined && (!Number.isSafeInteger(startAt) || wallNow() - startAt > 100)) throw new Error('stage start alignment exceeded');
@@ -51,7 +51,7 @@ export async function runTimedWindow(contexts, { durationMs, onSample, onBoundar
     context.signal = requests.signal;
   }
   try {
-    if (startAt !== undefined && startAt > wallNow()) await wait(startAt - wallNow(), signal);
+    while (startAt !== undefined && startAt > wallNow()) await waitFor(startAt - wallNow(), signal);
     if (signal?.aborted) throw new Error('stage cancelled');
     if (startAt !== undefined && wallNow() - startAt > 100) throw new Error('stage start alignment exceeded');
     await onBoundary('start', { startAt: startAt ?? wallNow(), durationMs });
@@ -74,7 +74,7 @@ export async function runTimedWindow(contexts, { durationMs, onSample, onBoundar
         if (remaining > 0 && !scheduling.signal.aborted) {
           try {
             const think = 1000 + Math.floor(context.random() * 4001);
-            await wait(Math.min(remaining, think), scheduling.signal);
+            await waitFor(Math.min(remaining, think), scheduling.signal);
             if (think >= remaining) break;
           } catch {
             if (!scheduling.signal.aborted) fail('think_timer');
@@ -83,18 +83,20 @@ export async function runTimedWindow(contexts, { durationMs, onSample, onBoundar
         }
       }
     }).map(worker => worker.catch(() => { fail('worker_exception'); cancel(); })));
-    const durationTimer = wait(durationMs, scheduling.signal).catch(() => {});
+    const durationTimer = (async () => {
+      while (!scheduling.signal.aborted && now() < deadline) await waitFor(deadline - now(), scheduling.signal);
+    })().catch(() => { if (!scheduling.signal.aborted) fail('duration_timer'); });
     // Retired users must not shorten the denominator of an otherwise scored stage.
     await durationTimer;
     scheduling.abort();
     const drain = new AbortController();
     let settled = false;
-    await Promise.race([workersDone.then(() => { settled = true; }), wait(graceMs, drain.signal)]);
+    await Promise.race([workersDone.then(() => { settled = true; }), waitFor(graceMs, drain.signal)]);
     drain.abort();
     if (!settled) {
       result.graceExpired = true; fail('grace_deadline'); cancel();
       const finalDrain = new AbortController();
-      await Promise.race([workersDone.then(() => { settled = true; }), wait(WARMUP.timeoutMs, finalDrain.signal)]);
+      await Promise.race([workersDone.then(() => { settled = true; }), waitFor(WARMUP.timeoutMs, finalDrain.signal)]);
       finalDrain.abort();
       if (!settled) { result.unfinishedWork = true; fail('unfinished_work'); }
     }
