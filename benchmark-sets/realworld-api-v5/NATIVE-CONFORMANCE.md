@@ -245,6 +245,37 @@ execution/publication guards remain unchanged:
 node --test test/parallel_stage_v5_test.mjs test/timed_stage_v5_test.mjs test/telemetry_v5_test.mjs
 ```
 
+## Backend telemetry candidate
+
+`shared/lib/backend-telemetry.mjs` provides a Linux-backend-local sampler. Its
+Docker commands are read-only, target an explicit local Unix socket, and require
+full 64-character container IDs and the exact owned Compose project. It does not
+discover stacks or follow remote Docker contexts. The inspect template collects
+only identity, running/restart/start/OOM/dead state—not environment variables or
+credentials. Docker stats use `--no-trunc`; missing, duplicate, unrelated or
+prefix-only IDs fail. Docker's text memory units remain approximate observations.
+
+Linux CPU counters exclude guest/guest_nice from the total because Linux already
+includes them in user/nice. Memory/swap, per-interface byte/drop counters, boot ID,
+and OOM-kill counters are retained. Five-second absolute ticks plus baseline and
+final state reject missing/misaligned data, counter resets, changed interfaces,
+host/container restarts, or observed OOM events. All Docker probes are bounded at
+four seconds. macOS is explicitly unsupported as a Linux backend-host source;
+Docker Desktop container data must not be presented as backend-host telemetry.
+No power-loss or private-routing proof is supplied by these counters.
+
+The parallel coordinator accepts an explicit backend telemetry factory and
+ownership declaration, stops it before actor cleanup, and preserves primary
+failures while attaching secondary cleanup errors. This is a dependency boundary,
+not an SSH implementation or native qualification: an agent on the separate
+backend and its transport still need integration/provenance checks. All returned
+stage metrics and admission flags remain unqualified, including synthetically
+passing telemetry. Service-free parser/failure regressions do not contact Docker:
+
+```sh
+node --test test/backend_telemetry_v5_test.mjs test/parallel_stage_v5_test.mjs
+```
+
 ## Diagnostic source provenance
 
 New attempts record the starting Git commit, dirty-worktree flag, actual Node

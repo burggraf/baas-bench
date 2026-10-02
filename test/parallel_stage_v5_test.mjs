@@ -57,6 +57,23 @@ test('V5 worker/collector failures abort barriers and terminate every owned proc
   }
 });
 
+test('V5 backend telemetry factory is stopped before cleanup and cannot admit a stage', async () => {
+  const calls = [];
+  const result = await runParallelStageFromBaseline({ ...config(), backendOwnership: { project: 'v5-owned', containerIds: ['a'.repeat(64)] },
+    backendTelemetryFactory: async ({ startAt }) => { calls.push('start'); return { stop(endedAt) { calls.push('stop'); return { startAt, endedAt }; } }; } });
+  assert.equal(calls[0], 'start');
+  assert.ok(calls.includes('stop'));
+  assert.equal(result.backendTelemetry.valid, false);
+  assert.equal(result.metrics.valid, false);
+});
+
+test('V5 secondary backend telemetry cleanup failure preserves and annotates the primary failure', async () => {
+  const cleanup = new Error('fixture cleanup failure');
+  await assert.rejects(runParallelStageFromBaseline({ ...config(), backendOwnership: { project: 'v5-owned', containerIds: ['a'.repeat(64)] },
+    backendTelemetryFactory: async () => ({ stop() { throw cleanup; } }), onSample() { throw new Error('fixture consumer failure'); } }),
+  error => /process evidence/.test(error.message) && error.cleanupErrors?.[0] === cleanup);
+});
+
 test('V5 cancelled parallel work does not invoke reset', async () => {
   const abort = new AbortController(); abort.abort();
   let reset = false;

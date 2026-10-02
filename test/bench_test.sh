@@ -396,6 +396,6 @@ if "$BENCH" publish "$malicious" >/dev/null 2>&1; then fail "malicious metadata 
 [ ! -e "$TMP/escape" ] || fail "publication escaped root"
 grep -qx '.results/' "$ROOT/.gitignore" || fail "local benchmark results are not ignored"
 [ -d "$ROOT/results" ] || fail "published results directory missing"
-node --test "$ROOT/test/basic_js_test.mjs" "$ROOT/test/basic_js_v2_test.mjs" "$ROOT/test/realworld_api_v3_test.mjs" "$ROOT/test/realworld_api_v4_test.mjs" "$ROOT/test/realworld_api_v5_test.mjs" "$ROOT/test/native_conformance_v5_test.mjs" "$ROOT/test/native_lifecycle_v5_test.mjs" "$ROOT/test/timed_stage_v5_test.mjs" "$ROOT/test/telemetry_v5_test.mjs" "$ROOT/test/parallel_stage_v5_test.mjs" "$ROOT/test/linode_v4_controller_test.mjs"
+node --test "$ROOT/test/basic_js_test.mjs" "$ROOT/test/basic_js_v2_test.mjs" "$ROOT/test/realworld_api_v3_test.mjs" "$ROOT/test/realworld_api_v4_test.mjs" "$ROOT/test/realworld_api_v5_test.mjs" "$ROOT/test/native_conformance_v5_test.mjs" "$ROOT/test/native_lifecycle_v5_test.mjs" "$ROOT/test/timed_stage_v5_test.mjs" "$ROOT/test/telemetry_v5_test.mjs" "$ROOT/test/backend_telemetry_v5_test.mjs" "$ROOT/test/parallel_stage_v5_test.mjs" "$ROOT/test/linode_v4_controller_test.mjs"
 
 printf '%s\n' PASS

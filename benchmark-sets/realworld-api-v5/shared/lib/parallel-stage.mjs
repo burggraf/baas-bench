@@ -5,6 +5,7 @@ import { WARMUP, WORKFLOW_WEIGHTS } from './warmup.mjs';
 import { stageDurationMs } from './timed-stage.mjs';
 import { StageMetricsAccumulator } from './metrics.mjs';
 import { startProcessTelemetry, validateRunnerTelemetry } from './telemetry.mjs';
+import { validateBackendTelemetry, validateBackendOwnership } from './backend-telemetry.mjs';
 
 const deferred = () => {
   let resolve, reject;
@@ -15,12 +16,14 @@ const deferred = () => {
 
 // Candidate framework. Backend host/container and reviewed admission are still required.
 export async function runParallelStageFromBaseline({ conformance, reset, verifyBaseline, users, requestedUsers, backendModule, backendOptions = {},
-  durationMs = stageDurationMs(requestedUsers), warmupMs = WARMUP.durationMs, startDelayMs = 1500, diagnostic = false, signal, onSample = () => {} }) {
+  durationMs = stageDurationMs(requestedUsers), warmupMs = WARMUP.durationMs, startDelayMs = 1500, diagnostic = false, signal, onSample = () => {}, backendTelemetryFactory, backendOwnership }) {
   assertConformance(conformance);
   if (signal?.aborted) throw new Error('parallel stage cancelled');
   const count = Math.max(requestedUsers, WARMUP.users);
   if (!Number.isSafeInteger(requestedUsers) || requestedUsers < 1 || requestedUsers > 10000 || !Array.isArray(users) || users.length !== count || typeof backendModule !== 'string' || !backendModule.startsWith('file:') || !Number.isSafeInteger(durationMs) || durationMs < 1 || !Number.isSafeInteger(warmupMs) || warmupMs < 1 || !Number.isSafeInteger(startDelayMs) || startDelayMs < 25 || startDelayMs > 10000 || typeof onSample !== 'function') throw new Error('invalid parallel stage');
   if (!diagnostic && (durationMs !== stageDurationMs(requestedUsers) || warmupMs !== WARMUP.durationMs || startDelayMs !== 1500)) throw new Error('non-profile durations require diagnostic mode');
+  if (backendTelemetryFactory !== undefined && (typeof backendTelemetryFactory !== 'function' || !backendOwnership)) throw new Error('backend telemetry ownership required');
+  if (backendTelemetryFactory) validateBackendOwnership(backendOwnership.containerIds, backendOwnership.project);
   const workers = [], failure = deferred(), accumulator = new StageMetricsAccumulator({ maxLatencySamples: 5000000 });
   const barrier = promise => Promise.race([promise, failure.promise]);
   const send = (worker, message) => new Promise((resolve, reject) => worker.child.send(message, error => error ? reject(error) : resolve()));
@@ -28,7 +31,7 @@ export async function runParallelStageFromBaseline({ conformance, reset, verifyB
   const abort = () => { telemetryAbort.abort(); failure.reject(new Error('parallel stage cancelled')); };
   const timer = setTimeout(() => failure.reject(new Error('parallel stage deadline')), durationMs + warmupMs + 900000);
   if (signal?.aborted) abort(); else signal?.addEventListener('abort', abort, { once: true });
-  let coordinator;
+  let coordinator, backendSampler, primaryFailure;
   try {
     return await runStageFromBaseline({ conformance, reset, verifyBaseline, stage: requestedUsers, signal,
       async prepareSessions() {
@@ -50,7 +53,7 @@ export async function runParallelStageFromBaseline({ conformance, reset, verifyB
               } else if (message?.type === 'ended' && worker.state === 'measuring' && message.sampleCount === worker.sampleCount && message.result?.stageFailed === false) { worker.state = 'ended'; worker.ended.resolve(message); }
               else if (message?.type === 'result' && worker.state === 'cleanup' && message.sampleCount === worker.sampleCount && message.resources?.pid === worker.pid) { worker.state = 'complete'; worker.result.resolve(message); }
               else throw new Error('invalid workload process evidence');
-            } catch { failure.reject(new Error('workload process evidence failed')); }
+            } catch (error) { failure.reject(new Error('workload process evidence failed', { cause: error })); }
           });
           await barrier(send(worker, { type: 'init', users: users.slice(offset, end), userOffset: offset, measuredUsers: Math.max(0, Math.min(end, requestedUsers) - offset),
             warmupUsers: Math.max(0, Math.min(end, WARMUP.users) - offset), backendModule, backendOptions }));
@@ -70,6 +73,8 @@ export async function runParallelStageFromBaseline({ conformance, reset, verifyB
       },
       async measure() {
         const startAt = Date.now() + startDelayMs;
+        const backendPromise = backendTelemetryFactory ? Promise.resolve().then(() => backendTelemetryFactory({ startAt, signal: telemetryAbort.signal })) : Promise.resolve(null);
+        backendPromise.then(sampler => { backendSampler = sampler; if (telemetryAbort.signal.aborted) return sampler?.stop(Date.now()); }).catch(error => failure.reject(error));
         const telemetryPromise = startProcessTelemetry({ startAt, signal: telemetryAbort.signal });
         telemetryPromise.then(sampler => { coordinator = sampler; }).catch(error => failure.reject(error));
         for (const worker of workers) worker.state = 'measuring';
@@ -78,6 +83,8 @@ export async function runParallelStageFromBaseline({ conformance, reset, verifyB
         const endedAt = Date.now();
         coordinator = await barrier(telemetryPromise);
         const processReport = coordinator.stop();
+        backendSampler = await barrier(backendPromise);
+        const backendReport = backendSampler ? await barrier(backendSampler.stop(endedAt)) : null;
         for (const worker of workers) worker.state = 'cleanup';
         await barrier(Promise.all(workers.map(worker => send(worker, { type: 'finish' }))));
         const reports = await barrier(Promise.all(workers.map(worker => worker.result.promise)));
@@ -86,16 +93,22 @@ export async function runParallelStageFromBaseline({ conformance, reset, verifyB
         if (sum('requestedUsers') !== requestedUsers || sum('startedUsers') !== requestedUsers) throw new Error('measured cohort mismatch');
         const metrics = accumulator.finalize((endedAt - startAt) / 1000, { requestedUsers, achievedUsers: sum('startedUsers') - sum('lostUsers') });
         const telemetry = validateRunnerTelemetry({ coordinator: processReport, workers: reports.map(row => row.resources) }, { startAt, endedAt });
+        const backendTelemetry = validateBackendTelemetry(backendReport, { startAt, endedAt, containerIds: backendOwnership?.containerIds, project: backendOwnership?.project });
         metrics.valid = false;
-        metrics.validityReasons.push(...telemetry.validityReasons, 'backend host/container and native qualification pending');
-        return { metrics, telemetry, workers: reports.map((row, index) => ({ pid: workers[index].pid, samples: row.sampleCount, resources: row.resources })),
+        metrics.validityReasons.push(...telemetry.validityReasons, ...backendTelemetry.validityReasons, 'native measurement qualification pending');
+        return { metrics, telemetry, backendTelemetry, backendReport, workers: reports.map((row, index) => ({ pid: workers[index].pid, samples: row.sampleCount, resources: row.resources })),
           startAt, endedAt, admission_evidence: false, measurement_qualified: false, diagnostic };
       },
     });
-  } finally {
+  } catch (error) { primaryFailure = error; throw error; }
+  finally {
     clearTimeout(timer); signal?.removeEventListener('abort', abort); telemetryAbort.abort(); coordinator?.stop();
     for (const worker of workers) if (worker.child.exitCode === null && worker.child.signalCode === null) worker.child.kill('SIGTERM');
     const kill = setTimeout(() => { for (const worker of workers) if (worker.child.exitCode === null && worker.child.signalCode === null) worker.child.kill('SIGKILL'); }, 5000);
     await Promise.all(workers.map(worker => worker.exited.promise)); clearTimeout(kill);
+    try { await backendSampler?.stop(); } catch (error) {
+      if (!primaryFailure) throw error;
+      if (error !== primaryFailure) primaryFailure.cleanupErrors = [...(primaryFailure.cleanupErrors ?? []), error];
+    }
   }
 }
