@@ -87,6 +87,17 @@ test('V5 secondary backend telemetry cleanup failure preserves and annotates the
   error => /process evidence/.test(error.message) && error.cleanupErrors?.[0] === cleanup);
 });
 
+test('V5 abort waits for an in-flight backend factory and its owned cleanup', async () => {
+  let cleaned = false;
+  await assert.rejects(runParallelStageFromBaseline({ ...config(), backendOwnership: { project: 'v5-owned', containerIds: ['a'.repeat(64)] },
+    onSample() { throw new Error('fixture consumer failure'); },
+    backendTelemetryFactory: async ({ signal }) => {
+      await new Promise(resolve => signal.addEventListener('abort', () => setTimeout(resolve, 250), { once: true }));
+      return { async stop() { cleaned = true; } };
+    } }), /process evidence/);
+  assert.equal(cleaned, true);
+});
+
 test('V5 cancelled parallel work does not invoke reset', async () => {
   const abort = new AbortController(); abort.abort();
   let reset = false;

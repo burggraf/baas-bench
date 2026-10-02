@@ -42,7 +42,7 @@ async function runParallelPhases({ conformance, reset, verifyBaseline, users, re
   const abort = () => { telemetryAbort.abort(); failure.reject(new Error('parallel stage cancelled')); };
   const timer = setTimeout(() => failure.reject(new Error('parallel stage deadline')), durationMs + warmupMs + 900000);
   if (signal?.aborted) abort(); else signal?.addEventListener('abort', abort, { once: true });
-  let coordinator, backendSampler, primaryFailure;
+  let coordinator, backendSampler, backendStartup, primaryFailure;
   try {
     const runPhases = guarded ? runStageFromBaseline : hooks => runBaselinePhases({ ...hooks, enterStage: hooks.measure });
     return await runPhases({ conformance, reset, verifyBaseline, stage: requestedUsers, signal,
@@ -87,7 +87,8 @@ async function runParallelPhases({ conformance, reset, verifyBaseline, users, re
       async measure() {
         const startAt = Date.now() + startDelayMs;
         const backendPromise = backendTelemetryFactory ? Promise.resolve().then(() => backendTelemetryFactory({ startAt, signal: telemetryAbort.signal })) : Promise.resolve(null);
-        backendPromise.then(sampler => { backendSampler = sampler; if (telemetryAbort.signal.aborted) return sampler?.stop(Date.now()); }).catch(error => failure.reject(error));
+        backendStartup = backendPromise.then(sampler => { backendSampler = sampler; });
+        backendStartup.catch(error => failure.reject(error));
         const telemetryPromise = startProcessTelemetry({ startAt, signal: telemetryAbort.signal });
         telemetryPromise.then(sampler => { coordinator = sampler; }).catch(error => failure.reject(error));
         for (const worker of workers) worker.state = 'measuring';
@@ -119,7 +120,7 @@ async function runParallelPhases({ conformance, reset, verifyBaseline, users, re
     for (const worker of workers) if (worker.child.exitCode === null && worker.child.signalCode === null) worker.child.kill('SIGTERM');
     const kill = setTimeout(() => { for (const worker of workers) if (worker.child.exitCode === null && worker.child.signalCode === null) worker.child.kill('SIGKILL'); }, 5000);
     await Promise.all(workers.map(worker => worker.exited.promise)); clearTimeout(kill);
-    try { await backendSampler?.stop(); } catch (error) {
+    try { await backendStartup; await backendSampler?.stop(); } catch (error) {
       if (!primaryFailure) throw error;
       if (error !== primaryFailure) primaryFailure.cleanupErrors = [...(primaryFailure.cleanupErrors ?? []), error];
     }

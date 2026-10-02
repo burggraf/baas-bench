@@ -330,6 +330,41 @@ clean source commit `d691343de5730e00d8eb0c12ea6f721c94cb6ae0`; see
 This validates only the implemented synthetic assertions. `fixture-integrity`
 and `reset-baseline` are still false/missing, and no admission follows.
 
+## Separate Linux telemetry transport candidate
+
+`shared/lib/backend-telemetry-agent.mjs` exposes only start/stop of the existing
+read-only Linux collector. It accepts an explicit Compose project and exact full
+container IDs, reads host counters, and performs owned Docker inspect/stats only.
+It cannot provision, discover, start, stop, delete, or execute inside containers.
+The executable refuses non-Linux hosts and Node versions other than the V5 pin.
+
+`createSshBackendTelemetryFactory` in `shared/lib/backend-telemetry-transport.mjs`
+can be supplied at the coordinator's existing `backendTelemetryFactory` boundary.
+Construction does not connect. Invocation requires an explicit private IPv4 target,
+user, private identity file, verified known-hosts file, absolute pinned Node and
+agent paths, project, and owned IDs. It ignores SSH configuration, requires strict
+host-key verification and batch authentication, disables forwarding, and does not
+inherit cloud tokens or application/admin credentials. No real SSH connections
+are made by repository regression tests.
+
+The nonce-bound protocol rejects wrong runtime/platform/source hashes, illegal
+phases, malformed or truncated output, extra output, and agent failure. The agent
+bounds requests to 16 KiB; the transport caps collected output at 16 MiB and owned
+containers at 64, with nine-second startup and at-most-30-minute process deadlines.
+Cancellation/failure terminates then forcibly kills and reaps its owned SSH child.
+The coordinator now also waits for an in-flight backend factory during failure
+cleanup, rather than returning while late telemetry initialization is still owned.
+Cleanup failures preserve the original failure.
+
+The ready handshake binds the collector's agent, backend/process telemetry modules,
+and version file bytes to a SHA-256, retained with the declared Node version in
+private report transport metadata. This is source consistency, not remote
+attestation, dependency verification, or joint case/profile admission. Deployment,
+clock alignment, transport headroom, Linux-host integration and reviewed admission
+remain unverified. A real connection/deployment requires explicitly approved pilot
+scope and topology; this implementation is not permission to contact any machine.
+No execution or publication guard has changed.
+
 ## Monotonic deadline correction
 
 An early duration-timer wake-up is now rechecked against the monotonic deadline;
