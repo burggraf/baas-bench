@@ -164,6 +164,37 @@ cannot be pooled with this diagnostic to admit a case. Actual declared-scale,
 multicore/timed-stage integration, telemetry/headroom and evidence review remain
 outstanding, and both V5 CLI guards remain unchanged.
 
+## Timed-stage framework candidate
+
+`shared/lib/timed-stage.mjs` implements the prepared-session timed window and
+`runTimedStageFromBaseline`. The latter keeps the mandatory conformance shape
+gate, resets/verifies before each stage, prepares `max(target, 50)` independent
+sessions serially, warms the first 50, and measures only the target cohort using
+those live contexts. Preparation, baseline checks, warm-up and final logout do
+not emit measured samples. Login replacement during the measured sign-out/in
+workflow does emit native-operation samples. Request errors are not retried.
+
+Scheduling stops at the nominal stage deadline. In-flight workflows drain for
+at most five seconds, then pending requests are cancelled; a second five-second
+drain ceiling flags unfinished work. Integrity errors, sample-observer failure,
+parent cancellation, worker exceptions, drain expiry and start lateness over
+100 ms invalidate the candidate window. The elapsed denominator spans measured
+start through the bounded drain, as in the retained workload; nominal duration
+is also reported. The normal duration remains 300 seconds, extended below five
+users. Short injected windows and fake lifecycle producers are regression tests,
+not measurements or native qualification.
+
+The V5-owned pure metrics accumulator pools individual latency samples, limits
+retention to 5,000,000 samples in the stage wrapper, and does not average worker
+percentiles. **Whole-stage validity stays false** while multicore/telemetry
+integration is pending. Neither this framework result nor an injected passing
+conformance report is admission evidence. Both CLI guards and the case hooks
+remain blocked. Runnable framework check, without services:
+
+```sh
+node --test test/timed_stage_v5_test.mjs test/native_lifecycle_v5_test.mjs
+```
+
 ## Diagnostic source provenance
 
 New attempts record the starting Git commit, dirty-worktree flag, actual Node
