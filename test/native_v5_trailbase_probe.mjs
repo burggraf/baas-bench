@@ -10,13 +10,15 @@ import { createTrailBaseAdapter } from '../benchmark-sets/realworld-api-v5/share
 import { runNativeConformance } from '../benchmark-sets/realworld-api-v5/shared/lib/native-conformance.mjs';
 import { parseBootstrapCredentials } from '../benchmark-sets/realworld-api-v4/shared/lib/admin/trailbase-bootstrap.mjs';
 import { runTrailBaseScaleProbe, SCALE_SNAPSHOT_MIGRATION } from './native_v5_trailbase_scale.mjs';
+import { runNativeLifecycleProbe } from './native_v5_lifecycle.mjs';
 import { nativeProbeProvenance, nativeSourceManifest, pinnedNodeVersion } from './native_v5_provenance.mjs';
 
-if (process.argv.length !== 3 || !['--local-disposable', '--local-declared-scale'].includes(process.argv[2])) {
-  console.error('usage: node test/native_v5_trailbase_probe.mjs {--local-disposable|--local-declared-scale}');
+if (process.argv.length !== 3 || !['--local-disposable', '--local-declared-scale', '--local-lifecycle'].includes(process.argv[2])) {
+  console.error('usage: node test/native_v5_trailbase_probe.mjs {--local-disposable|--local-declared-scale|--local-lifecycle}');
   process.exit(2);
 }
 const scale = process.argv[2] === '--local-declared-scale';
+const lifecycle = process.argv[2] === '--local-lifecycle';
 const root = fileURLToPath(new URL('../', import.meta.url));
 const shared = join(root, 'benchmark-sets/realworld-api-v5/shared');
 const runtime = join(root, '.runtime/conformance-v5');
@@ -31,7 +33,7 @@ const { initClient } = await import(require.resolve('trailbase'));
 const quote = value => `'${String(value).replaceAll("'", "''")}'`;
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 let started = false, admin, base, sessions;
-const report = { scope: scale ? 'declared-scale-conformance-not-measurement' : 'synthetic-native-probe-not-qualification', platform: 'trailbase', image, started_at: new Date().toISOString(), linode_spend_usd: 0, cleanup: false };
+const report = { scope: lifecycle ? 'reduced-fixture-lifecycle-diagnostic' : scale ? 'declared-scale-conformance-not-measurement' : 'synthetic-native-probe-not-qualification', platform: 'trailbase', image, started_at: new Date().toISOString(), linode_spend_usd: 0, cleanup: false };
 function docker(args) {
   const result = spawnSync('docker', args, { encoding: 'utf8', timeout: 90_000, maxBuffer: 4 * 1024 * 1024 });
   if (result.status !== 0) throw new Error(`owned Docker ${args[0]} failed`);
@@ -59,7 +61,7 @@ async function main() {
   for (const path of [depot, join(depot, 'migrations'), join(depot, 'migrations/main')]) chmodSync(path, 0o777);
   copyFileSync(join(shared, 'trailbase/bootstrap-config.textproto'), join(depot, 'config.textproto'));
   copyFileSync(join(shared, 'trailbase/migration.sql'), join(depot, 'migrations/main/U1785764902__v5.sql'));
-  writeFileSync(join(depot, 'migrations/main/U1785764903__probe.sql'), "CREATE TABLE v5_probe_failure(id INTEGER PRIMARY KEY) STRICT; CREATE TRIGGER v5_probe_failure BEFORE INSERT ON activities WHEN EXISTS(SELECT 1 FROM v5_probe_failure) BEGIN SELECT RAISE(ABORT,'probe rollback'); END;\n" + (scale ? SCALE_SNAPSHOT_MIGRATION : ''), { mode: 0o600 });
+  writeFileSync(join(depot, 'migrations/main/U1785764903__probe.sql'), "CREATE TABLE v5_probe_failure(id INTEGER PRIMARY KEY) STRICT; CREATE TRIGGER v5_probe_failure BEFORE INSERT ON activities WHEN EXISTS(SELECT 1 FROM v5_probe_failure) BEGIN SELECT RAISE(ABORT,'probe rollback'); END;\n" + (scale || lifecycle ? SCALE_SNAPSHOT_MIGRATION : ''), { mode: 0o600 });
   writeFileSync(join(dir, 'inventory.json'), JSON.stringify({ container: name, depot, scope: report.scope }), { mode: 0o600 });
   report.phase = 'container-start';
   started = true; // Cleanup also covers an ambiguous docker-run outcome.
@@ -89,6 +91,18 @@ async function main() {
       assert.equal(response.ok, true); return response.json();
     } });
     report.local_checks_passed = report.scale.passed;
+    return;
+  }
+  if (lifecycle) {
+    report.phase = 'lifecycle';
+    report.lifecycle = await runNativeLifecycleProbe({ platform: 'trailbase', dir, execute: query, rows: query,
+      backend: createTrailBaseAdapter({ initClient, endpoint: base, timeoutMs: 5000 }),
+      async renewAdmin() { admin = initClient(base); await admin.login(creds.email, creds.password); },
+      async createUser(email, password) {
+        const response = await admin.fetch('/api/_admin/user', { method: 'POST', signal: AbortSignal.timeout(30000), headers: { 'Content-Type': 'application/json', 'CSRF-Token': admin.tokens()?.csrf_token ?? '' }, body: JSON.stringify({ email, password, verified: true, admin: false }) });
+        assert.equal(response.ok, true); return response.json();
+      } });
+    report.local_checks_passed = report.lifecycle.passed;
     return;
   }
   report.phase = 'native-user-create';
@@ -208,6 +222,10 @@ finally {
   }
   if (scale && !report.scale) {
     try { report.scale = JSON.parse(readFileSync(join(dir, 'scale-evidence.json'), 'utf8')); }
+    catch (error) { if (error.code !== 'ENOENT') { report.evidence_read_failed = true; process.exitCode = 1; } }
+  }
+  if (lifecycle && !report.lifecycle) {
+    try { report.lifecycle = JSON.parse(readFileSync(join(dir, 'lifecycle-evidence.json'), 'utf8')); }
     catch (error) { if (error.code !== 'ENOENT') { report.evidence_read_failed = true; process.exitCode = 1; } }
   }
   if (started) {

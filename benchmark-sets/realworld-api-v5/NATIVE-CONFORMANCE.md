@@ -25,7 +25,7 @@ raw native API authorization.
 Regression command (no real services):
 
 ```sh
-node --test test/native_conformance_v5_test.mjs test/realworld_api_v5_test.mjs
+node --test test/native_conformance_v5_test.mjs test/native_lifecycle_v5_test.mjs test/realworld_api_v5_test.mjs
 ```
 
 ## Disposable TrailBase probe
@@ -125,6 +125,43 @@ into automatic admission evidence.
 Failed findings retain only an allowlisted error type, a valid HTTP status when
 available, and a cleanup-failure count. Native messages, URLs, credentials, and
 unknown error names are discarded. These diagnostics do not change acceptance.
+
+## Reduced-fixture lifecycle diagnostic
+
+With explicit local-integration authorization, run sequentially with the same
+owned stacks, pins, bounds and cleanup as the other probes:
+
+```sh
+.runtime/conformance-v5/node-v22.23.1-darwin-arm64/bin/node test/native_v5_trailbase_probe.mjs --local-lifecycle
+# Only after TrailBase cleanup:
+.runtime/conformance-v5/node-v22.23.1-darwin-arm64/bin/node test/native_v5_supabase_probe.mjs --local-lifecycle
+```
+
+This imports a relationship-closed subset of the established seed-42 fixture:
+50 established actors and their projects/tasks/comments, all required application
+users/memberships, and at most one existing activity per selected project. Every
+included application user receives a native Auth account. It does **not** seed or
+claim the million-record fixture again. Source subset hashes/counts and private
+native baseline digests are retained in `lifecycle-evidence.json`.
+
+Two cycles exercise acknowledged complete subset application/Auth restoration,
+baseline digest verification, bounded fresh-session preparation, and the same
+120-second/50-user warm-up. The V5-owned copy of the logical workflows retains the
+approved weights, global-user seed derivation, think times, page sizes and
+five-second API deadlines; it does not import the V4 workload runner/controller.
+A failed phase prevents stage entry without a retry. Peers drain before cleanup;
+all opened sessions are closed, preserving primary and cleanup failures.
+
+The stage-entry assertion reuses the warmed sessions, verifies actor/task access,
+and compares full application digests to prove warm-up writes survived without
+an intervening reset or write. **It is not a timed measurement or capacity stage.**
+No throughput/latency/capacity results are emitted. The shared phase helper also
+requires successful session preparation and explicit warm-up success on the
+conformance-gated measured-stage path. Report `admission_evidence` and
+`measurement_qualified` remain false. Native adversarial/declared-scale reports
+cannot be pooled with this diagnostic to admit a case. Actual declared-scale,
+multicore/timed-stage integration, telemetry/headroom and evidence review remain
+outstanding, and both V5 CLI guards remain unchanged.
 
 ## Diagnostic source provenance
 

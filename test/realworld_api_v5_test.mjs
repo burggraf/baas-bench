@@ -159,15 +159,20 @@ test('V5 resets and repeats identical warm-up before every measured stage', asyn
   assert.equal(incomplete.findings.length, REQUIRED_CHECKS.length);
   const conformance = await runConformance(Object.fromEntries(REQUIRED_CHECKS.map(name => [name, async () => true])));
   const calls = [];
-  const hooks = { conformance, async reset() { calls.push('reset'); }, async verifyBaseline() { calls.push('verify'); return true; }, async warmUp() { calls.push('same-warm-up'); }, async measure(stage) { calls.push(stage); return stage; } };
+  const hooks = { conformance, async reset() { calls.push('reset'); }, async verifyBaseline() { calls.push('verify'); return true; }, async prepareSessions() { calls.push('prepare'); return true; }, async warmUp() { calls.push('same-warm-up'); return true; }, async measure(stage) { calls.push(stage); return stage; } };
   await runStageFromBaseline({ ...hooks, stage: 100 });
   await runStageFromBaseline({ ...hooks, stage: 106 });
-  assert.deepEqual(calls, ['reset','verify','same-warm-up',100,'reset','verify','same-warm-up',106]);
+  assert.deepEqual(calls, ['reset','verify','prepare','same-warm-up',100,'reset','verify','prepare','same-warm-up',106]);
   calls.length = 0;
   await assert.rejects(runStageFromBaseline({ ...hooks, async reset() { throw new Error('restore failed'); }, stage: 200 }), /restore failed/);
   assert.deepEqual(calls, []);
   await assert.rejects(runStageFromBaseline({ ...hooks, async verifyBaseline() { return false; }, stage: 200 }), /baseline verification failed/);
   assert.deepEqual(calls, ['reset']);
+  for (const phase of ['prepareSessions', 'warmUp']) {
+    calls.length = 0;
+    await assert.rejects(runStageFromBaseline({ ...hooks, [phase]: async () => false, stage: 200 }), /failed/);
+    assert.equal(calls.includes(200), false);
+  }
 });
 
 test('V5 cannot measure without the stronger mandatory conformance checks', async () => {
