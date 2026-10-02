@@ -110,6 +110,29 @@ The reports retain `admission_evidence: false` and `measurement_qualified: false
 both CLI guards remain unchanged. No Linode
 resources were provisioned and no comparative/publication authorization was used.
 
+## Expanded native integrity and Unicode probes
+
+After commit `d691343de5730e00d8eb0c12ea6f721c94cb6ae0`, both existing small
+synthetic native probes were rerun sequentially under exact Node 22.23.1 from a
+clean source tree. Their manifest SHA-256 was
+`05452531168ed185e1781a219616b65bcec271eff54f936d498718b476b3dda0`.
+
+- TrailBase: `.runtime/conformance-v5/trailbase-OFDcfW/report.json`
+- Supabase: `.runtime/conformance-v5/supabase-ctxZPi/report.json`
+
+Both reported `local_checks_passed: true` and owned cleanup success. The expanded
+raw-write tests passed valid task/comment controls plus malformed value and
+cross-tenant relationship rejection without partial application/activity rows.
+Search passed composed-accent upper-case matches, CJK literal matching, and the
+decomposed canonical-sequence nonmatch. The synthetic report correctly keeps
+`fixture-integrity` and `reset-baseline` false/missing, so these probes remain
+unqualified and do not replace declared-scale or reset evidence. Observed settings
+remain TrailBase WAL/synchronous=1/foreign keys enabled and Supabase
+fsync/synchronous-commit/full-page-writes on; process-restart results are not
+power-loss durability. The TrailBase restart check emitted a transient connection
+refusal while its owned process restarted, then passed the bounded readiness and
+reread assertions. Reports retain `qualified: false`; no V5 CLI guard changed.
+
 ## Remaining gates
 
 - Promote the private native probes into maintainable committed conformance procedures and bind their verified evidence to V5 run admission/publication. Current private reports and mocked/in-memory tests are not admission evidence.

@@ -324,8 +324,11 @@ folding or canonical normalization. The probe reports actual pinned native
 behavior; qualification must disclose the backend locale and all results. A new
 fixture row also participates in pagination and the explicit-unassigned filter.
 
-The expanded probes have not yet been executed on native stacks. Existing results
-must not be interpreted as covering these new inputs.
+The expanded probes passed on the disposable TrailBase and Supabase stacks at
+clean source commit `d691343de5730e00d8eb0c12ea6f721c94cb6ae0`; see
+[the private local run record](LOCAL-CONFORMANCE.md#expanded-native-integrity-and-unicode-probes).
+This validates only the implemented synthetic assertions. `fixture-integrity`
+and `reset-baseline` are still false/missing, and no admission follows.
 
 ## Diagnostic source provenance
 
