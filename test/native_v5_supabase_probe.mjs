@@ -11,13 +11,13 @@ import { createSupabaseAdapter } from '../benchmark-sets/realworld-api-v5/shared
 import { runNativeConformance } from '../benchmark-sets/realworld-api-v5/shared/lib/native-conformance.mjs';
 import { runSupabaseScaleProbe } from './native_v5_supabase_scale.mjs';
 import { runNativeLifecycleProbe } from './native_v5_lifecycle.mjs';
-import { nativeProbeProvenance, nativeSourceManifest, pinnedNodeVersion } from './native_v5_provenance.mjs';
+import { nativeProbeProvenance, nativeSourceManifest, pinnedNodeVersion, nativeProbeMode } from './native_v5_provenance.mjs';
 
-if (process.argv.length !== 3 || !['--local-disposable', '--local-declared-scale', '--local-lifecycle'].includes(process.argv[2])) {
-  console.error('usage: node test/native_v5_supabase_probe.mjs {--local-disposable|--local-declared-scale|--local-lifecycle}'); process.exit(2);
+let mode;
+try { mode = nativeProbeMode(process.argv.slice(2)); } catch {
+  console.error('usage: node test/native_v5_supabase_probe.mjs {--local-disposable|--local-declared-scale|--local-lifecycle|--local-timed-stage}'); process.exit(2);
 }
-const scale = process.argv[2] === '--local-declared-scale';
-const lifecycle = process.argv[2] === '--local-lifecycle';
+const { scale, lifecycle, parallel } = mode;
 const root = fileURLToPath(new URL('../', import.meta.url));
 const runtime = join(root, '.runtime/conformance-v5');
 const shared = join(root, 'benchmark-sets/realworld-api-v5/shared');
@@ -31,7 +31,7 @@ const configPath = join(dir, 'compose.json');
 const compose = ['compose', '-p', project, '--project-directory', source, '-f', configPath];
 const quote = value => `'${String(value).replaceAll("'", "''")}'`;
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
-const report = { scope: lifecycle ? 'reduced-fixture-lifecycle-diagnostic' : scale ? 'declared-scale-conformance-not-measurement' : 'synthetic-native-probe-not-qualification', platform: 'supabase', started_at: new Date().toISOString(), linode_spend_usd: 0, cleanup: false };
+const report = { scope: parallel ? 'reduced-fixture-timed-stage-diagnostic' : lifecycle ? 'reduced-fixture-lifecycle-diagnostic' : scale ? 'declared-scale-conformance-not-measurement' : 'synthetic-native-probe-not-qualification', platform: 'supabase', started_at: new Date().toISOString(), linode_spend_usd: 0, cleanup: false };
 let started = false, base, anon, service, sessions;
 function command(executable, args, options = {}) {
   const result = spawnSync(executable, args, { encoding: 'utf8', timeout: 180_000, maxBuffer: 16 * 1024 * 1024, ...options });
@@ -117,7 +117,7 @@ async function main() {
   }
   if (lifecycle) {
     report.phase = 'lifecycle';
-    report.lifecycle = await runNativeLifecycleProbe({ platform: 'supabase', dir, execute: async query => sql(query),
+    report.lifecycle = await runNativeLifecycleProbe({ platform: 'supabase', dir, parallel, workerOptions: { platform: 'supabase', url: base, key: anon }, execute: async query => sql(query),
       rows: async query => sql(`SELECT row_to_json(r) FROM (${query}) r`).trim().split('\n').filter(Boolean).map(line => Object.values(JSON.parse(line))),
       backend: createSupabaseAdapter({ sdkCreateClient: createClient, url: base, key: anon, timeoutMs: 5000 }),
       async createUser(email, password) {

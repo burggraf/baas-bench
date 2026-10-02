@@ -276,6 +276,36 @@ passing telemetry. Service-free parser/failure regressions do not contact Docker
 node --test test/backend_telemetry_v5_test.mjs test/parallel_stage_v5_test.mjs
 ```
 
+## Disposable native timed-stage diagnostic
+
+Both existing disposable drivers additionally accept `--local-timed-stage`.
+It uses the same closed lifecycle fixture (not a new benchmark dataset or the
+million-record dataset), two application/native-Auth restoration cycles, three
+real workload processes, exactly 50 warm-up actors for 120 seconds, and a
+300-second measured window with retained warm sessions/cursors in each cycle.
+Shard preparation remains serial. The local worker factory enforces the exact
+Node/SDK pins, explicit loopback endpoints, anonymous Supabase keys, and no
+TrailBase admin key. Only the parent holds reset/admin access.
+
+The diagnostic enters through `runParallelLifecycleDiagnostic`, **not** a forged
+passing mandatory-conformance report. Warm writes must exist before measurement,
+delivered samples must equal pooled attempted counts, actors must remain achieved,
+and balanced-load operations must succeed. Private lifecycle evidence retains
+operation counts and process telemetry, not throughput/latency rankings. It still
+reports `admission_evidence: false` and `measurement_qualified: false`: the reduced
+fixture, local HTTP topology, and missing separate Linux backend telemetry cannot
+qualify the declared profile. The normal measured helper and CLI guards are
+unchanged. Run sequentially, never alongside another disposable stack:
+
+```sh
+node test/native_v5_trailbase_probe.mjs --local-timed-stage
+node test/native_v5_supabase_probe.mjs --local-timed-stage
+```
+
+These commands are opt-in native probes, not repository regression tests. No
+successful timed native report is claimed until a frozen-revision probe finishes
+and its owned cleanup/provenance are inspected.
+
 ## Diagnostic source provenance
 
 New attempts record the starting Git commit, dirty-worktree flag, actual Node

@@ -1,6 +1,6 @@
 import { fork } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { assertConformance, runStageFromBaseline } from './conformance.mjs';
+import { assertConformance, runStageFromBaseline, runBaselinePhases } from './conformance.mjs';
 import { WARMUP, WORKFLOW_WEIGHTS } from './warmup.mjs';
 import { stageDurationMs } from './timed-stage.mjs';
 import { StageMetricsAccumulator } from './metrics.mjs';
@@ -15,13 +15,24 @@ const deferred = () => {
 };
 
 // Candidate framework. Backend host/container and reviewed admission are still required.
-export async function runParallelStageFromBaseline({ conformance, reset, verifyBaseline, users, requestedUsers, backendModule, backendOptions = {},
-  durationMs = stageDurationMs(requestedUsers), warmupMs = WARMUP.durationMs, startDelayMs = 1500, diagnostic = false, signal, onSample = () => {}, backendTelemetryFactory, backendOwnership }) {
-  assertConformance(conformance);
+export async function runParallelStageFromBaseline(options) {
+  assertConformance(options.conformance);
+  return runParallelPhases(options, true);
+}
+
+// Explicit diagnostic entry point: no manufactured conformance finding or admission.
+export async function runParallelLifecycleDiagnostic(options) {
+  if (options.diagnostic !== true) throw new Error('explicit diagnostic mode required');
+  return runParallelPhases(options, false);
+}
+
+async function runParallelPhases({ conformance, reset, verifyBaseline, users, requestedUsers, backendModule, backendOptions = {},
+  durationMs = stageDurationMs(requestedUsers), warmupMs = WARMUP.durationMs, startDelayMs = 1500, diagnostic = false, signal, onSample = () => {}, backendTelemetryFactory, backendOwnership, onWarmupComplete = () => {} }, guarded) {
   if (signal?.aborted) throw new Error('parallel stage cancelled');
   const count = Math.max(requestedUsers, WARMUP.users);
   if (!Number.isSafeInteger(requestedUsers) || requestedUsers < 1 || requestedUsers > 10000 || !Array.isArray(users) || users.length !== count || typeof backendModule !== 'string' || !backendModule.startsWith('file:') || !Number.isSafeInteger(durationMs) || durationMs < 1 || !Number.isSafeInteger(warmupMs) || warmupMs < 1 || !Number.isSafeInteger(startDelayMs) || startDelayMs < 25 || startDelayMs > 10000 || typeof onSample !== 'function') throw new Error('invalid parallel stage');
   if (!diagnostic && (durationMs !== stageDurationMs(requestedUsers) || warmupMs !== WARMUP.durationMs || startDelayMs !== 1500)) throw new Error('non-profile durations require diagnostic mode');
+  if (typeof onWarmupComplete !== 'function') throw new Error('invalid warm-up observation hook');
   if (backendTelemetryFactory !== undefined && (typeof backendTelemetryFactory !== 'function' || !backendOwnership)) throw new Error('backend telemetry ownership required');
   if (backendTelemetryFactory) validateBackendOwnership(backendOwnership.containerIds, backendOwnership.project);
   const workers = [], failure = deferred(), accumulator = new StageMetricsAccumulator({ maxLatencySamples: 5000000 });
@@ -33,7 +44,8 @@ export async function runParallelStageFromBaseline({ conformance, reset, verifyB
   if (signal?.aborted) abort(); else signal?.addEventListener('abort', abort, { once: true });
   let coordinator, backendSampler, primaryFailure;
   try {
-    return await runStageFromBaseline({ conformance, reset, verifyBaseline, stage: requestedUsers, signal,
+    const runPhases = guarded ? runStageFromBaseline : hooks => runBaselinePhases({ ...hooks, enterStage: hooks.measure });
+    return await runPhases({ conformance, reset, verifyBaseline, stage: requestedUsers, signal,
       async prepareSessions() {
         for (let index = 0; index < 3; index++) {
           const offset = Math.floor(index * count / 3), end = Math.floor((index + 1) * count / 3);
@@ -68,7 +80,8 @@ export async function runParallelStageFromBaseline({ conformance, reset, verifyB
         await barrier(Promise.all(workers.map(worker => send(worker, { type: 'warmup', startAt, durationMs: warmupMs }))));
         const results = await barrier(Promise.all(workers.map(worker => worker.warmed.promise)));
         if (results.reduce((sum, row) => sum + row.users, 0) !== WARMUP.users) throw new Error('warm-up cohort mismatch');
-        if (!diagnostic && Object.keys(WORKFLOW_WEIGHTS).some(name => results.reduce((sum, row) => sum + (row.names?.[name === 'signIn' ? 'signOutIn' : name] ?? 0), 0) === 0)) throw new Error('warm-up coverage incomplete');
+        if (warmupMs === WARMUP.durationMs && Object.keys(WORKFLOW_WEIGHTS).some(name => results.reduce((sum, row) => sum + (row.names?.[name === 'signIn' ? 'signOutIn' : name] ?? 0), 0) === 0)) throw new Error('warm-up coverage incomplete');
+        await onWarmupComplete();
         return true;
       },
       async measure() {

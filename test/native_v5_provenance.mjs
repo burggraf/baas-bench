@@ -4,6 +4,11 @@ import { readdirSync, readFileSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
+export function nativeProbeMode(args) {
+  if (!Array.isArray(args) || args.length !== 1 || !['--local-disposable', '--local-declared-scale', '--local-lifecycle', '--local-timed-stage'].includes(args[0])) throw new Error('invalid native probe mode');
+  return { scale: args[0] === '--local-declared-scale', lifecycle: ['--local-lifecycle', '--local-timed-stage'].includes(args[0]), parallel: args[0] === '--local-timed-stage' };
+}
+
 export function nativeSourceManifest(root) {
   const paths = ['versions.env', 'bin/baas', 'benchmark-sets/realworld-api-v4/shared/lib/admin/trailbase-bootstrap.mjs', '.runtime/conformance-v5/sdk/package-lock.json'];
   const pending = ['benchmark-sets/realworld-api-v5'];

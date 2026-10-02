@@ -11,14 +11,14 @@ import { runNativeConformance } from '../benchmark-sets/realworld-api-v5/shared/
 import { parseBootstrapCredentials } from '../benchmark-sets/realworld-api-v4/shared/lib/admin/trailbase-bootstrap.mjs';
 import { runTrailBaseScaleProbe, SCALE_SNAPSHOT_MIGRATION } from './native_v5_trailbase_scale.mjs';
 import { runNativeLifecycleProbe } from './native_v5_lifecycle.mjs';
-import { nativeProbeProvenance, nativeSourceManifest, pinnedNodeVersion } from './native_v5_provenance.mjs';
+import { nativeProbeProvenance, nativeSourceManifest, pinnedNodeVersion, nativeProbeMode } from './native_v5_provenance.mjs';
 
-if (process.argv.length !== 3 || !['--local-disposable', '--local-declared-scale', '--local-lifecycle'].includes(process.argv[2])) {
-  console.error('usage: node test/native_v5_trailbase_probe.mjs {--local-disposable|--local-declared-scale|--local-lifecycle}');
+let mode;
+try { mode = nativeProbeMode(process.argv.slice(2)); } catch {
+  console.error('usage: node test/native_v5_trailbase_probe.mjs {--local-disposable|--local-declared-scale|--local-lifecycle|--local-timed-stage}');
   process.exit(2);
 }
-const scale = process.argv[2] === '--local-declared-scale';
-const lifecycle = process.argv[2] === '--local-lifecycle';
+const { scale, lifecycle, parallel } = mode;
 const root = fileURLToPath(new URL('../', import.meta.url));
 const shared = join(root, 'benchmark-sets/realworld-api-v5/shared');
 const runtime = join(root, '.runtime/conformance-v5');
@@ -33,7 +33,7 @@ const { initClient } = await import(require.resolve('trailbase'));
 const quote = value => `'${String(value).replaceAll("'", "''")}'`;
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 let started = false, admin, base, sessions;
-const report = { scope: lifecycle ? 'reduced-fixture-lifecycle-diagnostic' : scale ? 'declared-scale-conformance-not-measurement' : 'synthetic-native-probe-not-qualification', platform: 'trailbase', image, started_at: new Date().toISOString(), linode_spend_usd: 0, cleanup: false };
+const report = { scope: parallel ? 'reduced-fixture-timed-stage-diagnostic' : lifecycle ? 'reduced-fixture-lifecycle-diagnostic' : scale ? 'declared-scale-conformance-not-measurement' : 'synthetic-native-probe-not-qualification', platform: 'trailbase', image, started_at: new Date().toISOString(), linode_spend_usd: 0, cleanup: false };
 function docker(args) {
   const result = spawnSync('docker', args, { encoding: 'utf8', timeout: 90_000, maxBuffer: 4 * 1024 * 1024 });
   if (result.status !== 0) throw new Error(`owned Docker ${args[0]} failed`);
@@ -95,7 +95,7 @@ async function main() {
   }
   if (lifecycle) {
     report.phase = 'lifecycle';
-    report.lifecycle = await runNativeLifecycleProbe({ platform: 'trailbase', dir, execute: query, rows: query,
+    report.lifecycle = await runNativeLifecycleProbe({ platform: 'trailbase', dir, parallel, workerOptions: { platform: 'trailbase', url: base }, execute: query, rows: query,
       backend: createTrailBaseAdapter({ initClient, endpoint: base, timeoutMs: 5000 }),
       async renewAdmin() { admin = initClient(base); await admin.login(creds.email, creds.password); },
       async createUser(email, password) {

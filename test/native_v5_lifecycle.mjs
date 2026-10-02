@@ -7,6 +7,7 @@ import { buildVirtualUserSpecs, entityId } from '../benchmark-sets/realworld-api
 import { runBaselinePhases } from '../benchmark-sets/realworld-api-v5/shared/lib/conformance.mjs';
 import { prepareWarmupContexts, runWarmup, WARMUP } from '../benchmark-sets/realworld-api-v5/shared/lib/warmup.mjs';
 import { closeNativeSessions } from '../benchmark-sets/realworld-api-v5/shared/lib/native-conformance.mjs';
+import { runParallelLifecycleDiagnostic } from '../benchmark-sets/realworld-api-v5/shared/lib/parallel-stage.mjs';
 import { classifyOperationError } from '../benchmark-sets/realworld-api-v5/shared/lib/correctness.mjs';
 import { restoreSupabaseScaleSQL } from './native_v5_supabase_scale.mjs';
 import { restoreTrailBaseScaleBaseline } from './native_v5_trailbase_scale.mjs';
@@ -43,11 +44,11 @@ export async function lifecycleFixture() {
   return { specs, rows };
 }
 
-export async function runNativeLifecycleProbe({ platform, execute, rows: queryRows, createUser, backend, renewAdmin, dir }) {
+export async function runNativeLifecycleProbe({ platform, execute, rows: queryRows, createUser, backend, renewAdmin, dir, parallel = false, workerOptions }) {
   assert.ok(['supabase', 'trailbase'].includes(platform));
   const postgres = platform === 'supabase', prefix = postgres ? 'public.' : '', id = postgres ? 'id' : 'external_id';
   const fixture = await lifecycleFixture();
-  const evidence = { passed: false, scope: 'reduced-fixture-lifecycle-diagnostic', admission_evidence: false, measurement_qualified: false,
+  const evidence = { passed: false, scope: parallel ? 'reduced-fixture-timed-stage-diagnostic' : 'reduced-fixture-lifecycle-diagnostic', admission_evidence: false, measurement_qualified: false,
     warmup: WARMUP, session_preparation_concurrency: 1, fixture: Object.fromEntries(tables.map(table => [table, { count: fixture.rows[table].length, sha256: digest(fixture.rows[table]) }])), cycles: [] };
   const save = phase => {
     evidence.phase = phase;
@@ -91,7 +92,7 @@ export async function runNativeLifecycleProbe({ platform, execute, rows: queryRo
     const contexts = [];
     let failure;
     try {
-      await runBaselinePhases({
+      const baselineHooks = {
         async reset() { save(`reset-${cycle}`); await restore(); },
         async verifyBaseline() {
           save(`verify-${cycle}`);
@@ -99,6 +100,29 @@ export async function runNativeLifecycleProbe({ platform, execute, rows: queryRo
           assert.equal(await authState(), authBaseline);
           return true;
         },
+      };
+      if (parallel) {
+        save(`parallel-${cycle}`);
+        const result = await runParallelLifecycleDiagnostic({ ...baselineHooks, diagnostic: true, users: fixture.specs, requestedUsers: WARMUP.users,
+          backendModule: new URL('./native_v5_worker_backend.mjs', import.meta.url).href, backendOptions: workerOptions,
+          async onWarmupComplete() {
+            save(`warm-state-${cycle}`);
+            assert.notDeepEqual(await applicationState(), baseline, 'warm-up writes must be retained before measurement');
+            save(`measurement-${cycle}`);
+          } });
+        const counts = Object.values(result.metrics.operations).map(row => ({ type: row.type, name: row.name, workflow: row.workflow, attempted: row.attemptedCount, completed: row.completedCount, failed: row.failedCount }));
+        const delivered = result.workers.reduce((sum, worker) => sum + worker.samples, 0);
+        assert.equal(counts.reduce((sum, row) => sum + row.attempted, 0), delivered, 'every delivered native/workflow sample must be accounted for');
+        evidence.cycles.push({ cycle, baseline_restored: true, native_auth_restored: true, warm_state_retained: true, timed_window_completed: true,
+          users: result.metrics.requestedUsers, achieved_users: result.metrics.achievedUsers, start_at_ms: result.startAt, end_at_ms: result.endedAt,
+          operation_counts: counts, delivered_samples: delivered, process_telemetry: result.telemetry, worker_telemetry: result.workers,
+          backend_telemetry: result.backendTelemetry, measurement_qualified: false, admission_evidence: false });
+        save(`timed-window-${cycle}`);
+        assert.equal(result.metrics.achievedUsers, WARMUP.users);
+        assert.ok(counts.every(row => row.failed === 0), 'balanced-load native diagnostic requires successful operations');
+        assert.notDeepEqual(await applicationState(), baseline, 'measurement must not restore the baseline');
+      } else await runBaselinePhases({
+        ...baselineHooks,
         async prepareSessions() { save(`prepare-${cycle}`); return prepareWarmupContexts(backend, fixture.specs, contexts, { concurrency: 1 }); },
         async warmUp() {
           save(`warm-up-${cycle}`);

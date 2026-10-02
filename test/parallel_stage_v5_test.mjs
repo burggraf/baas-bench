@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { runParallelStageFromBaseline } from '../benchmark-sets/realworld-api-v5/shared/lib/parallel-stage.mjs';
+import { runParallelStageFromBaseline, runParallelLifecycleDiagnostic } from '../benchmark-sets/realworld-api-v5/shared/lib/parallel-stage.mjs';
 import { REQUIRED_CHECKS } from '../benchmark-sets/realworld-api-v5/shared/lib/conformance.mjs';
 import { buildVirtualUserSpecs } from '../benchmark-sets/realworld-api-v5/shared/lib/dataset.mjs';
 
@@ -55,6 +55,17 @@ test('V5 worker/collector failures abort barriers and terminate every owned proc
       assertExited(rows);
     } finally { rmSync(dir, { recursive: true, force: true }); }
   }
+});
+
+test('V5 parallel lifecycle diagnostics never fabricate passing conformance findings', async () => {
+  const { conformance: _unused, ...options } = config();
+  let warmed = false;
+  const result = await runParallelLifecycleDiagnostic({ ...options, onWarmupComplete: async () => { warmed = true; } });
+  assert.equal(warmed, true);
+  assert.equal(result.admission_evidence, false);
+  assert.equal(result.measurement_qualified, false);
+  assertExited(result.workers);
+  await assert.rejects(runParallelLifecycleDiagnostic({ ...options, diagnostic: false }), /diagnostic/);
 });
 
 test('V5 backend telemetry factory is stopped before cleanup and cannot admit a stage', async () => {
