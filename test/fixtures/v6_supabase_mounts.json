@@ -1,0 +1,118 @@
+{
+  "upstream_ref": "e693f206f5050b0004a86e12e533bb75ba2a9c76",
+  "upstream_compose_sha256": "8ba18fd43e9afba90e8287c8e8afc4bdda1e38d2228e57ff660968bb550da054",
+  "binds": [
+    {
+      "service": "api-gw",
+      "type": "bind",
+      "source": "volumes/api/envoy/envoy.yaml",
+      "target": "/etc/envoy/envoy.yaml",
+      "read_only": true
+    },
+    {
+      "service": "api-gw",
+      "type": "bind",
+      "source": "volumes/api/envoy/cds.yaml",
+      "target": "/etc/envoy/cds.yaml",
+      "read_only": true
+    },
+    {
+      "service": "api-gw",
+      "type": "bind",
+      "source": "volumes/api/envoy/lds.template.yaml",
+      "target": "/etc/envoy/lds.template.yaml",
+      "read_only": true
+    },
+    {
+      "service": "api-gw",
+      "type": "bind",
+      "source": "volumes/api/envoy/docker-entrypoint.sh",
+      "target": "/docker-entrypoint.sh",
+      "read_only": true
+    },
+    {
+      "service": "db",
+      "type": "bind",
+      "source": "volumes/db/realtime.sql",
+      "target": "/docker-entrypoint-initdb.d/migrations/99-realtime.sql",
+      "read_only": false
+    },
+    {
+      "service": "db",
+      "type": "bind",
+      "source": "volumes/db/webhooks.sql",
+      "target": "/docker-entrypoint-initdb.d/init-scripts/98-webhooks.sql",
+      "read_only": false
+    },
+    {
+      "service": "db",
+      "type": "bind",
+      "source": "volumes/db/roles.sql",
+      "target": "/docker-entrypoint-initdb.d/init-scripts/99-roles.sql",
+      "read_only": false
+    },
+    {
+      "service": "db",
+      "type": "bind",
+      "source": "volumes/db/jwt.sql",
+      "target": "/docker-entrypoint-initdb.d/init-scripts/99-jwt.sql",
+      "read_only": false
+    },
+    {
+      "service": "db",
+      "type": "bind",
+      "source": "volumes/db/data",
+      "target": "/var/lib/postgresql/data",
+      "read_only": false
+    },
+    {
+      "service": "db",
+      "type": "bind",
+      "source": "volumes/db/_supabase.sql",
+      "target": "/docker-entrypoint-initdb.d/migrations/97-_supabase.sql",
+      "read_only": false
+    },
+    {
+      "service": "db",
+      "type": "bind",
+      "source": "volumes/db/logs.sql",
+      "target": "/docker-entrypoint-initdb.d/migrations/99-logs.sql",
+      "read_only": false
+    },
+    {
+      "service": "db",
+      "type": "bind",
+      "source": "volumes/db/pooler.sql",
+      "target": "/docker-entrypoint-initdb.d/migrations/99-pooler.sql",
+      "read_only": false
+    },
+    {
+      "service": "functions",
+      "type": "bind",
+      "source": "volumes/functions",
+      "target": "/home/deno/functions",
+      "read_only": false
+    },
+    {
+      "service": "studio",
+      "type": "bind",
+      "source": "volumes/snippets",
+      "target": "/app/snippets",
+      "read_only": false
+    },
+    {
+      "service": "studio",
+      "type": "bind",
+      "source": "volumes/functions",
+      "target": "/app/edge-functions",
+      "read_only": true
+    },
+    {
+      "service": "supavisor",
+      "type": "bind",
+      "source": "volumes/pooler/pooler.exs",
+      "target": "/etc/pooler/pooler.exs",
+      "read_only": true
+    }
+  ]
+}

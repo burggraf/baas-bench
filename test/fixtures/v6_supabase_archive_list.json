@@ -1,0 +1,5 @@
+{
+  "source": "Read-only pg_restore listing of actual private V6 Supabase archive; all unrelated TOC entries omitted",
+  "withoutCreate": ";     dbname: postgres\n",
+  "withCreate": ";     dbname: postgres\n4572; 1262 5 DATABASE - postgres postgres\n4573; 0 0 COMMENT - DATABASE postgres postgres\n4574; 0 0 ACL - DATABASE postgres postgres\n4575; 0 0 DATABASE PROPERTIES - postgres postgres\n"
+}

@@ -1,0 +1,4 @@
+email: {}
+server: { application_name: "BaaS Bench V5" }
+auth: {}
+jobs: {}
